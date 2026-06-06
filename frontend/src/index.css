@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  @apply box-border;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-background text-text-primary font-body;
+}
+
+/* Utility classes */
+.badge-live {
+  @apply inline-block px-3 py-1 bg-danger text-white rounded-full text-xs font-bold animate-pulse;
+}
+
+.badge-gold {
+  @apply inline-block px-3 py-1 bg-accent-gold text-black rounded-full text-xs font-bold;
+}
+
+.icon-warning {
+  @apply inline-block text-warning mr-1;
+}
+
+/* Tabular numbers for stats */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Smooth transitions */
+.transition-smooth {
+  @apply transition-all duration-300 ease-in-out;
+}

@@ -1,0 +1,6 @@
+# Models directory — place pre-trained .pt files here
+# - yolo_detector.pt
+# - yolo_pose.pt
+# - court_keypoints.pt
+# - action_classifier.pt
+# - jersey_number.pt

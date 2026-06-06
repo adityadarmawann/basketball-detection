@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /home/iot/Documents/vision-computer/campus-league/sport-detection/basketball/node_modules/ 2>/dev/null | head -20 && echo \"---\" && ls /home/iot/Documents/vision-computer/campus-league/sport-detection/basketball/node_modules/@types/ 2>/dev/null | head -20)",
+      "Read(//home/iot/Documents/vision-computer/campus-league/sport-detection/basketball/node_modules/**)",
+      "Read(//home/iot/Documents/vision-computer/campus-league/sport-detection/basketball/node_modules/@types/**)",
+      "Bash(pkill -f \"vite --host\")",
+      "Bash(python3 -c ' *)"
+    ]
+  }
+}

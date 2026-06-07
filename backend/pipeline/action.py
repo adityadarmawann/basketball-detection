@@ -9,15 +9,14 @@ MODEL (when action_classifier.pt is present):
   Loads the temporal classifier and runs 16-frame inference per player.
   Falls back to rule-based if the file is missing or fails to load.
 
-8 action classes
-  0  Shoot/Release
+6 action classes (Plan B)
+  0  Shoot
   1  Pass
   2  Dribble
-  3  Block
-  4  Jump
-  5  Catch
-  6  Rebound_attempt
-  7  Steal/Reach_in
+  3  Catch
+  4  Steal
+  5  jump_action  ← model output; resolved to Jump | Rebound_attempt | Block
+                    by resolve_jump_action() after classification
 
 "Stand" (-1) is returned when no rule fires.
 """
@@ -38,14 +37,12 @@ MODEL_FILENAME = "action_best_v1.pt"
 
 # ── Action class registry ────────────────────────────────────────────────────
 ACTION_NAMES: dict[int, str] = {
-    0: "Shoot/Release",
+    0: "Shoot",
     1: "Pass",
     2: "Dribble",
-    3: "Block",
-    4: "Jump",
-    5: "Catch",
-    6: "Rebound_attempt",
-    7: "Steal/Reach_in",
+    3: "Catch",
+    4: "Steal",
+    5: "jump_action",   # raw model output — resolved by resolve_jump_action()
 }
 ACTION_IDS: dict[str, int] = {v: k for k, v in ACTION_NAMES.items()}
 STAND = "Stand"
@@ -127,12 +124,13 @@ class ActionClassifier:
         self._pass_fired: bool            = False
         self._pass_fired_countdown: int   = 0
         self._ball_near_hoop: bool        = False
+        self._last_ball_info: Optional[dict] = None  # cached for model-path resolve
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     def load_model(self) -> None:
         """
-        Load action_best_v1.pt (SlowFast-R50, 8 action classes).
+        Load action_best_v1.pt (SlowFast-R50, 6 action classes — Plan B).
         Requires pytorchvideo. Falls back to rule-based silently if unavailable.
         """
         path = Path(self.model_path)
@@ -274,6 +272,15 @@ class ActionClassifier:
                 track_id, player, pose_data, ball_info
             )
 
+            # Resolve merged jump_action → Block | Rebound_attempt | Jump
+            if action_str == "jump_action":
+                action_str = ActionClassifier.resolve_jump_action(
+                    player, ball_info,
+                    self._tracked_players,
+                    self._ball_direction_history,
+                )
+                # action_id stays 5 — preserves raw model class
+
             # Track proximity for CATCH detection next frame
             ball_center = ball_info.get("center") if ball_info else None
             if ball_center:
@@ -306,7 +313,8 @@ class ActionClassifier:
 
     def _update_state(self, tracked_players: list, ball_info: Optional[dict]) -> None:
         """Refresh ball velocity, player speeds, possession, and hoop proximity."""
-        self._tracked_players = tracked_players
+        self._tracked_players  = tracked_players
+        self._last_ball_info   = ball_info   # cached for model-path resolve_jump_action
 
         ball_center = ball_info.get("center") if ball_info else None
 
@@ -399,29 +407,21 @@ class ActionClassifier:
         ball_center = ball_info.get("center") if ball_info else None
         ball_prox   = _dist(player_center, ball_center) if ball_center else None
 
-        # ── 1. Shoot/Release (highest confidence — from pose.py) ────────────
+        # ── 1. Shoot (highest confidence — from pose.py) ────────────────────
         if pose_data and pose_data.get("is_shooting", False):
-            return "Shoot/Release", 0, SHOOT_CONFIDENCE
+            return "Shoot", 0, SHOOT_CONFIDENCE
 
-        # ── 2. Block ────────────────────────────────────────────────────────
-        if self._is_blocking(track_id, player_bbox):
-            return "Block", 3, RULE_CONFIDENCE
-
-        # ── 3. Steal/Reach-in ───────────────────────────────────────────────
+        # ── 2. Steal ────────────────────────────────────────────────────────
         if self._is_stealing(track_id, player):
-            return "Steal/Reach_in", 7, RULE_CONFIDENCE
+            return "Steal", 4, RULE_CONFIDENCE
 
-        # ── 4. Catch (ball arrived after pass) ─────────────────────────────
+        # ── 3. Catch (ball arrived after pass) ─────────────────────────────
         if ball_prox is not None and ball_prox < BALL_PROXIMITY_NEAR:
             was_near = self._prev_ball_near.get(track_id, False)
             if self._pass_fired and not was_near:
-                return "Catch", 5, RULE_CONFIDENCE
+                return "Catch", 3, RULE_CONFIDENCE
 
-        # ── 5. Rebound attempt ──────────────────────────────────────────────
-        if ball_prox is not None and ball_prox < BALL_PROXIMITY_FAR and self._ball_near_hoop:
-            return "Rebound_attempt", 6, RULE_CONFIDENCE
-
-        # ── 6. Pass ─────────────────────────────────────────────────────────
+        # ── 4. Pass ─────────────────────────────────────────────────────────
         # Use _prev_possession_id: player HAD ball last frame and threw it.
         if (
             self._prev_possession_id == track_id
@@ -430,14 +430,18 @@ class ActionClassifier:
         ):
             return "Pass", 1, RULE_CONFIDENCE
 
-        # ── 7. Dribble ──────────────────────────────────────────────────────
+        # ── 5. Dribble ──────────────────────────────────────────────────────
         if ball_prox is not None and ball_prox < BALL_PROXIMITY_NEAR:
             if self._player_speeds.get(track_id, 0.0) > PLAYER_SPEED_THRESHOLD:
                 return "Dribble", 2, RULE_CONFIDENCE
 
-        # ── 8. Jump ─────────────────────────────────────────────────────────
-        if pose_data and pose_data.get("jump_height_px", 0.0) > JUMP_HEIGHT_THRESHOLD:
-            return "Jump", 4, RULE_CONFIDENCE
+        # ── 6. jump_action — merges Block + Jump + Rebound ──────────────────
+        # resolve_jump_action() disambiguates after _rule_based() returns.
+        jump_h   = pose_data and pose_data.get("jump_height_px", 0.0) > JUMP_HEIGHT_THRESHOLD
+        is_reb   = ball_prox is not None and ball_prox < BALL_PROXIMITY_FAR and self._ball_near_hoop
+        is_block = self._is_blocking(track_id, player_bbox)
+        if jump_h or is_reb or is_block:
+            return "jump_action", 5, RULE_CONFIDENCE
 
         return STAND, -1, 0.5
 
@@ -553,8 +557,19 @@ class ActionClassifier:
                 })
                 continue
 
-            class_name          = self._idx_to_action.get(top1, STAND)
+            class_name            = self._idx_to_action.get(top1, STAND)
             action_str, action_id = self._map_class_name(class_name)
+
+            # Resolve merged jump_action → Block | Rebound_attempt | Jump
+            if action_str == "jump_action":
+                ball_info_ctx = getattr(self, "_last_ball_info", None)
+                action_str = ActionClassifier.resolve_jump_action(
+                    player, ball_info_ctx,
+                    self._tracked_players,
+                    self._ball_direction_history,
+                )
+                # action_id stays 5 — preserves raw model class
+
             actions.append({
                 "track_id":   track_id,
                 "action":     action_str,
@@ -605,16 +620,64 @@ class ActionClassifier:
     def _map_class_name(name: str) -> tuple[str, int]:
         """Map checkpoint class name (e.g. 'dribble') to ACTION_NAMES string + id."""
         _aliases: dict[str, tuple[str, int]] = {
-            "shoot":   ("Shoot/Release",    0),
-            "pass":    ("Pass",             1),
-            "dribble": ("Dribble",          2),
-            "block":   ("Block",            3),
-            "jump":    ("Jump",             4),
-            "catch":   ("Catch",            5),
-            "rebound": ("Rebound_attempt",  6),
-            "steal":   ("Steal/Reach_in",   7),
+            # 6-class Plan B primaries
+            "shoot":       ("Shoot",       0),
+            "pass":        ("Pass",        1),
+            "dribble":     ("Dribble",     2),
+            "catch":       ("Catch",       3),
+            "steal":       ("Steal",       4),
+            "jump_action": ("jump_action", 5),
+            # Legacy aliases — old checkpoint head names map to jump_action
+            "block":       ("jump_action", 5),
+            "jump":        ("jump_action", 5),
+            "rebound":     ("jump_action", 5),
         }
         return _aliases.get(name.lower(), (STAND, -1))
+
+    @staticmethod
+    def resolve_jump_action(
+        player:                dict,
+        ball_info:             Optional[dict],
+        all_players:           list,
+        ball_direction_history,
+    ) -> str:
+        """
+        Disambiguate jump_action (class 5) into one of:
+          'Block'            — ball reversed direction + opposing player bbox-overlaps
+          'Rebound_attempt'  — ball near hoop + player within rebound zone
+          'Jump'             — pure elevation (default)
+
+        action_id in the caller's output dict remains 5 to preserve the raw model class.
+        """
+        track_id      = player.get("track_id")
+        player_bbox   = player.get("bbox",   [0, 0, 0, 0])
+        player_center = player.get("center", [0, 0])
+        player_team   = player.get("team")
+
+        ball_near_hoop = (ball_info or {}).get("near_hoop", False)
+        ball_center    = (ball_info or {}).get("center")
+
+        # ── 1. Block: ball direction reversed + opposing player overlaps bbox ─
+        if len(ball_direction_history) >= 3:
+            hist  = list(ball_direction_history)
+            first, last = hist[0], hist[-1]
+            ball_reversed = first[0] * last[0] + first[1] * last[1] < 0.0
+            if ball_reversed:
+                for other in all_players:
+                    if other.get("track_id") == track_id:
+                        continue
+                    if other.get("team") == player_team:
+                        continue  # same team → not a block
+                    if _bbox_iou(player_bbox, other.get("bbox", [0, 0, 0, 0])) > BLOCK_IOU_THRESHOLD:
+                        return "Block"
+
+        # ── 2. Rebound: ball near hoop + player within rebound zone ──────────
+        if ball_near_hoop and ball_center:
+            if _dist(player_center, ball_center) < BALL_PROXIMITY_FAR:
+                return "Rebound_attempt"
+
+        # ── 3. Default: pure vertical jump ────────────────────────────────────
+        return "Jump"
 
     # ── Utilities ────────────────────────────────────────────────────────────
 
@@ -632,6 +695,7 @@ class ActionClassifier:
         self._pass_fired            = False
         self._pass_fired_countdown  = 0
         self._ball_near_hoop        = False
+        self._last_ball_info        = None
 
 
 # ── Factory ──────────────────────────────────────────────────────────────────
@@ -690,19 +754,19 @@ if __name__ == "__main__":
     print(f"  get_mode() = {ac_nopt.get_mode()!r} ✓")
     print(f"  is_model_loaded() = {ac_nopt.is_model_loaded()} ✓")
 
-    # ── 3. All 8 action classes — direct _rule_based() ──────────────────────
-    print("\n--- 3. All 8 action classes (rule_based) ---")
+    # ── 3. All 6 action classes — direct _rule_based() ──────────────────────
+    print("\n--- 3. All 6 action classes (rule_based) ---")
 
-    # 0  Shoot/Release
+    # 0  Shoot
     ac0 = fresh()
     a, i, c = ac0._rule_based(1, PLAYER, {"is_shooting": True, "jump_height_px": 0.0}, None)
-    check("SHOOT (pose.is_shooting=True)", a, i, "Shoot/Release", 0)
+    check("SHOOT (pose.is_shooting=True)", a, i, "Shoot", 0)
     assert c == SHOOT_CONFIDENCE
 
-    # 4  Jump (no other condition active)
+    # 5  jump_action from jump height (no other condition active)
     ac4 = fresh()
     a, i, c = ac4._rule_based(1, PLAYER, {"is_shooting": False, "jump_height_px": 20.0}, None)
-    check("JUMP  (height=20 > 15)", a, i, "Jump", 4)
+    check("JUMP  (height=20 > 15) → jump_action", a, i, "jump_action", 5)
     assert c == RULE_CONFIDENCE
 
     # 2  Dribble (ball near + player moving)
@@ -722,23 +786,23 @@ if __name__ == "__main__":
     a, i, c = ac1._rule_based(1, PLAYER, None, ball_right)
     check("PASS  (prev_possess + ball moving away)", a, i, "Pass", 1)
 
-    # 5  Catch (pass_fired + ball newly arrived)
+    # 3  Catch (pass_fired + ball newly arrived) — ID now 3 (was 5)
     ac5 = fresh()
     ac5._pass_fired = True
     ac5._prev_ball_near[1] = False     # ball was not near last frame
-    # No possession set, no direction history → BLOCK/STEAL skip
+    # No possession set, no direction history → STEAL skip
     a, i, c = ac5._rule_based(1, PLAYER, None, ball_near)
-    check("CATCH (pass_fired + ball arrives)", a, i, "Catch", 5)
+    check("CATCH (pass_fired + ball arrives)", a, i, "Catch", 3)
 
-    # 6  Rebound_attempt (ball near hoop, player within 150 px)
+    # 5  jump_action from rebound (ball near hoop + player within 150 px)
     ac6 = fresh()
     ac6._ball_near_hoop = True
     ac6._pass_fired = False
     ball_100px = {"center": [100, 250]}  # 100 px below player center (< 150)
     a, i, c = ac6._rule_based(1, PLAYER, None, ball_100px)
-    check("REBOUND (hoop + prox=100 < 150)", a, i, "Rebound_attempt", 6)
+    check("REBOUND → jump_action (hoop + prox=100)", a, i, "jump_action", 5)
 
-    # 3  Block (direction change + bbox overlap)
+    # 5  jump_action from block (direction change + bbox overlap)
     ac3 = fresh()
     overlapping = {"track_id": 2, "bbox": [60, 60, 140, 240], "center": [100, 150]}
     ac3._tracked_players = [PLAYER, overlapping]
@@ -746,23 +810,49 @@ if __name__ == "__main__":
     for v in [[0.0, 1.0], [0.0, 1.0], [0.0, -1.0]]:
         ac3._ball_direction_history.append(v)
     a, i, c = ac3._rule_based(1, PLAYER, None, None)
-    check("BLOCK (dir-change + bbox overlap)", a, i, "Block", 3)
+    check("BLOCK → jump_action (dir-change + overlap)", a, i, "jump_action", 5)
 
-    # 7  Steal/Reach_in (possession change + overlap)
+    # 4  Steal — ID now 4 (was 7), name now "Steal" (was "Steal/Reach_in")
     ac7 = fresh()
     other99 = {"track_id": 99, "bbox": [60, 60, 140, 240], "center": [100, 150]}
     ac7._tracked_players = [PLAYER, other99]
     ac7._prev_possession_id = 99   # player 99 had ball
     ac7._possession_id      = 1    # player 1 has it now
-    # No direction history → BLOCK won't fire; STEAL fires next
     a, i, c = ac7._rule_based(1, PLAYER, None, None)
-    check("STEAL (possession change + overlap)", a, i, "Steal/Reach_in", 7)
+    check("STEAL (possession change + overlap)", a, i, "Steal", 4)
 
     # Default  Stand
     ac_s = fresh()
     a, i, c = ac_s._rule_based(1, PLAYER, None, None)
     check("STAND (no conditions met)", a, i, STAND, -1)
     assert c == 0.5
+
+    # ── 3.5. resolve_jump_action() disambiguation ────────────────────────────
+    print("\n--- 3.5. resolve_jump_action() ---")
+    from collections import deque as _deque
+
+    # Block: ball direction reversed + opposing player bbox-overlaps
+    r_player = {"track_id": 1, "bbox": [50, 50, 150, 250], "center": [100, 150], "team": "A"}
+    r_opp    = {"track_id": 2, "bbox": [60, 60, 140, 240], "center": [100, 150], "team": "B"}
+    r_hist   = _deque([[0.0, 1.0], [0.0, 1.0], [0.0, -1.0]], maxlen=5)  # reversed
+    r_ball   = {"center": [105, 155], "near_hoop": False}
+    result = ActionClassifier.resolve_jump_action(r_player, r_ball, [r_player, r_opp], r_hist)
+    assert result == "Block", f"Expected Block, got {result!r}"
+    print(f"  Block: ball-reversed + opp-overlap → {result!r} ✓")
+
+    # Rebound: ball near hoop + player proximity (no direction reversal)
+    r_hist2  = _deque([[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]], maxlen=5)  # not reversed
+    r_ball2  = {"center": [130, 160], "near_hoop": True}
+    result2 = ActionClassifier.resolve_jump_action(r_player, r_ball2, [r_player], r_hist2)
+    assert result2 == "Rebound_attempt", f"Expected Rebound_attempt, got {result2!r}"
+    print(f"  Rebound: near-hoop + proximity → {result2!r} ✓")
+
+    # Default: pure jump (no reversal, no hoop)
+    r_hist3  = _deque([[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]], maxlen=5)
+    r_ball3  = {"center": [500, 400], "near_hoop": False}
+    result3 = ActionClassifier.resolve_jump_action(r_player, r_ball3, [r_player], r_hist3)
+    assert result3 == "Jump", f"Expected Jump, got {result3!r}"
+    print(f"  Jump: default (no ball-context) → {result3!r} ✓")
 
     # ── 4. classify() integration — actions list format ──────────────────────
     print("\n--- 4. classify() output format ---")
@@ -846,24 +936,27 @@ if __name__ == "__main__":
     assert ac_r._pass_fired is False
     print("  State cleared after reset() ✓")
 
-    # ── 8. _map_class_name covers all 8 classes ──────────────────────────────
+    # ── 8. _map_class_name covers 6 primaries + 3 legacy aliases ────────────
     print("\n--- 8. _map_class_name ---")
     expected = [
-        ("shoot",   "Shoot/Release",   0),
-        ("pass",    "Pass",            1),
-        ("dribble", "Dribble",         2),
-        ("block",   "Block",           3),
-        ("jump",    "Jump",            4),
-        ("catch",   "Catch",           5),
-        ("rebound", "Rebound_attempt", 6),
-        ("steal",   "Steal/Reach_in",  7),
+        # 6 Plan B primaries
+        ("shoot",       "Shoot",       0),
+        ("pass",        "Pass",        1),
+        ("dribble",     "Dribble",     2),
+        ("catch",       "Catch",       3),
+        ("steal",       "Steal",       4),
+        ("jump_action", "jump_action", 5),
+        # 3 legacy aliases (old checkpoint head names → jump_action)
+        ("block",       "jump_action", 5),
+        ("jump",        "jump_action", 5),
+        ("rebound",     "jump_action", 5),
     ]
     for raw, exp_str, exp_id in expected:
         got_str, got_id = ActionClassifier._map_class_name(raw)
         assert got_str == exp_str and got_id == exp_id, (
             f"{raw!r} → expected ({exp_str!r}, {exp_id}), got ({got_str!r}, {got_id})"
         )
-    print("  All 8 class aliases mapped correctly ✓")
+    print("  All 9 class aliases mapped correctly (6 primary + 3 legacy) ✓")
     got_str, got_id = ActionClassifier._map_class_name("unknown")
     assert got_str == STAND and got_id == -1
     print("  Unknown class → Stand, -1 ✓")

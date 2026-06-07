@@ -20,7 +20,7 @@ export const courtElements: Array<{ path: string }> = [
   // Centre-circle half (only the half facing inward, x ≤ 14)
   { path: 'M 14 5.7 A 1.8 1.8 0 0 0 14 9.3' },
   // Restricted area (no-charge semicircle): r=1.25m, curves away from baseline
-  { path: 'M 1.575 6.25 A 1.25 1.25 0 0 1 1.575 8.75' },
+  { path: 'M 1.28 6.25 A 1.25 1.25 0 0 1 1.28 8.75' },
 ]
 
 export interface HomographyMatrix {
@@ -52,7 +52,7 @@ export const transformPixelToCourt = (
 export const courtDimensions = {
   length: 28,  // meters
   width: 15,   // meters
-  threePointDistance: 7.24,  // meters
+  threePointRadius: 6.75,  // meters — FIBA standard arc radius from hoop center
 }
 
 /**
@@ -68,6 +68,6 @@ export const courtCoordinates = {
   threePointRight: [7.24, 15],
   freethrowLeft: [5.8, 3.675],
   freethrowRight: [5.8, 11.325],
-  hoop1: [1.575, 7.5],  // Left basket
-  hoop2: [26.425, 7.5], // Right basket
+  hoop1: [1.28,   7.47],  // Left basket — back-projected from court_keypoints.pt
+  hoop2: [26.425, 7.5],   // Right basket — matches backend HOOP_RIGHT (not yet back-projected)
 }

@@ -5,7 +5,9 @@
       "Read(//home/iot/Documents/vision-computer/campus-league/sport-detection/basketball/node_modules/**)",
       "Read(//home/iot/Documents/vision-computer/campus-league/sport-detection/basketball/node_modules/@types/**)",
       "Bash(pkill -f \"vite --host\")",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(grep -n \"draw_keypoints_on_court\" /home/iot/Documents/vision-computer/campus-league/sport-detection/basketball/dataset/test_court_homography.py)",
+      "Read(//home/iot/Documents/vision-computer/campus-league/sport-detection/basketball/dataset/**)"
     ]
   }
 }

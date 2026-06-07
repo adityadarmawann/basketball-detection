@@ -17,7 +17,7 @@ export default function CourtMap2D() {
 
     const svg = d3.select(svgRef.current)
     const width = 300
-    const height = (width / COURT_LENGTH) * COURT_WIDTH * 2
+    const height = (width / COURT_LENGTH) * COURT_WIDTH
 
     svg.attr('viewBox', `0 0 ${width} ${height}`)
 
@@ -46,11 +46,11 @@ export default function CourtMap2D() {
     }
 
     const sx = width / COURT_LENGTH
-    const sy = height / (2 * COURT_WIDTH)
+    const sy = height / COURT_WIDTH
 
     const courtGroup = svg.append('g').attr('class', 'court-lines')
-    drawHalfCourt(courtGroup, `translate(0,${height / 2}) scale(${sx},${-sy})`)
-    drawHalfCourt(courtGroup, `translate(${width},${height / 2}) scale(${-sx},${-sy})`)
+    drawHalfCourt(courtGroup, `translate(0,${height}) scale(${sx},${-sy})`)
+    drawHalfCourt(courtGroup, `translate(${width},${height}) scale(${-sx},${-sy})`)
 
     // Center line
     svg
@@ -67,10 +67,10 @@ export default function CourtMap2D() {
 
     const svg = d3.select(svgRef.current)
     const width = 300
-    const height = (width / COURT_LENGTH) * COURT_WIDTH * 2
+    const height = (width / COURT_LENGTH) * COURT_WIDTH
 
     const xScale = d3.scaleLinear().domain([0, COURT_LENGTH]).range([0, width])
-    const yScale = d3.scaleLinear().domain([0, COURT_WIDTH]).range([0, height])
+    const yScale = d3.scaleLinear().domain([0, COURT_WIDTH]).range([height, 0])
 
     svg
       .selectAll<SVGCircleElement, typeof players[number]>('.player-dot')

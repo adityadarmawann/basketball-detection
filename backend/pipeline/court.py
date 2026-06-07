@@ -30,7 +30,7 @@ DEFAULT_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "homography_c
 COURT_W = 28.0   # meters, x-axis (baseline to baseline)
 COURT_H = 15.0   # meters, y-axis (sideline to sideline)
 
-HOOP_LEFT  = [1.575, 7.5]
+HOOP_LEFT  = [1.28,   7.47]   # back-projected from cl-sample.mp4 (was 1.575, 7.5)
 HOOP_RIGHT = [26.425, 7.5]
 THREE_PT_RADIUS = 6.75          # arc radius in meters
 THREE_PT_STRAIGHT_X = 2.99     # x where arc meets corner straight section (left basket)
@@ -52,11 +52,11 @@ KP_INDEX_TO_LABEL: list[int] = [
 # Label ID → [x_meter, y_meter]  (FIBA origin = bottom-left corner of court)
 LABEL_TO_COURT: dict[int, list[float]] = {
     # ── Outer boundary ──────────────────────────────────────────────────
-    1:  [0.0,   15.0],   # corner top-left
+    1:  [0.0,   12.674], # corner top-left  (back-projected; was 15.0)
     8:  [0.0,    0.0],   # corner bottom-left
     34: [28.0,  15.0],   # corner top-right
     41: [28.0,   0.0],   # corner bottom-right
-    15: [9.3,   15.0],   # top boundary left-center
+    # label 15 removed: model index 12 detects right side (x≈19m), conflicts with label 25 at index 18
     25: [18.7,  15.0],   # top boundary right-center
     17: [9.3,    0.0],   # bottom boundary left-center
     27: [18.7,   0.0],   # bottom boundary right-center
@@ -71,11 +71,11 @@ LABEL_TO_COURT: dict[int, list[float]] = {
     5:  [0.0,    6.675], # baseline left, bottom-center
     10: [5.8,   11.35],  # left inner paint top
     11: [5.8,    3.65],  # left inner paint bottom
-    12: [5.8,    9.3],   # left paint top corner
-    14: [5.8,    5.7],   # left paint bottom corner
+    12: [6.99,   8.402], # left paint top corner  (back-projected; was 5.8, 9.3)
+    14: [4.915,  6.779], # left paint bottom corner  (back-projected; was 5.8, 5.7)
     13: [5.8,    7.5],   # free throw line left
-    9:  [4.6,    7.5],   # below hoop left
-    16: [6.75,   7.5],   # left 3PT arc tangent point
+    9:  [1.28,   7.47],  # hoop left  (back-projected; matches HOOP_LEFT)
+    16: [8.03,   7.47],  # left 3PT arc tangent point  (HOOP_LEFT[0] + THREE_PT_RADIUS = 1.28 + 6.75)
     # ── Right paint area ────────────────────────────────────────────────
     35: [28.0,  11.35],  # baseline right, top of paint
     40: [28.0,   3.65],  # baseline right, bottom of paint
@@ -85,9 +85,9 @@ LABEL_TO_COURT: dict[int, list[float]] = {
     32: [22.2,   3.65],  # right inner paint bottom
     28: [23.75,  9.3],   # right paint top corner
     29: [23.75,  5.7],   # right paint bottom corner
-    33: [25.9,   7.5],   # below hoop right
+    33: [26.425, 7.5],   # hoop right  (HOOP_RIGHT constant)
     30: [22.2,   5.7],   # free throw line right
-    26: [21.25,  7.5],   # right 3PT arc tangent point
+    26: [19.675, 7.5],   # right 3PT arc tangent point  (HOOP_RIGHT[0] - THREE_PT_RADIUS = 26.425 - 6.75)
 }
 
 LABEL_NAMES: dict[int, str] = {
@@ -111,9 +111,11 @@ LABEL_NAMES: dict[int, str] = {
 }
 
 # Thresholds
-CONF_THRESHOLD   = 0.5    # min visibility score to use a keypoint
-MIN_KEYPOINTS    = 6      # minimum for RANSAC homography
-CAMERA_MOVE_PX   = 20.0  # avg shift (pixels) that triggers homography recompute
+CONF_THRESHOLD     = 0.5    # min visibility score to use a keypoint (general)
+LOW_CONF_THRESHOLD = 0.3    # lower threshold for corner/baseline-bottom labels
+LOW_CONF_LABELS    = {7, 8, 40, 41}  # often occluded by crowd/camera angle
+MIN_KEYPOINTS      = 6      # minimum for RANSAC homography
+CAMERA_MOVE_PX     = 20.0  # avg shift (pixels) that triggers homography recompute
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +141,7 @@ class CourtMapper:
         self._H: Optional[np.ndarray] = None      # pixel → court
         self._H_inv: Optional[np.ndarray] = None  # court → pixel
         self._prev_pixels: Optional[dict[int, list[float]]] = None  # for shift check
+        self._frame_shape: tuple[int, int] = (720, 1280)  # (h, w) updated each frame
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -208,13 +211,17 @@ class CourtMapper:
             court_coord = LABEL_TO_COURT.get(label_id)
             if court_coord is None:
                 continue
+            effective_threshold = (
+                LOW_CONF_THRESHOLD if label_id in LOW_CONF_LABELS else CONF_THRESHOLD
+            )
             keypoints.append({
                 "point_id":   label_id,
                 "name":       LABEL_NAMES.get(label_id, f"kp_{label_id}"),
                 "pixel_pos":  [x, y],
                 "court_pos":  court_coord,
                 "confidence": conf,
-                "occluded":   conf < CONF_THRESHOLD,
+                "occluded":   conf < effective_threshold,
+                "estimated":  False,
             })
 
         return keypoints
@@ -227,9 +234,14 @@ class CourtMapper:
         """
         Fit pixel→court homography with RANSAC.
         Requires at least MIN_KEYPOINTS (6) visible (conf >= 0.5) points.
-        Returns the 3×3 H matrix and caches it internally.
+        Returns the 3×3 H (pixel→court) matrix and caches it internally.
+
+        RANSAC direction: court→pixel so the reprojection threshold (15 px)
+        is applied in pixel space, giving meaningful outlier rejection.
+        _H (pixel→court) = inv(H_ct2px); _H_inv (court→pixel) = H_ct2px.
         """
-        visible = [kp for kp in keypoints if kp["confidence"] >= CONF_THRESHOLD]
+        # Use occluded flag so per-label thresholds (LOW_CONF_LABELS) are honoured
+        visible = [kp for kp in keypoints if not kp["occluded"] and not kp.get("estimated", False)]
 
         if len(visible) < MIN_KEYPOINTS:
             logger.warning(
@@ -238,31 +250,52 @@ class CourtMapper:
             )
             return None
 
-        src = np.array([kp["pixel_pos"]  for kp in visible], dtype=np.float32)
-        dst = np.array([kp["court_pos"]  for kp in visible], dtype=np.float32)
+        src_px = np.array([kp["pixel_pos"] for kp in visible], dtype=np.float32)
+        src_ct = np.array([kp["court_pos"] for kp in visible], dtype=np.float32)
 
+        # court→pixel: RANSAC threshold in pixel space (15 px ≈ 0.3–0.5 m)
         try:
-            H, mask = cv2.findHomography(src, dst, cv2.RANSAC, ransacReprojThreshold=5.0)
+            H_ct2px, mask = cv2.findHomography(
+                src_ct, src_px, cv2.RANSAC, ransacReprojThreshold=15.0
+            )
         except cv2.error as exc:
             logger.warning("findHomography failed: %s", exc)
             return None
 
-        if H is None:
+        if H_ct2px is None:
             logger.warning(
                 "Homography returned None — points may be collinear or degenerate"
             )
             return None
 
         inliers = int(mask.sum()) if mask is not None else 0
-        logger.debug(
-            "Homography: %d/%d RANSAC inliers", inliers, len(visible)
-        )
+        logger.debug("Homography: %d/%d RANSAC inliers", inliers, len(visible))
 
-        self._H = H.astype(np.float64)
+        inlier_kps = []
+        for i, kp in enumerate(visible):
+            if mask is not None and mask[i]:
+                inlier_kps.append(kp)
+            else:
+                logger.warning(
+                    "RANSAC outlier: label=%d %s pixel=%s court=%s",
+                    kp["point_id"], kp["name"],
+                    kp["pixel_pos"], kp["court_pos"],
+                )
+
+        if not self._validate_court_coverage(inlier_kps):
+            logger.warning(
+                "Court coverage check failed: inliers only on 1 side — H may be unreliable"
+            )
+
+        # pixel→court = inv(court→pixel)
         try:
-            self._H_inv = np.linalg.inv(self._H)
+            H_px2ct = np.linalg.inv(H_ct2px)
         except np.linalg.LinAlgError:
-            self._H_inv = None
+            logger.warning("H inversion failed — singular matrix")
+            return None
+
+        self._H     = H_px2ct.astype(np.float64)   # pixel → court
+        self._H_inv = H_ct2px.astype(np.float64)   # court → pixel
 
         # Update pixel cache for camera-move detection
         self._prev_pixels = {
@@ -293,6 +326,84 @@ class CourtMapper:
         return (sum(shifts) / len(shifts)) > CAMERA_MOVE_PX
 
     # ------------------------------------------------------------------
+    # Geometric fallback & coverage validation
+    # ------------------------------------------------------------------
+
+    def _estimate_missing_corners(self, keypoints: list[dict]) -> list[dict]:
+        """
+        If H is available and a corner label (7, 8, 40, 41) is occluded,
+        project its known court coord through court_to_pixel to synthesise
+        a pixel position.  Requires ≥2 non-occluded keypoints on the same
+        side of the court (left for 7/8, right for 40/41) to avoid extrapolation
+        on frames where the whole side is invisible.
+        Estimated keypoints are marked "estimated": True and must NOT be
+        fed back into compute_homography (guarded by the estimated flag check).
+        """
+        if self._H_inv is None:
+            return keypoints
+
+        left_visible = sum(
+            1 for kp in keypoints
+            if not kp["occluded"] and not kp.get("estimated", False)
+            and kp["court_pos"][0] < 14.0
+        )
+        right_visible = sum(
+            1 for kp in keypoints
+            if not kp["occluded"] and not kp.get("estimated", False)
+            and kp["court_pos"][0] > 14.0
+        )
+
+        fh, fw = self._frame_shape
+        # Allow up to 5% outside visible frame to catch near-edge corners
+        margin_x, margin_y = fw * 0.05, fh * 0.05
+
+        result: list[dict] = []
+        for kp in keypoints:
+            lid = kp["point_id"]
+            if kp["occluded"] and not kp.get("estimated", False):
+                needs_estimate = (
+                    (lid in {7, 8}   and left_visible  >= 2) or
+                    (lid in {40, 41} and right_visible >= 2)
+                )
+                if needs_estimate:
+                    pixel = self.court_to_pixel(kp["court_pos"])
+                    if pixel is not None:
+                        px, py = pixel
+                        in_frame = (
+                            -margin_x <= px <= fw + margin_x and
+                            -margin_y <= py <= fh + margin_y
+                        )
+                        if in_frame:
+                            kp = dict(kp, pixel_pos=pixel, occluded=False, estimated=True)
+                            logger.debug(
+                                "_estimate_missing_corners: label=%d estimated → pixel=%s",
+                                lid, [round(px, 1), round(py, 1)],
+                            )
+                        else:
+                            logger.debug(
+                                "_estimate_missing_corners: label=%d projected out-of-frame "
+                                "(%s) — keeping occluded", lid, [round(px, 1), round(py, 1)],
+                            )
+            result.append(kp)
+        return result
+
+    @staticmethod
+    def _validate_court_coverage(inlier_kps: list[dict]) -> bool:
+        """
+        True if RANSAC inliers span at least 2 distinct sides of the court.
+        Checks 4 half-planes: left (x<14), right (x>14), top (y>7.5), bottom (y<7.5).
+        A homography fitted to only one side (e.g. left baseline) can drift badly
+        for coordinates on the opposite side.
+        """
+        if not inlier_kps:
+            return False
+        has_left   = any(kp["court_pos"][0] < 14.0 for kp in inlier_kps)
+        has_right  = any(kp["court_pos"][0] > 14.0 for kp in inlier_kps)
+        has_top    = any(kp["court_pos"][1] > 7.5  for kp in inlier_kps)
+        has_bottom = any(kp["court_pos"][1] < 7.5  for kp in inlier_kps)
+        return sum([has_left, has_right, has_top, has_bottom]) >= 2
+
+    # ------------------------------------------------------------------
     # Coordinate transforms
     # ------------------------------------------------------------------
 
@@ -300,7 +411,7 @@ class CourtMapper:
         """[px, py] → [x_meter, y_meter].  None if not calibrated."""
         if self._H is None:
             return None
-        pt = np.array([[pixel_pos]], dtype=np.float32)
+        pt  = np.array([[pixel_pos]], dtype=np.float32)
         out = cv2.perspectiveTransform(pt, self._H)
         return [float(out[0, 0, 0]), float(out[0, 0, 1])]
 
@@ -308,7 +419,7 @@ class CourtMapper:
         """[x_meter, y_meter] → [px, py].  None if not calibrated."""
         if self._H_inv is None:
             return None
-        pt = np.array([[court_pos]], dtype=np.float32)
+        pt  = np.array([[court_pos]], dtype=np.float32)
         out = cv2.perspectiveTransform(pt, self._H_inv)
         return [float(out[0, 0, 0]), float(out[0, 0, 1])]
 
@@ -360,10 +471,15 @@ class CourtMapper:
         if frame is None or frame.size == 0:
             return self._empty_result()
 
+        self._frame_shape = (frame.shape[0], frame.shape[1])
         keypoints = self.detect_keypoints(frame)
 
         if self._H is None or self._camera_moved(keypoints):
             self.compute_homography(keypoints)
+
+        # Estimate occluded corner positions using current H (runs after RANSAC,
+        # so estimated points never feed back into compute_homography).
+        keypoints = self._estimate_missing_corners(keypoints)
 
         visible_count = sum(1 for kp in keypoints if not kp["occluded"])
         return {

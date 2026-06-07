@@ -3,7 +3,10 @@ import { FrameUpdate, GameEvent, Player, PlayerStats } from '../types'
 const COURT_LENGTH = 28 // meters
 const COURT_WIDTH = 15 // meters
 
-const MOCK_ACTIONS: Player['action'][] = ['RUN', 'DRIBBLE', 'STAND', 'PASS', 'SHOOT']
+const MOCK_ACTIONS: Player['action'][] = [
+  'SHOOT', 'PASS', 'DRIBBLE', 'CATCH', 'STEAL',
+  'JUMP', 'REBOUND', 'BLOCK', 'STAND',
+]
 const MOCK_EVENT_TYPES: GameEvent['eventType'][] = ['FGA', 'FGM', 'REB', 'AST', 'STL', 'BLK', 'TOV']
 
 export class MockWebSocketServer {

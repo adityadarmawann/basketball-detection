@@ -501,15 +501,15 @@ class VideoProcessor:
             ]
 
             players.append({
-                "track_id":     tid,
-                "jersey_number": (self._tracker.get_jersey_number(tid)
-                                  if self._tracker else None),
+                "trackId":      tid,
+                "jerseyNumber": (self._tracker.get_jersey_number(tid)
+                                 if self._tracker else None),
                 "name":         pstat.get("name", f"Player_{tid}"),
                 "team":         pstat.get("team", ""),
                 "bbox":         player.get("bbox", []),
-                "court_pos":    player.get("court_pos"),
+                "courtPos":     player.get("court_pos"),
                 "action":       act_entry.get("action", "Stand"),
-                "speed_kmh":    mpi.get("avg_speed_kmh", 0.0),
+                "speedKmh":     mpi.get("avg_speed_kmh", 0.0),
                 "keypoints":    keypoints,
             })
 
@@ -533,13 +533,13 @@ class VideoProcessor:
         # ── Score & possession ─────────────────────────────────────────────
         ts    = stats.get("team_stats", {})
         score = {
-            "team_a": ts.get("A", {}).get("pts", 0),
-            "team_b": ts.get("B", {}).get("pts", 0),
+            "teamA": ts.get("A", {}).get("pts", 0),
+            "teamB": ts.get("B", {}).get("pts", 0),
         }
         poss_raw  = stats.get("possession_pct", {"A": 50.0, "B": 50.0})
         possession = {
-            "team_a": poss_raw.get("A", 50.0),
-            "team_b": poss_raw.get("B", 50.0),
+            "teamA": poss_raw.get("A", 50.0),
+            "teamB": poss_raw.get("B", 50.0),
         }
 
         events      = frame_data.get("events", [])
@@ -549,13 +549,13 @@ class VideoProcessor:
             "type":       "frame_update",
             "timestamp":  frame_data.get("timestamp_ms", 0),
             "quarter":    frame_data.get("quarter", self._current_quarter),
-            "game_clock": self._format_game_clock(),
+            "gameClock":  self._format_game_clock(),
             "score":      score,
             "possession": possession,
             "players":    players,
             "ball": {
                 "bbox":       ball_raw.get("bbox", []) if ball_raw else [],
-                "court_pos":  ball_court_pos,
+                "courtPos":   ball_court_pos,
                 "trajectory": list(self._ball_trajectory),
             },
             "event": latest_event,
@@ -768,38 +768,38 @@ if __name__ == "__main__":
     vp2 = VideoProcessor()
     msg = vp2._build_ws_message(dummy_frame_data, dummy_stats)
 
-    required_top = ["type", "timestamp", "quarter", "game_clock",
+    required_top = ["type", "timestamp", "quarter", "gameClock",
                     "score", "possession", "players", "ball", "event"]
     for k in required_top:
         assert k in msg, f"Missing top-level key: {k!r}"
 
     assert msg["type"]             == "frame_update",   msg["type"]
     assert msg["quarter"]          == 1
-    assert isinstance(msg["game_clock"], str)
-    assert "team_a" in msg["score"]      and "team_b" in msg["score"]
-    assert "team_a" in msg["possession"] and "team_b" in msg["possession"]
-    assert msg["score"]["team_a"]        == 10
-    assert msg["score"]["team_b"]        == 8
-    assert msg["possession"]["team_a"]   == 55.0
-    assert msg["possession"]["team_b"]   == 45.0
+    assert isinstance(msg["gameClock"], str)
+    assert "teamA" in msg["score"]      and "teamB" in msg["score"]
+    assert "teamA" in msg["possession"] and "teamB" in msg["possession"]
+    assert msg["score"]["teamA"]        == 10
+    assert msg["score"]["teamB"]        == 8
+    assert msg["possession"]["teamA"]   == 55.0
+    assert msg["possession"]["teamB"]   == 45.0
     assert msg["event"]                  is None
     assert msg["ball"]["bbox"]           == [200, 100, 230, 130]
     assert isinstance(msg["ball"]["trajectory"], list)
 
     assert len(msg["players"]) == 1
     p0 = msg["players"][0]
-    for pk in ["track_id", "jersey_number", "name", "team",
-               "bbox", "court_pos", "action", "speed_kmh", "keypoints"]:
+    for pk in ["trackId", "jerseyNumber", "name", "team",
+               "bbox", "courtPos", "action", "speedKmh", "keypoints"]:
         assert pk in p0, f"Missing player key: {pk!r}"
 
-    assert p0["track_id"]   == 1
+    assert p0["trackId"]    == 1
     assert p0["name"]        == "Arya"
     assert p0["team"]        == "A"
     assert p0["action"]      == "Dribble"
-    assert p0["speed_kmh"]   == 12.5
+    assert p0["speedKmh"]   == 12.5
     assert isinstance(p0["keypoints"], list)
 
-    print(f"  type={msg['type']!r}  quarter={msg['quarter']}  clock={msg['game_clock']}")
+    print(f"  type={msg['type']!r}  quarter={msg['quarter']}  clock={msg['gameClock']}")
     print(f"  score={msg['score']}  possession={msg['possession']}")
     print(f"  players={len(msg['players'])}  ball_bbox={msg['ball']['bbox']}")
     print("  All required keys present ✓")
@@ -936,7 +936,7 @@ if __name__ == "__main__":
         "court_pos": [14.0, 7.5],
     }
     msg1 = vp9._build_ws_message(fd1, dummy_stats)
-    assert msg1["ball"]["court_pos"] == [14.0, 7.5]
+    assert msg1["ball"]["courtPos"] == [14.0, 7.5]
     assert len(vp9._ball_trajectory) == 1
 
     msg2 = vp9._build_ws_message(fd1, dummy_stats)

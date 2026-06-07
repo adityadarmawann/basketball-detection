@@ -13,7 +13,7 @@ export interface Player {
 export type ActionLabel =
   | 'SHOOT' | 'DRIBBLE' | 'PASS' | 'CATCH'
   | 'BLOCK' | 'REBOUND' | 'STEAL' | 'JUMP'
-  | 'RUN' | 'STAND' | 'HOLD';
+  | 'STAND';
 
 export interface FrameUpdate {
   type: 'frame_update';

@@ -1,22 +1,39 @@
-fastapi==0.110.0
-uvicorn[standard]==0.29.0
-websockets==12.0
-python-multipart==0.0.9
-aiofiles==23.2.1
-pymongo==4.7.1
-redis==5.0.4
-opencv-python==4.9.0.80
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi==0.135.2
+uvicorn[standard]==0.42.0
+websockets==16.0
+python-multipart==0.0.22
+aiofiles==25.1.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+pymongo==4.16.0
+redis>=5.0.0            # redis.asyncio stable API; 5.x–8.x all compatible
+
+# ── PyTorch ───────────────────────────────────────────────────────────────────
+# GPU / CUDA install — run before pip install -r requirements.txt:
+#   pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu121
 torch==2.2.2
 torchvision==0.17.2
-ultralytics==8.2.0
-pytorchvideo==0.1.5
-paddlepaddle==2.6.1
-paddleocr==2.7.3
-boxmot==10.0.43
-scipy==1.13.0
-filterpy==1.4.5
+
+# ── Computer Vision / ML ──────────────────────────────────────────────────────
+opencv-python==4.10.0.84
+ultralytics==8.4.33     # YOLOv8: player detection, ball detection, jersey_no.pt
+pytorchvideo==0.1.5     # SlowFast-R50 action recognition (action_best_v1.pt)
+
+# ── Tracking ─────────────────────────────────────────────────────────────────
+boxmot==10.0.43         # BotSort + ByteTrack; internal import paths changed in v11+
+
+# ── OCR (jersey number reading) ───────────────────────────────────────────────
+paddlepaddle==3.0.0     # paddleocr 3.x requires paddlepaddle 3.x
+paddleocr==3.5.0
+
+# ── Numerics / Signal processing ─────────────────────────────────────────────
+scipy==1.16.2
+filterpy==1.4.5         # Kalman filter used by tracker fallback
 numpy==1.26.4
-scikit-learn==1.4.2
-Pillow==10.3.0
-pydantic==2.7.1
-python-dotenv==1.0.1
+scikit-learn==1.8.0     # K-Means for team color calibration
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+Pillow==10.2.0
+pydantic==2.12.1
+python-dotenv==1.2.2

@@ -1,0 +1,730 @@
+"""
+Jersey number detection (2-layer) + team color classification.
+
+Layer 1 — jersey_no.pt:
+  Locates the jersey number bbox within the player's back region.
+  NOTE: jersey_no.pt is currently a COCO-80 base model (not yet fine-tuned
+  for "number" class). Until a domain-trained model is available the code
+  falls back to a heuristic torso-center crop for the number area.
+
+Layer 2 — PaddleOCR 3.5.0:
+  Reads the digit(s) from the localized crop, filters to 0-99.
+  Voting (>= 3 frames) stabilises the assignment before it is registered
+  with the tracker.
+
+Team classification: K-Means (K=2) on HSV pixel samples from each player's
+torso. Run once at calibration; user can override via set_team_reference().
+"""
+
+import logging
+import os
+import re
+from collections import Counter, deque
+from pathlib import Path
+from typing import Optional
+
+import cv2
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
+MODEL_FILENAME = "jersey_no.pt"
+
+VOTE_THRESHOLD    = 3     # frames required to confirm a jersey number
+MAX_VOTE_HISTORY  = 30   # rolling window per track_id
+CONF_THRESHOLD    = 0.5  # jersey_no.pt detection confidence
+OCR_HEIGHT_PX     = 64   # resize crop to this height for OCR
+
+
+# ---------------------------------------------------------------------------
+# Heuristic back-region crop (fallback when no fine-tuned model)
+# ---------------------------------------------------------------------------
+
+def _back_crop_heuristic(player_h: int, player_w: int) -> tuple[int, int, int, int]:
+    """
+    Return (y1, y2, x1, x2) of the jersey number area within the player crop.
+    Targets the upper torso: skip head (top 15%), take 50% height, center 60%.
+    """
+    y1 = int(player_h * 0.15)
+    y2 = int(player_h * 0.65)
+    x1 = int(player_w * 0.20)
+    x2 = int(player_w * 0.80)
+    return y1, y2, x1, x2
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing helpers
+# ---------------------------------------------------------------------------
+
+def _preprocess_for_ocr(crop: np.ndarray) -> np.ndarray:
+    """
+    Grayscale → CLAHE contrast enhancement → resize to OCR_HEIGHT_PX height.
+    Returns a 3-channel BGR image (PaddleOCR expects BGR).
+    """
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+    enhanced = clahe.apply(gray)
+    # Resize to fixed height, keep aspect ratio
+    h, w = enhanced.shape[:2]
+    if h == 0 or w == 0:
+        return np.zeros((OCR_HEIGHT_PX, OCR_HEIGHT_PX, 3), dtype=np.uint8)
+    scale = OCR_HEIGHT_PX / h
+    new_w = max(1, int(w * scale))
+    resized = cv2.resize(enhanced, (new_w, OCR_HEIGHT_PX))
+    return cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
+
+
+# ---------------------------------------------------------------------------
+# Main class
+# ---------------------------------------------------------------------------
+
+class JerseyOCR:
+    """
+    Two-layer jersey number reader with HSV team classification.
+    """
+
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        device: Optional[str] = None,
+        conf_threshold: float = CONF_THRESHOLD,
+    ):
+        self.model_path     = model_path or os.path.join(MODELS_DIR, MODEL_FILENAME)
+        self.device         = device
+        self.conf_threshold = conf_threshold
+
+        self.model = None           # jersey_no.pt (YOLO)
+        self._ocr  = None           # PaddleOCR instance
+        self._number_class_idx: Optional[int] = None   # None → use heuristic
+
+        # Voting state: track_id → deque of int candidates
+        self._votes: dict[int, deque] = {}
+
+        # Team classification
+        self._team_colors: dict[str, list[float]] = {}   # "A"/"B" → [H, S, V]
+        self._track_team:  dict[int, str]         = {}   # track_id → "A"/"B"
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def load_model(self) -> None:
+        """Load jersey_no.pt. Raises FileNotFoundError if absent."""
+        path = Path(self.model_path)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Model not found: {path.resolve()}\n"
+                "Place jersey_no.pt in backend/models/ or set MODELS_PATH."
+            )
+        try:
+            import torch
+            from ultralytics import YOLO
+
+            target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+            self.model = YOLO(str(path))
+            self.model.to(target)
+
+            # Find "number" class index in the loaded model
+            for idx, name in self.model.names.items():
+                if "number" in name.lower() or name.lower() in ("no", "jersey", "num"):
+                    self._number_class_idx = idx
+                    break
+
+            if self._number_class_idx is None:
+                logger.warning(
+                    "jersey_no.pt has no 'number' class (found %d COCO classes). "
+                    "Using heuristic torso-crop fallback for number localisation.",
+                    len(self.model.names),
+                )
+            else:
+                logger.info(
+                    "jersey_no.pt loaded: 'number' class at index %d",
+                    self._number_class_idx,
+                )
+
+        except ImportError as exc:
+            raise ImportError(
+                "ultralytics and torch required. pip install ultralytics torch"
+            ) from exc
+        except RuntimeError as exc:
+            logger.warning("GPU init failed (%s) — falling back to CPU", exc)
+            from ultralytics import YOLO
+            self.model = YOLO(str(path))
+            self.model.to("cpu")
+
+    def load_ocr(self) -> None:
+        """Initialise PaddleOCR 3.5.0. Raises ImportError if not installed."""
+        try:
+            from paddleocr import PaddleOCR
+
+            # PaddleOCR 3.5.0 requires explicit disable of heavyweight pipelines
+            self._ocr = PaddleOCR(
+                lang="en",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            )
+            logger.info("PaddleOCR 3.5.0 initialised (lang=en)")
+        except ImportError as exc:
+            raise ImportError(
+                "paddleocr required. pip install paddleocr paddlepaddle"
+            ) from exc
+
+    def is_model_loaded(self) -> bool:
+        return self.model is not None
+
+    # ------------------------------------------------------------------
+    # Core pipeline
+    # ------------------------------------------------------------------
+
+    def process(
+        self,
+        frame: np.ndarray,
+        tracked_players: list[dict],
+        tracker=None,           # PlayerTracker instance from tracker.py
+    ) -> dict:
+        """
+        For each tracked player: localise number → OCR → vote → classify team.
+
+        Args:
+            frame:           Full BGR frame.
+            tracked_players: [{track_id, bbox, ...}] from tracker.py.
+            tracker:         PlayerTracker; when provided, update_jersey() is
+                             called automatically after a vote is confirmed.
+        """
+        if frame is None or frame.size == 0 or not tracked_players:
+            return {"jersey_results": [], "team_colors": self._team_colors}
+
+        h_frame, w_frame = frame.shape[:2]
+        results: list[dict] = []
+
+        for player in tracked_players:
+            track_id = player["track_id"]
+            x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
+
+            # Clamp to frame
+            x1c = max(0, x1);   y1c = max(0, y1)
+            x2c = min(w_frame, x2); y2c = min(h_frame, y2)
+            if x2c <= x1c or y2c <= y1c:
+                results.append(self._empty_result(track_id))
+                continue
+
+            player_crop = frame[y1c:y2c, x1c:x2c]
+
+            # Layer 1 — locate number bbox
+            num_bbox = self._detect_number_bbox(player_crop)
+            if num_bbox is None:
+                results.append(self._empty_result(track_id))
+                continue
+
+            ny1, ny2, nx1, nx2 = num_bbox
+            number_crop = player_crop[ny1:ny2, nx1:nx2]
+            if number_crop.size == 0:
+                results.append(self._empty_result(track_id))
+                continue
+
+            # Layer 2 — OCR
+            candidate = self._run_ocr(number_crop)
+            confirmed  = self._vote_number(track_id, candidate)
+
+            if confirmed is not None and tracker is not None:
+                tracker.update_jersey(track_id, confirmed)
+
+            # Team classification (fast, uses full player crop)
+            team = self._classify_team(player_crop, track_id)
+            team_hsv = self._team_colors.get(team, []) if team else []
+
+            results.append({
+                "track_id":       track_id,
+                "jersey_number":  confirmed,
+                "confidence":     self._vote_confidence(track_id),
+                "team":           team,
+                "team_color_hsv": team_hsv,
+            })
+
+        return {"jersey_results": results, "team_colors": self._team_colors}
+
+    # ------------------------------------------------------------------
+    # Layer 1 — number localisation
+    # ------------------------------------------------------------------
+
+    def _detect_number_bbox(
+        self, player_crop: np.ndarray
+    ) -> Optional[tuple[int, int, int, int]]:
+        """
+        Returns (y1, y2, x1, x2) of the number region inside player_crop.
+
+        If jersey_no.pt is fine-tuned (has a 'number' class): runs YOLO
+        and picks the highest-confidence detection.
+        Otherwise: uses the heuristic torso-center crop.
+        """
+        h, w = player_crop.shape[:2]
+        if h < 8 or w < 4:
+            return None
+
+        if self.model is not None and self._number_class_idx is not None:
+            # Fine-tuned model path
+            try:
+                results = self.model.predict(
+                    player_crop, verbose=False, conf=self.conf_threshold
+                )
+                if results and results[0].boxes is not None:
+                    boxes = results[0].boxes
+                    cls_mask = boxes.cls.cpu().numpy().astype(int) == self._number_class_idx
+                    if cls_mask.any():
+                        xyxy = boxes.xyxy.cpu().numpy()[cls_mask]
+                        confs = boxes.conf.cpu().numpy()[cls_mask]
+                        best  = int(confs.argmax())
+                        bx1, by1, bx2, by2 = [int(v) for v in xyxy[best]]
+                        return (
+                            max(0, by1), min(h, by2),
+                            max(0, bx1), min(w, bx2),
+                        )
+            except Exception as exc:
+                logger.warning("jersey_no.pt inference failed: %s", exc)
+
+        # Fallback: heuristic torso crop
+        y1, y2, x1, x2 = _back_crop_heuristic(h, w)
+        return y1, y2, x1, x2
+
+    # ------------------------------------------------------------------
+    # Layer 2 — OCR
+    # ------------------------------------------------------------------
+
+    def _run_ocr(self, number_crop: np.ndarray) -> Optional[int]:
+        """
+        Preprocess crop → PaddleOCR → parse first numeric result in [0-99].
+        Returns None if no valid number is found or OCR is not loaded.
+        """
+        if self._ocr is None:
+            return None
+        if number_crop.size == 0:
+            return None
+
+        processed = _preprocess_for_ocr(number_crop)
+
+        try:
+            results = self._ocr.predict(processed)
+        except Exception as exc:
+            logger.debug("PaddleOCR predict error: %s", exc)
+            return None
+
+        if not results:
+            return None
+
+        # PaddleOCR 3.5.0: predict() returns list[OCRResult]
+        # Each OCRResult is dict-like: res['rec_texts'], res['rec_scores']
+        for res in results:
+            try:
+                texts  = res["rec_texts"]
+                scores = res["rec_scores"]
+            except (TypeError, KeyError):
+                continue
+
+            for text, score in zip(texts or [], scores or []):
+                number = self._parse_jersey_number(text)
+                if number is not None:
+                    logger.debug(
+                        "OCR: '%s' (score=%.2f) → jersey %d", text, score, number
+                    )
+                    return number
+
+        return None
+
+    @staticmethod
+    def _parse_jersey_number(text: str) -> Optional[int]:
+        """Extract first integer 0-99 from OCR text. Returns None if invalid."""
+        if not text:
+            return None
+        digits = re.sub(r"[^0-9]", "", text.strip())
+        if not digits:
+            return None
+        try:
+            number = int(digits[:2])   # at most 2 digits
+            return number if 0 <= number <= 99 else None
+        except ValueError:
+            return None
+
+    # ------------------------------------------------------------------
+    # Voting
+    # ------------------------------------------------------------------
+
+    def _vote_number(self, track_id: int, candidate: Optional[int]) -> Optional[int]:
+        """
+        Accumulate candidate votes per track_id.
+        Returns the confirmed jersey number (mode) once >= VOTE_THRESHOLD votes,
+        or None if not yet confirmed.
+        """
+        if candidate is None:
+            return self._current_confirmed(track_id)
+
+        if track_id not in self._votes:
+            self._votes[track_id] = deque(maxlen=MAX_VOTE_HISTORY)
+        self._votes[track_id].append(candidate)
+
+        counter = Counter(self._votes[track_id])
+        most_common, count = counter.most_common(1)[0]
+        if count >= VOTE_THRESHOLD:
+            return most_common
+        return None
+
+    def _current_confirmed(self, track_id: int) -> Optional[int]:
+        if track_id not in self._votes or not self._votes[track_id]:
+            return None
+        counter = Counter(self._votes[track_id])
+        most_common, count = counter.most_common(1)[0]
+        return most_common if count >= VOTE_THRESHOLD else None
+
+    def _vote_confidence(self, track_id: int) -> float:
+        """Fraction of votes for the leading candidate [0.0, 1.0]."""
+        if track_id not in self._votes or not self._votes[track_id]:
+            return 0.0
+        counter = Counter(self._votes[track_id])
+        top_count = counter.most_common(1)[0][1]
+        return top_count / len(self._votes[track_id])
+
+    def reset_votes(self, track_id: Optional[int] = None) -> None:
+        """Clear voting history for one track or all tracks."""
+        if track_id is None:
+            self._votes.clear()
+        else:
+            self._votes.pop(track_id, None)
+
+    # ------------------------------------------------------------------
+    # Team classification (K-Means HSV)
+    # ------------------------------------------------------------------
+
+    def _classify_team(
+        self, player_crop: np.ndarray, track_id: int
+    ) -> Optional[str]:
+        """
+        Assign track to "A" or "B" based on nearest team color reference.
+        Returns None if team colors have not been calibrated yet.
+        """
+        if track_id in self._track_team:
+            return self._track_team[track_id]
+
+        if "A" not in self._team_colors or "B" not in self._team_colors:
+            return None
+
+        dominant_hsv = self._dominant_hsv(player_crop)
+        if dominant_hsv is None:
+            return None
+
+        dist_a = self._hsv_distance(dominant_hsv, self._team_colors["A"])
+        dist_b = self._hsv_distance(dominant_hsv, self._team_colors["B"])
+        team = "A" if dist_a <= dist_b else "B"
+        self._track_team[track_id] = team
+        return team
+
+    def calibrate_teams(
+        self, frame: np.ndarray, tracked_players: list[dict]
+    ) -> dict[str, list[float]]:
+        """
+        Collect torso pixel samples from all visible players, run K-Means (K=2),
+        and store the two cluster centers as team color references.
+
+        Call once per game start (or after significant lighting change).
+        Returns {"A": [h,s,v], "B": [h,s,v]}.
+        """
+        if frame is None or not tracked_players:
+            return self._team_colors
+
+        h_frame, w_frame = frame.shape[:2]
+        all_hsv_samples: list[np.ndarray] = []
+
+        for player in tracked_players:
+            x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
+            x1c = max(0, x1); y1c = max(0, y1)
+            x2c = min(w_frame, x2); y2c = min(h_frame, y2)
+            crop = frame[y1c:y2c, x1c:x2c]
+            if crop.size == 0:
+                continue
+            # Sample torso region only
+            th, tw = crop.shape[:2]
+            torso = crop[int(th * 0.15):int(th * 0.65), int(tw * 0.1):int(tw * 0.9)]
+            if torso.size == 0:
+                continue
+            hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(np.float32)
+            # Sub-sample to limit compute
+            step = max(1, len(hsv) // 100)
+            all_hsv_samples.append(hsv[::step])
+
+        if len(all_hsv_samples) < 2:
+            logger.warning("calibrate_teams: need ≥ 2 players, got %d", len(all_hsv_samples))
+            return self._team_colors
+
+        samples = np.vstack(all_hsv_samples)
+
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1.0)
+        _, _, centers = cv2.kmeans(
+            samples, 2, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
+        )
+
+        self._team_colors["A"] = centers[0].tolist()
+        self._team_colors["B"] = centers[1].tolist()
+        self._track_team.clear()   # re-classify all players
+
+        logger.info(
+            "Team colors calibrated: A=%s  B=%s",
+            [round(v, 1) for v in self._team_colors["A"]],
+            [round(v, 1) for v in self._team_colors["B"]],
+        )
+        return self._team_colors
+
+    def set_team_reference(self, team: str, hsv_color: list[float]) -> None:
+        """Manual override from user UI. team='A' or 'B', hsv_color=[H,S,V]."""
+        if team not in ("A", "B"):
+            raise ValueError("team must be 'A' or 'B'")
+        self._team_colors[team] = list(hsv_color)
+        self._track_team.clear()
+
+    # ------------------------------------------------------------------
+    # Colour helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _dominant_hsv(crop: np.ndarray) -> Optional[list[float]]:
+        """Return mean HSV of the torso region of a player crop."""
+        h, w = crop.shape[:2]
+        if h < 4 or w < 4:
+            return None
+        torso = crop[int(h * 0.15):int(h * 0.65), int(w * 0.1):int(w * 0.9)]
+        if torso.size == 0:
+            return None
+        hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
+        return hsv.reshape(-1, 3).astype(np.float32).mean(axis=0).tolist()
+
+    @staticmethod
+    def _hsv_distance(a: list[float], b: list[float]) -> float:
+        """Hue-aware HSV distance. Hue is circular [0, 180]."""
+        dh = abs(a[0] - b[0])
+        dh = min(dh, 180.0 - dh)   # circular
+        ds = abs(a[1] - b[1])
+        dv = abs(a[2] - b[2])
+        return float(dh * 2 + ds + dv * 0.5)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _empty_result(track_id: int) -> dict:
+        return {
+            "track_id":       track_id,
+            "jersey_number":  None,
+            "confidence":     0.0,
+            "team":           None,
+            "team_color_hsv": [],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def create_jersey_ocr(
+    models_path: Optional[str] = None,
+    device: Optional[str] = None,
+) -> "JerseyOCR":
+    """Create, load model, and load OCR in one call."""
+    model_file = os.path.join(models_path or MODELS_DIR, MODEL_FILENAME)
+    ocr = JerseyOCR(model_path=model_file, device=device)
+    ocr.load_model()
+    ocr.load_ocr()
+    return ocr
+
+
+# ---------------------------------------------------------------------------
+# Smoke test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    print("=== JerseyOCR smoke test ===\n")
+
+    jerseyocr = JerseyOCR()
+
+    # ── 1. _vote_number logic ─────────────────────────────────────────
+    print("--- 1. _vote_number ---")
+    tid = 10
+
+    # 2 votes for 7 → not confirmed
+    jerseyocr._vote_number(tid, 7)
+    jerseyocr._vote_number(tid, 7)
+    assert jerseyocr._vote_number(tid, 3) is None, "Should not confirm with 2 votes"
+    print("  2 votes for 7, 1 for 3 → not confirmed ✓")
+
+    # 3rd vote for 7 → confirmed
+    result = jerseyocr._vote_number(tid, 7)
+    assert result == 7, f"Expected 7, got {result}"
+    print(f"  3 votes for 7 → confirmed: {result} ✓")
+
+    # Confidence
+    conf = jerseyocr._vote_confidence(tid)
+    assert conf > 0.5, f"Expected confidence > 0.5, got {conf:.2f}"
+    print(f"  Vote confidence: {conf:.2f} ✓")
+
+    # reset_votes for one track
+    jerseyocr.reset_votes(tid)
+    assert tid not in jerseyocr._votes
+    print("  reset_votes(track_id) cleared ✓")
+
+    # None candidate → no change, still returns None (no votes)
+    r_none = jerseyocr._vote_number(99, None)
+    assert r_none is None
+    print("  None candidate → None ✓")
+
+    # Voting window: only last MAX_VOTE_HISTORY candidates matter
+    tid2 = 20
+    for _ in range(MAX_VOTE_HISTORY):
+        jerseyocr._vote_number(tid2, 23)
+    # Now override with different number → old ones still dominate
+    for _ in range(2):
+        jerseyocr._vote_number(tid2, 99)
+    confirmed2 = jerseyocr._current_confirmed(tid2)
+    assert confirmed2 == 23, f"Expected 23, got {confirmed2}"
+    print(f"  Rolling window: dominant=23 persists over 2 votes for 99 ✓")
+
+    jerseyocr.reset_votes()
+    assert len(jerseyocr._votes) == 0
+    print("  reset_votes() clears all ✓")
+
+    # ── 2. _parse_jersey_number ───────────────────────────────────────
+    print("\n--- 2. _parse_jersey_number ---")
+    cases = [
+        ("23",    23),
+        (" 7 ",    7),
+        ("00",     0),
+        ("99",    99),
+        ("100",   10),   # takes first 2 digits: "10"
+        ("abc",  None),
+        ("",     None),
+        ("3b",     3),
+        ("B5",     5),
+        ("123",   12),   # takes first 2 digits
+    ]
+    for text, expected in cases:
+        got = JerseyOCR._parse_jersey_number(text)
+        status = "✓" if got == expected else f"✗ FAIL (got {got})"
+        print(f"  '{text}' → {got}  {status}")
+        assert got == expected, f"parse_jersey_number('{text}') = {got}, expected {expected}"
+
+    # ── 3. _preprocess_for_ocr ───────────────────────────────────────
+    print("\n--- 3. _preprocess_for_ocr ---")
+    dummy_crop = np.random.randint(0, 255, (80, 60, 3), dtype=np.uint8)
+    processed  = _preprocess_for_ocr(dummy_crop)
+    assert processed.shape[0] == OCR_HEIGHT_PX, f"Expected height={OCR_HEIGHT_PX}"
+    assert processed.shape[2] == 3, "Expected 3 channels"
+    print(f"  Input (80×60) → output {processed.shape[:2]} (height={OCR_HEIGHT_PX}px) ✓")
+
+    tiny = np.zeros((2, 1, 3), dtype=np.uint8)
+    result_tiny = _preprocess_for_ocr(tiny)
+    assert result_tiny.shape[0] == OCR_HEIGHT_PX
+    print("  Tiny 2×1 crop → safe output ✓")
+
+    # ── 4. _back_crop_heuristic ──────────────────────────────────────
+    print("\n--- 4. _back_crop_heuristic ---")
+    y1, y2, x1, x2 = _back_crop_heuristic(200, 100)
+    assert y1 < y2 and x1 < x2
+    assert y1 == 30 and y2 == 130  # 15% of 200 and 65% of 200
+    assert x1 == 20 and x2 == 80   # 20% and 80% of 100 (center 60%)
+    print(f"  200×100 player → number bbox: y=[{y1},{y2}] x=[{x1},{x2}] ✓")
+
+    # ── 5. HSV team distance ──────────────────────────────────────────
+    print("\n--- 5. _hsv_distance (circular hue) ---")
+    # Same color → distance 0
+    d0 = JerseyOCR._hsv_distance([10, 200, 180], [10, 200, 180])
+    assert d0 == 0.0
+    print(f"  Identical HSV → {d0:.2f} ✓")
+
+    # Hue wrap-around: 5° vs 175° → distance = min(170, 10) * 2 = 20
+    d_wrap = JerseyOCR._hsv_distance([5, 0, 0], [175, 0, 0])
+    assert abs(d_wrap - 20.0) < 0.01, f"Expected 20.0, got {d_wrap:.4f}"
+    print(f"  Hue 5° vs 175° wrap → {d_wrap:.2f} (circular) ✓")
+
+    # ── 6. set_team_reference + classify_team ─────────────────────────
+    print("\n--- 6. set_team_reference / _classify_team ---")
+    jerseyocr.set_team_reference("A", [30.0, 200.0, 180.0])   # warm/yellow
+    jerseyocr.set_team_reference("B", [100.0, 200.0, 180.0])  # cool/green
+
+    # Create synthetic crops
+    yellow_player = np.full((100, 60, 3), [30, 200, 150], dtype=np.uint8)
+    green_player  = np.full((100, 60, 3), [100, 200, 150], dtype=np.uint8)
+    # Convert from HSV to BGR for the crop
+    yellow_bgr = cv2.cvtColor(yellow_player, cv2.COLOR_HSV2BGR)
+    green_bgr  = cv2.cvtColor(green_player,  cv2.COLOR_HSV2BGR)
+
+    team_y = jerseyocr._classify_team(yellow_bgr, track_id=1)
+    team_g = jerseyocr._classify_team(green_bgr,  track_id=2)
+    assert team_y == "A", f"Yellow player should be Team A, got {team_y}"
+    assert team_g == "B", f"Green player should be Team B, got {team_g}"
+    print(f"  Yellow crop → Team {team_y} ✓")
+    print(f"  Green  crop → Team {team_g} ✓")
+
+    # ── 7. process() with None / empty ───────────────────────────────
+    print("\n--- 7. process() edge cases ---")
+    out = jerseyocr.process(None, [{"track_id": 1, "bbox": [0, 0, 100, 200]}])
+    assert out["jersey_results"] == []
+    print("  process(None frame) → empty ✓")
+
+    out2 = jerseyocr.process(np.zeros((480, 640, 3), dtype=np.uint8), [])
+    assert out2["jersey_results"] == []
+    print("  process(empty players) → empty ✓")
+
+    # Out-of-bounds bbox → empty result for that player
+    out3 = jerseyocr.process(
+        np.zeros((480, 640, 3), dtype=np.uint8),
+        [{"track_id": 5, "bbox": [700, 700, 900, 900]}],
+    )
+    assert len(out3["jersey_results"]) == 1
+    assert out3["jersey_results"][0]["jersey_number"] is None
+    print("  Out-of-bounds bbox → empty result ✓")
+
+    # ── 8. calibrate_teams ───────────────────────────────────────────
+    print("\n--- 8. calibrate_teams ---")
+    frame_cal = np.zeros((480, 640, 3), dtype=np.uint8)
+    # Two distinct player patches: yellow (team A) and blue (team B)
+    frame_cal[50:250, 50:150]  = cv2.cvtColor(
+        np.full((200, 100, 3), [30, 220, 200], dtype=np.uint8), cv2.COLOR_HSV2BGR
+    )
+    frame_cal[50:250, 200:300] = cv2.cvtColor(
+        np.full((200, 100, 3), [110, 220, 200], dtype=np.uint8), cv2.COLOR_HSV2BGR
+    )
+    players_cal = [
+        {"track_id": 11, "bbox": [50, 50, 150, 250]},
+        {"track_id": 12, "bbox": [200, 50, 300, 250]},
+    ]
+    jerseyocr2 = JerseyOCR()
+    colors = jerseyocr2.calibrate_teams(frame_cal, players_cal)
+    assert "A" in colors and "B" in colors
+    assert len(colors["A"]) == 3 and len(colors["B"]) == 3
+    print(f"  Team A color (HSV): {[round(v,1) for v in colors['A']]} ✓")
+    print(f"  Team B color (HSV): {[round(v,1) for v in colors['B']]} ✓")
+
+    # ── 9. Model load ─────────────────────────────────────────────────
+    print("\n--- 9. Model load ---")
+    script_dir = Path(__file__).parent
+    model_path = script_dir.parent / "models" / MODEL_FILENAME
+    try:
+        ocr_real = JerseyOCR(model_path=str(model_path))
+        ocr_real.load_model()
+        print(f"  jersey_no.pt loaded ✓")
+        print(f"  model.names (first 5): {dict(list(ocr_real.model.names.items())[:5])}")
+        print(f"  number_class_idx: {ocr_real._number_class_idx} "
+              f"({'fine-tuned' if ocr_real._number_class_idx is not None else 'fallback heuristic'})")
+    except (FileNotFoundError, ImportError) as e:
+        print(f"  [SKIP] {e}")
+
+    print("\n--- 10. PaddleOCR load ---")
+    try:
+        jerseyocr3 = JerseyOCR()
+        jerseyocr3.load_ocr()
+        print("  PaddleOCR loaded ✓")
+    except ImportError as e:
+        print(f"  [SKIP] {e}")
+
+    print("\n=== All tests passed ===")

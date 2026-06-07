@@ -3,6 +3,7 @@ import { MatchState, Player, GameEvent, PlayerStats, MpiMetrics, BallState, Rost
 
 const initialState: MatchState = {
   matchId: '',
+  region: '',
   teamA: { name: '', score: 0 },
   teamB: { name: '', score: 0 },
   quarter: 1,
@@ -20,6 +21,7 @@ const initialState: MatchState = {
 
 export const useMatchStore = create<MatchState & {
   setMatchId: (id: string) => void
+  setRegion: (region: string) => void
   setTeamA: (name: string) => void
   setTeamB: (name: string) => void
   setScore: (teamA: number, teamB: number) => void
@@ -42,6 +44,7 @@ export const useMatchStore = create<MatchState & {
   ...initialState,
 
   setMatchId: (id) => set({ matchId: id }),
+  setRegion: (region) => set({ region }),
   setTeamA: (name) => set((state) => ({ teamA: { ...state.teamA, name } })),
   setTeamB: (name) => set((state) => ({ teamB: { ...state.teamB, name } })),
   setScore: (teamA, teamB) =>

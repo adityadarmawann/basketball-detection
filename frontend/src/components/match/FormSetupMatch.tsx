@@ -11,12 +11,14 @@ export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
   const [teamB, setTeamB] = useState('')
   const [category, setCategory] = useState("Men's")
   const [round, setRound] = useState('Final')
+  const [region, setRegion] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
   const setTeamAName = useMatchStore((s) => s.setTeamA)
   const setTeamBName = useMatchStore((s) => s.setTeamB)
   const setMatchId = useMatchStore((s) => s.setMatchId)
+  const setRegionStore = useMatchStore((s) => s.setRegion)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -30,18 +32,23 @@ export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
       setError('Nama tim harus berbeda')
       return
     }
+    if (!region.trim()) {
+      setError('Region harus diisi')
+      return
+    }
 
     setLoading(true)
 
     try {
       const response = await axios.post(
         `${import.meta.env.VITE_API_URL}/api/match`,
-        { team_a: teamA.trim(), team_b: teamB.trim(), category, round }
+        { team_a: teamA.trim(), team_b: teamB.trim(), category, round, region: region.trim() }
       )
       const { match_id } = response.data
       setMatchId(match_id)
       setTeamAName(teamA.trim())
       setTeamBName(teamB.trim())
+      setRegionStore(region.trim())
       onComplete()
     } catch (err: unknown) {
       if (isAxiosError(err) && err.response) {
@@ -52,6 +59,7 @@ export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
         setMatchId(mockId)
         setTeamAName(teamA.trim())
         setTeamBName(teamB.trim())
+        setRegionStore(region.trim())
         onComplete()
       }
     } finally {
@@ -93,6 +101,20 @@ export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
             value={teamB}
             onChange={(e) => setTeamB(e.target.value)}
             placeholder="Masukkan nama tim"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
+            disabled={loading}
+          />
+        </div>
+
+        <div className="md:col-span-2">
+          <label className="block text-text-secondary text-sm font-medium mb-2">
+            Region
+          </label>
+          <input
+            type="text"
+            value={region}
+            onChange={(e) => setRegion(e.target.value)}
+            placeholder="Contoh: Jawa Barat, DKI Jakarta, Sulawesi Selatan"
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
             disabled={loading}
           />

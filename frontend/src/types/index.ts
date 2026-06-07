@@ -93,6 +93,7 @@ export interface BallState {
 
 export interface MatchState {
   matchId: string;
+  region: string;
   teamA: { name: string; score: number };
   teamB: { name: string; score: number };
   quarter: number;

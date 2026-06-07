@@ -14,7 +14,7 @@ load_dotenv()
 
 # Import database connections
 from db.mongo import connect_mongo, close_mongo
-from db.redis_client import get_redis
+from db.redis_client import get_redis  # noqa: F401 — used by routes/upload.py
 
 # Import routes
 from api.routes import upload, stats, events, roster, match

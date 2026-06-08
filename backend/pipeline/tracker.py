@@ -88,25 +88,16 @@ class PlayerTracker:
     def _build_tracker(self):
         """Instantiate a fresh tracker. Raises ImportError if BoxMOT missing."""
         try:
-            if self.tracker_type == "bytetrack":
-                from boxmot.trackers.bytetrack.bytetrack import ByteTrack
-                # track_buffer=25 keeps lost tracks alive for ~1 s at 25 fps,
-                # which covers brief occlusions without accumulating ghost IDs.
-                return ByteTrack(track_buffer=25, frame_rate=self.frame_rate)
+            from boxmot.trackers import ByteTrack, BotSort
 
+            if self.tracker_type == "bytetrack":
+                return ByteTrack(track_buffer=25, frame_rate=self.frame_rate)
             else:  # botsort
-                from boxmot.trackers.botsort.botsort import BotSort
-                return BotSort(
-                    reid_model=self.reid_model,
-                    with_reid=(self.reid_model is not None),
-                    track_buffer=30,
-                    frame_rate=self.frame_rate,
-                )
+                return BotSort(track_buffer=30, frame_rate=self.frame_rate)
 
         except ImportError as exc:
             raise ImportError(
-                "BoxMOT is required. "
-                "Install via: pip install boxmot==10.0.43"
+                "BoxMOT is required. Install via: pip install boxmot"
             ) from exc
 
     def initialize(self, frame_shape: tuple) -> None:
@@ -118,12 +109,19 @@ class PlayerTracker:
             frame_shape: (H, W, C) from frame.shape.
         """
         self._frame_shape = frame_shape
-        self._player_tracker  = self._build_tracker()
-        self._referee_tracker = self._build_tracker()
-        logger.info(
-            "PlayerTracker ready: type=%s  shape=%s  fps=%d",
-            self.tracker_type, frame_shape, self.frame_rate,
-        )
+        try:
+            self._player_tracker  = self._build_tracker()
+            self._referee_tracker = self._build_tracker()
+            self._unavailable = False
+            logger.info(
+                "PlayerTracker ready: type=%s  shape=%s  fps=%d",
+                self.tracker_type, frame_shape, self.frame_rate,
+            )
+        except ImportError as e:
+            logger.warning("BoxMOT not available — tracking disabled: %s", e)
+            self._player_tracker  = None
+            self._referee_tracker = None
+            self._unavailable = True
 
     def is_initialized(self) -> bool:
         return self._player_tracker is not None
@@ -178,11 +176,11 @@ class PlayerTracker:
             return self._empty_result()
 
         if not self.is_initialized():
-            logger.warning(
-                "update() called before initialize() — "
-                "auto-initializing with current frame shape"
-            )
+            if getattr(self, '_unavailable', False):
+                return self._empty_result()
             self.initialize(frame.shape)
+            if not self.is_initialized():
+                return self._empty_result()
 
         # Players
         player_arr = self._detections_to_array(

@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMatchStore } from '../../store/matchStore'
-import { PlayerStats } from '../../types'
+import { GameEvent, PlayerStats } from '../../types'
 import clsx from 'clsx'
 
 type Tab = 'stats' | 'lineups'
@@ -39,39 +39,60 @@ function StatBar({ label, valueA, valueB }: { label: string; valueA: number; val
   )
 }
 
+const emptyTeamStats = () => ({ pts: 0, totReb: 0, ast: 0, stl: 0, blocks: 0, tov: 0 })
+
 export default function TabsStatsLineup() {
   const [activeTab, setActiveTab] = useState<Tab>('stats')
   const [quarter, setQuarter] = useState<Quarter>(0)
   const navigate = useNavigate()
-  const { stats, teamA, teamB } = useMatchStore()
+  const { stats, events, teamA, teamB } = useMatchStore()
 
   const { teamAStats, teamBStats } = useMemo(() => {
-    const players = Object.values(stats)
-    const teamAPlayers = players.filter((p) => p.team === 'A')
-    const teamBPlayers = players.filter((p) => p.team === 'B')
-
-    const sum = (arr: PlayerStats[], key: keyof PlayerStats) =>
-      arr.reduce((acc, p) => acc + ((p[key] as number) || 0), 0)
-
-    return {
-      teamAStats: {
-        pts: sum(teamAPlayers, 'pts'),
-        totReb: sum(teamAPlayers, 'totReb'),
-        ast: sum(teamAPlayers, 'ast'),
-        stl: sum(teamAPlayers, 'stl'),
-        blocks: sum(teamAPlayers, 'blocks'),
-        tov: sum(teamAPlayers, 'tov'),
-      },
-      teamBStats: {
-        pts: sum(teamBPlayers, 'pts'),
-        totReb: sum(teamBPlayers, 'totReb'),
-        ast: sum(teamBPlayers, 'ast'),
-        stl: sum(teamBPlayers, 'stl'),
-        blocks: sum(teamBPlayers, 'blocks'),
-        tov: sum(teamBPlayers, 'tov'),
-      },
+    if (quarter === 0) {
+      // All quarters — sum from cumulative store stats
+      const players = Object.values(stats)
+      const teamAPlayers = players.filter((p) => p.team === 'A')
+      const teamBPlayers = players.filter((p) => p.team === 'B')
+      const sum = (arr: PlayerStats[], key: keyof PlayerStats) =>
+        arr.reduce((acc, p) => acc + ((p[key] as number) || 0), 0)
+      return {
+        teamAStats: {
+          pts: sum(teamAPlayers, 'pts'),
+          totReb: sum(teamAPlayers, 'totReb'),
+          ast: sum(teamAPlayers, 'ast'),
+          stl: sum(teamAPlayers, 'stl'),
+          blocks: sum(teamAPlayers, 'blocks'),
+          tov: sum(teamAPlayers, 'tov'),
+        },
+        teamBStats: {
+          pts: sum(teamBPlayers, 'pts'),
+          totReb: sum(teamBPlayers, 'totReb'),
+          ast: sum(teamBPlayers, 'ast'),
+          stl: sum(teamBPlayers, 'stl'),
+          blocks: sum(teamBPlayers, 'blocks'),
+          tov: sum(teamBPlayers, 'tov'),
+        },
+      }
     }
-  }, [stats])
+
+    // Specific quarter — aggregate directly from events
+    const aggA = emptyTeamStats()
+    const aggB = emptyTeamStats()
+    events
+      .filter((e: GameEvent) => e.quarter === quarter)
+      .forEach((e: GameEvent) => {
+        const agg = e.team === 'A' ? aggA : aggB
+        switch (e.eventType) {
+          case 'FGM': agg.pts += e.points ?? 2; break
+          case 'REB': agg.totReb++;              break
+          case 'AST': agg.ast++;                 break
+          case 'STL': agg.stl++;                 break
+          case 'BLK': agg.blocks++;              break
+          case 'TOV': agg.tov++;                 break
+        }
+      })
+    return { teamAStats: aggA, teamBStats: aggB }
+  }, [stats, events, quarter])
 
   return (
     <div className="bg-surface rounded-lg shadow-sm overflow-hidden">

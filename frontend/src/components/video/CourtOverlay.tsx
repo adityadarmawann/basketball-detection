@@ -52,6 +52,9 @@ export default function CourtOverlay({ videoRef }: CourtOverlayProps) {
     canvasWidth: number,
     canvasHeight: number
   ) => {
+    // Only draw after jersey OCR confirmed — no jersey number means not yet identified
+    if (player.jerseyNumber === null || player.jerseyNumber === undefined) return
+
     // Assuming bbox coordinates are normalized [x1, y1, x2, y2] from 0 to 1
     const [x1, y1, x2, y2] = player.bbox
     const absX = x1 * canvasWidth

@@ -275,10 +275,10 @@ class VideoProcessor:
                 if frame_id % STATS_UPDATE_INTERVAL == 0 and self._stats:
                     stats = self._stats.get_live_stats()
                     msg   = self._build_ws_message(frame_data, stats)
-                    self._push_redis(match_id, msg)
+                    await self._push_redis(match_id, msg)
                     if ws_manager:
                         try:
-                            await ws_manager.broadcast(json.dumps(msg, default=str))
+                            await ws_manager.broadcast(match_id, msg)
                         except Exception as e:
                             logger.debug("WS broadcast error: %s", e)
 
@@ -454,12 +454,25 @@ class VideoProcessor:
                     tracking_snapshot[player["track_id"]] = (
                         cp[0], cp[1], timestamp_ms
                     )
+
+            # Build stats-compatible roster: {track_id: {name, jersey_number, team}}
+            # using tracker jersey map + raw upload roster (jersey_str → name)
+            stats_roster: dict = {}
+            if self._tracker and self._roster:
+                for tid, jersey in self._tracker.track_jersey_map.items():
+                    name = self._roster.get(str(jersey), f"#{jersey}")
+                    stats_roster[tid] = {
+                        "name":         name,
+                        "jersey_number": jersey,
+                        "team":          "",
+                    }
+
             try:
                 self._stats.update(
                     events=frame_data["events"],
                     tracking_snapshot=tracking_snapshot or None,
                     pose_snapshot=frame_data.get("pose"),
-                    roster=self._roster or None,
+                    roster=stats_roster or None,
                 )
             except Exception as e:
                 logger.debug("Stats update frame %d: %s", frame_id, e)
@@ -486,10 +499,20 @@ class VideoProcessor:
 
         player_stats_all = stats.get("player_stats", {})
 
-        # ── Players ────────────────────────────────────────────────────────
+        # ── Players (only jersey-confirmed) ───────────────────────────────
+        # A player's bbox is shown only after jersey_no.pt + OCR confirm the
+        # number (VOTE_THRESHOLD frames). Until then the player is tracked
+        # internally but not broadcast — matches the gradual-discovery UX.
         players = []
         for player in tracking.get("tracked_players", []):
-            tid        = player["track_id"]
+            tid          = player["track_id"]
+            jersey_number = (self._tracker.get_jersey_number(tid)
+                             if self._tracker else None)
+
+            # Skip until jersey confirmed
+            if jersey_number is None:
+                continue
+
             pstat      = player_stats_all.get(tid, {})
             mpi        = pstat.get("mpi", {})
             pose_entry = pose_map.get(tid, {})
@@ -502,8 +525,7 @@ class VideoProcessor:
 
             players.append({
                 "trackId":      tid,
-                "jerseyNumber": (self._tracker.get_jersey_number(tid)
-                                 if self._tracker else None),
+                "jerseyNumber": jersey_number,
                 "name":         pstat.get("name", f"Player_{tid}"),
                 "team":         pstat.get("team", ""),
                 "bbox":         player.get("bbox", []),
@@ -565,41 +587,43 @@ class VideoProcessor:
 
     async def _save_event_mongo(self, event: dict, match_id: str) -> None:
         """Persist one event to MongoDB events collection (no-op if mongo absent)."""
-        if not self._mongo_db:
+        if self._mongo_db is None:
             return
         try:
             doc = {**event, "match_id": match_id, "saved_at": time.time()}
-            await self._mongo_db["events"].insert_one(doc)
+            self._mongo_db["events"].insert_one(doc)   # pymongo is sync — no await
         except Exception as e:
             logger.warning("MongoDB write error: %s", e)
 
-    def _push_redis(self, match_id: str, data: dict) -> None:
+    async def _push_redis(self, match_id: str, data: dict) -> None:
         """Publish data to Redis channel match:{match_id} (no-op if redis absent)."""
-        if not self._redis:
+        if self._redis is None:
             return
         try:
-            self._redis.publish(
-                f"match:{match_id}",
-                json.dumps(data, default=str),
-            )
+            payload = json.dumps(data, default=str)
+            result = self._redis.publish(f"match:{match_id}", payload)
+            # redis.asyncio returns a coroutine; plain redis returns an int
+            if asyncio.iscoroutine(result):
+                await result
         except Exception as e:
             logger.debug("Redis publish error: %s", e)
 
     async def _finalize(self, match_id: str) -> None:
         """Update MongoDB match status; push final stats snapshot to Redis."""
-        if self._mongo_db:
+        if self._mongo_db is not None:
             try:
-                await self._mongo_db["matches"].update_one(
+                self._mongo_db["matches"].update_one(   # pymongo is sync — no await
                     {"_id": match_id},
                     {"$set": {"status": self._status,
                                "processed_at": time.time()}},
+                    upsert=True,
                 )
             except Exception as e:
                 logger.warning("MongoDB finalize error: %s", e)
 
-        if self._redis and self._stats:
+        if self._redis is not None and self._stats is not None:
             try:
-                self._push_redis(match_id, {
+                await self._push_redis(match_id, {
                     "type":   "processing_complete",
                     "status": self._status,
                     "stats":  self._stats.get_live_stats(),

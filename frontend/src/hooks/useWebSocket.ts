@@ -212,7 +212,7 @@ export const useWebSocket = () => {
       wsRef.current = null
     }
 
-    const url = `${WS_BASE}/api/ws/live/${encodeURIComponent(matchId)}`
+    const url = `${WS_BASE}/api/ws/live?match_id=${encodeURIComponent(matchId)}`
     const ws  = new WebSocket(url)
     wsRef.current = ws
 

@@ -2,10 +2,9 @@
 Jersey number detection (2-layer) + team color classification.
 
 Layer 1 — jersey_no.pt:
-  Locates the jersey number bbox within the player's back region.
-  NOTE: jersey_no.pt is currently a COCO-80 base model (not yet fine-tuned
-  for "number" class). Until a domain-trained model is available the code
-  falls back to a heuristic torso-center crop for the number area.
+  Fine-tuned YOLOv8 with 1 class ("number").
+  Locates the jersey number bbox within the player crop.
+  Falls back to heuristic torso-center crop if model confidence is too low.
 
 Layer 2 — PaddleOCR 3.5.0:
   Reads the digit(s) from the localized crop, filters to 0-99.
@@ -133,13 +132,14 @@ class JerseyOCR:
 
             if self._number_class_idx is None:
                 logger.warning(
-                    "jersey_no.pt has no 'number' class (found %d COCO classes). "
+                    "jersey_no.pt has no recognisable 'number' class (classes: %s). "
                     "Using heuristic torso-crop fallback for number localisation.",
-                    len(self.model.names),
+                    list(self.model.names.values()),
                 )
             else:
                 logger.info(
-                    "jersey_no.pt loaded: 'number' class at index %d",
+                    "jersey_no.pt loaded: '%s' class at index %d",
+                    self.model.names[self._number_class_idx],
                     self._number_class_idx,
                 )
 
@@ -255,9 +255,8 @@ class JerseyOCR:
         """
         Returns (y1, y2, x1, x2) of the number region inside player_crop.
 
-        If jersey_no.pt is fine-tuned (has a 'number' class): runs YOLO
-        and picks the highest-confidence detection.
-        Otherwise: uses the heuristic torso-center crop.
+        Runs YOLO jersey_no.pt and picks the highest-confidence "number" detection.
+        Falls back to heuristic torso-center crop if no detection passes conf threshold.
         """
         h, w = player_crop.shape[:2]
         if h < 8 or w < 4:

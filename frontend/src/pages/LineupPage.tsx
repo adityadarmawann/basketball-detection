@@ -3,30 +3,78 @@ import MatchHeader from '../components/match/MatchHeader'
 import PlayerStatsTable from '../components/lineup/PlayerStatsTable'
 import QuarterFilter from '../components/match/QuarterFilter'
 import { Download } from 'lucide-react'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import Papa from 'papaparse'
+import { GameEvent, PlayerStats } from '../types'
 
 export default function LineupPage() {
   const store = useMatchStore()
+  const [selectedQuarter, setSelectedQuarter] = useState(0)
 
-  const teamAPlayers = useMemo(
-    () => Object.values(store.stats).filter((p) => p.team === 'A'),
-    [store.stats]
-  )
-  const teamBPlayers = useMemo(
-    () => Object.values(store.stats).filter((p) => p.team === 'B'),
-    [store.stats]
-  )
+  const { teamAPlayers, teamBPlayers } = useMemo(() => {
+    if (selectedQuarter === 0) {
+      const all = Object.values(store.stats)
+      return {
+        teamAPlayers: all.filter((p) => p.team === 'A'),
+        teamBPlayers: all.filter((p) => p.team === 'B'),
+      }
+    }
+
+    // Build zeroed-out per-player stats for the selected quarter from events
+    const perPlayer: Record<number, PlayerStats> = {}
+    Object.values(store.stats).forEach((p) => {
+      perPlayer[p.playerId] = {
+        ...p,
+        pts: 0, twoPointMade: 0, twoPointAtt: 0,
+        threePointMade: 0, threePointAtt: 0,
+        ftMade: 0, ftAtt: 0, fgPercent: 0,
+        offReb: 0, defReb: 0, totReb: 0,
+        ast: 0, stl: 0, tov: 0, fouls: 0, blocks: 0,
+        plusMinus: 0, eff: 0,
+      }
+    })
+
+    store.events
+      .filter((e: GameEvent) => e.quarter === selectedQuarter)
+      .forEach((e: GameEvent) => {
+        const entry = Object.values(perPlayer).find(
+          (p) => p.jerseyNumber === e.playerId || p.playerId === e.playerId
+        )
+        if (!entry) return
+        switch (e.eventType) {
+          case 'FGM':
+            if (e.points === 3) { entry.threePointMade++; entry.threePointAtt++ }
+            else { entry.twoPointMade++; entry.twoPointAtt++ }
+            entry.pts += e.points ?? 2
+            break
+          case 'REB': entry.totReb++;  break
+          case 'AST': entry.ast++;     break
+          case 'STL': entry.stl++;     break
+          case 'BLK': entry.blocks++;  break
+          case 'TOV': entry.tov++;     break
+          case 'FOUL': entry.fouls++;  break
+        }
+        const totalAtt = entry.twoPointAtt + entry.threePointAtt
+        entry.fgPercent = totalAtt > 0
+          ? ((entry.twoPointMade + entry.threePointMade) / totalAtt) * 100
+          : 0
+        entry.eff =
+          (entry.pts + entry.totReb + entry.ast + entry.stl + entry.blocks) -
+          (totalAtt - entry.twoPointMade - entry.threePointMade + entry.tov)
+      })
+
+    const all = Object.values(perPlayer)
+    return {
+      teamAPlayers: all.filter((p) => p.team === 'A'),
+      teamBPlayers: all.filter((p) => p.team === 'B'),
+    }
+  }, [store.stats, store.events, selectedQuarter])
 
   const handleQuarterChange = (q: number) => {
-    console.log('Filtering lineup stats for quarter:', q)
-    // TODO: Implement logic to fetch/filter stats for the selected quarter
+    setSelectedQuarter(q)
   }
 
   const handleExport = () => {
-    console.log('Exporting CSV...')
-    // TODO: Connect to exportToCSV utility
-    // NOTE: This logic should ideally be moved to `utils/exportUtils.ts`
     const allPlayers = [...teamAPlayers, ...teamBPlayers]
     if (allPlayers.length === 0) {
       alert('Tidak ada data pemain untuk diekspor.')
@@ -57,7 +105,7 @@ export default function LineupPage() {
     const link = document.createElement('a')
     const url = URL.createObjectURL(blob)
     link.setAttribute('href', url)
-    link.setAttribute('download', `match-stats-${store.matchId || 'export'}.csv`)
+    link.setAttribute('download', `match-stats-${store.matchId || 'export'}-Q${selectedQuarter || 'all'}.csv`)
     link.style.visibility = 'hidden'
     document.body.appendChild(link)
     link.click()

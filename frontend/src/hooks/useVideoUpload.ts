@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import axios, { isAxiosError } from 'axios'
+import { useMatchStore } from '../store/matchStore'
 
 interface UploadProgress {
   progress: number
@@ -10,6 +11,9 @@ interface UploadProgress {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export const useVideoUpload = () => {
+  const matchId = useMatchStore((s) => s.matchId)
+  const roster  = useMatchStore((s) => s.roster)
+
   const [uploadProgress, setUploadProgress] = useState<UploadProgress>({
     progress: 0,
     status: 'idle',
@@ -22,6 +26,14 @@ export const useVideoUpload = () => {
     try {
       const formData = new FormData()
       formData.append('file', file)
+      formData.append('match_id', matchId || `match-${Date.now()}`)
+
+      // Send roster as JSON map: { jersey_number: name }
+      if (roster.length > 0) {
+        const rosterMap: Record<string, string> = {}
+        roster.forEach((p) => { rosterMap[String(p.jerseyNumber)] = p.name })
+        formData.append('roster', JSON.stringify(rosterMap))
+      }
 
       const response = await axios.post(
         `${import.meta.env.VITE_API_URL}/api/upload-video`,
@@ -39,7 +51,12 @@ export const useVideoUpload = () => {
       return response.data as { video_id: string; match_id?: string }
     } catch (err: unknown) {
       if (isAxiosError(err) && err.response) {
-        const msg = err.response.data?.detail || 'Upload gagal.'
+        const raw = err.response.data?.detail
+        const msg = typeof raw === 'string'
+          ? raw
+          : Array.isArray(raw)
+            ? raw.map((e: { msg?: string }) => e.msg ?? JSON.stringify(e)).join('; ')
+            : 'Upload gagal.'
         setUploadProgress({ progress: 0, status: 'error', message: msg })
         throw err
       }

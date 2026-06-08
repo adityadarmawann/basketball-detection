@@ -1,9 +1,11 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import { ChevronLeft, LayoutDashboard } from 'lucide-react'
 import { useMatchStore } from '../store/matchStore'
 import FormSetupMatch from '../components/match/FormSetupMatch'
 import RosterManager from '../components/match/RosterManager'
 import MatchHeader from '../components/match/MatchHeader'
 import VideoUpload from '../components/video/VideoUpload'
+import VideoScanningStatus from '../components/video/VideoScanningStatus'
 import VideoPlayer from '../components/video/VideoPlayer'
 import Scoreboard from '../components/dashboard/Scoreboard'
 import MvpRanking from '../components/dashboard/MvpRanking'
@@ -11,7 +13,7 @@ import LiveEventFeed from '../components/dashboard/LiveEventFeed'
 import TabsStatsLineup from '../components/match/TabsStatsLineup'
 import { useWebSocket } from '../hooks/useWebSocket'
 
-type MatchStep = 'setup' | 'roster' | 'upload' | 'live'
+type MatchStep = 'setup' | 'roster' | 'upload' | 'analyzing' | 'live'
 
 export default function MatchPage() {
   const [step, setStep] = useState<MatchStep>('setup')
@@ -20,19 +22,40 @@ export default function MatchPage() {
   const store = useMatchStore()
   const { connect, disconnect } = useWebSocket()
 
+  // Track whether WS session has started so we only connect once per match
+  // (not on every analyzing ↔ live transition).
+  const wsSessionRef = useRef(false)
+
   useEffect(() => {
-    if (step === 'live') {
+    // Start WS as soon as pipeline begins — so broadcasts aren't missed
+    // while the user watches the scanning panel.
+    if (step === 'analyzing' && !wsSessionRef.current) {
+      wsSessionRef.current = true
       connect()
     }
-    return () => {
-      disconnect()
+    // Reset flag when leaving the analysis flow entirely
+    if (step !== 'analyzing' && step !== 'live') {
+      wsSessionRef.current = false
     }
-  }, [step, connect, disconnect])
+  }, [step, connect])
+
+  // Disconnect only when the component unmounts (page leave / new match)
+  useEffect(() => {
+    return () => { disconnect() }
+  }, [disconnect])
 
   const handleUploadComplete = (result: { videoId: string; videoUrl: string }) => {
     setVideoUrl(result.videoUrl)
+    setStep('analyzing')
+  }
+
+  const handleAnalysisComplete = () => {
     setStep('live')
   }
+
+  const goToVideo = useCallback(() => {
+    setStep('analyzing')
+  }, [])
 
   const mvpPlayers = useMemo(() => {
     return Object.values(store.stats)
@@ -70,8 +93,59 @@ export default function MatchPage() {
         <VideoUpload onUploadComplete={handleUploadComplete} />
       )}
 
+      {step === 'analyzing' && videoUrl && store.matchId && (
+        <div className="space-y-4">
+          {/* Nav bar */}
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-text-secondary font-medium">
+              Video &amp; Analisis
+            </span>
+            <button
+              onClick={() => setStep('live')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white text-xs font-bold rounded-lg hover:bg-primary-dark transition-smooth"
+            >
+              <LayoutDashboard size={13} />
+              Lihat Dashboard
+            </button>
+          </div>
+
+          {/* Original video preview — shown immediately after upload */}
+          <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-100">
+              <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
+                Preview Video Asli
+              </span>
+            </div>
+            <video
+              src={videoUrl}
+              controls
+              className="w-full max-h-80 object-contain bg-black"
+            />
+          </div>
+
+          {/* AI scanning progress */}
+          <VideoScanningStatus
+            matchId={store.matchId}
+            onComplete={handleAnalysisComplete}
+          />
+        </div>
+      )}
+
       {step === 'live' && (
         <div className="space-y-6">
+          {/* Back to video nav */}
+          {videoUrl && (
+            <div className="flex justify-start">
+              <button
+                onClick={goToVideo}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-surface border border-gray-200 text-text-secondary text-xs font-bold rounded-lg hover:border-primary hover:text-primary transition-smooth"
+              >
+                <ChevronLeft size={13} />
+                Video &amp; Analisis
+              </button>
+            </div>
+          )}
+
           {/* Match Header */}
           <MatchHeader
             teamA={store.teamA.name}

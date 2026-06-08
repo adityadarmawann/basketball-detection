@@ -7,33 +7,34 @@ aiofiles==25.1.0
 
 # ── Database ──────────────────────────────────────────────────────────────────
 pymongo==4.16.0
-redis>=5.0.0            # redis.asyncio stable API; 5.x–8.x all compatible
+redis>=5.0.0            # redis.asyncio untuk pub/sub; jalankan: pip install redis
 
 # ── PyTorch ───────────────────────────────────────────────────────────────────
-# GPU / CUDA install — run before pip install -r requirements.txt:
-#   pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu121
-torch==2.2.2
-torchvision==0.17.2
+# GPU / CUDA install — jalankan sebelum pip install -r requirements.txt:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch==2.12.0
+torchvision==0.27.0
 
 # ── Computer Vision / ML ──────────────────────────────────────────────────────
-opencv-python==4.10.0.84
+opencv-python==4.13.0.92
 ultralytics==8.4.33     # YOLOv8: player detection, ball detection, jersey_no.pt
 pytorchvideo==0.1.5     # SlowFast-R50 action recognition (action_best_v1.pt)
 
-# ── Tracking ─────────────────────────────────────────────────────────────────
-boxmot==10.0.43         # BotSort + ByteTrack; internal import paths changed in v11+
+# ── Tracking ──────────────────────────────────────────────────────────────────
+boxmot==21.0.0          # BotSort + ByteTrack
+lapx==0.9.4             # dependency boxmot
 
 # ── OCR (jersey number reading) ───────────────────────────────────────────────
 paddlepaddle==3.0.0     # paddleocr 3.x requires paddlepaddle 3.x
 paddleocr==3.5.0
 
-# ── Numerics / Signal processing ─────────────────────────────────────────────
-scipy==1.16.2
+# ── Numerics / Signal processing ──────────────────────────────────────────────
+numpy==2.3.5
+scipy==1.17.1
 filterpy==1.4.5         # Kalman filter used by tracker fallback
-numpy==1.26.4
-scikit-learn==1.8.0     # K-Means for team color calibration
+scikit-learn==1.8.0     # K-Means untuk kalibrasi warna tim
 
-# ── Utilities ────────────────────────────────────────────────────────────────
-Pillow==10.2.0
-pydantic==2.12.1
+# ── Utilities ─────────────────────────────────────────────────────────────────
+Pillow==12.1.1
+pydantic==2.11.7
 python-dotenv==1.2.2

@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -278,3 +278,42 @@ async def stop_processing(match_id: str):
         "status":   "stopping",
         "message":  "Stop signal sent. Processing will finish the current frame then exit.",
     }
+
+
+# ── GET /upload/frames/{match_id} ─────────────────────────────────────────────
+
+@router.get("/upload/frames/{match_id}")
+async def get_frame_data(match_id: str):
+    """
+    Return per-frame bbox snapshot JSON written by VideoProcessor._finalize().
+
+    The frontend fetches this once after analysis completes and uses binary search
+    on the 'ts' (timestamp_ms) field to find the nearest stored bbox for any
+    video.currentTime — giving frame-accurate bboxes regardless of scrubbing.
+
+    Returns a JSON array: [{ts, p:[{i,j,t,b}], bl}]
+    """
+    # Check live processor first (might still be processing, path set at finalize)
+    processor = _processors.get(match_id)
+    if processor:
+        path = getattr(processor, "_frames_json_path", "")
+        if path and os.path.exists(path):
+            return FileResponse(path, media_type="application/json",
+                                headers={"Cache-Control": "public, max-age=86400"})
+
+    # Fall back to MongoDB (completed match from a previous session)
+    db = get_db()
+    if db:
+        try:
+            match = db["matches"].find_one(
+                {"match_id": match_id}, {"frames_json_path": 1}
+            )
+            if match:
+                path = match.get("frames_json_path", "")
+                if path and os.path.exists(path):
+                    return FileResponse(path, media_type="application/json",
+                                        headers={"Cache-Control": "public, max-age=86400"})
+        except Exception as e:
+            logger.warning("MongoDB frames lookup error: %s", e)
+
+    raise HTTPException(status_code=404, detail="Frame data not ready yet")

@@ -70,9 +70,11 @@ FPS_LOG_INTERVAL     = 100   # frames between FPS log lines
 FPS_DEFAULT          = 30
 
 # CPU performance: skip heavy models on intermediate frames
-PROCESS_STRIDE       = int(os.getenv("PROCESS_STRIDE", "6"))   # process 1 in N source frames (≈4fps on 25fps source)
-OCR_EVERY_N_FRAMES   = int(os.getenv("OCR_EVERY_N", "5"))      # PaddleOCR interval (proc frames)
-ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N", "3"))  # SlowFast interval (proc frames)
+# PROCESS_STRIDE=1 → every source frame goes through detect+track (best bbox accuracy, needs GPU)
+# PROCESS_STRIDE=6 → 1-in-6 frames processed (CPU-friendly, bbox data at ~4fps)
+PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE", "1"))   # 1=every frame (GPU), 6=CPU mode
+OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N", "25"))     # PaddleOCR ~1s interval at 25fps
+ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N", "10"))  # SlowFast ~0.4s interval at 25fps
 
 
 # ── Main class ────────────────────────────────────────────────────────────────
@@ -124,6 +126,11 @@ class VideoProcessor:
         self._frame_width:         int   = 0
         self._frame_height:        int   = 0
         self._roster:              dict  = {}
+
+        # Per-frame bbox store — written to JSON at finalize for frontend time-lookup
+        self._frame_store:      list = []   # [{ts, p:[{i,j,t,b}], bl}]
+        self._video_path:       str  = ""   # set in process_video, used in _finalize
+        self._frames_json_path: str  = ""   # output path written in _finalize
 
         # Threading
         self._frame_queue = queue.Queue(maxsize=FRAME_QUEUE_MAXSIZE)
@@ -223,10 +230,12 @@ class VideoProcessor:
         Process video end-to-end as an async coroutine (FastAPI BackgroundTask).
         Emits WebSocket updates every STATS_UPDATE_INTERVAL frames.
         """
-        self._roster     = roster or {}
-        self._status     = "processing"
-        self._start_time = time.perf_counter()
+        self._roster          = roster or {}
+        self._status          = "processing"
+        self._start_time      = time.perf_counter()
         self._stop_signal.clear()
+        self._video_path      = str(video_path)
+        self._frame_store     = []
 
         if self._stats is None:
             self._init_pipeline(self._models_path)
@@ -283,6 +292,9 @@ class VideoProcessor:
                     self._executor, self._process_frame, frame, proc_id, ts_ms
                 )
                 proc_id += 1
+
+                # Store compact bbox snapshot — used by frontend for time-based replay lookup
+                self._frame_store.append(self._snapshot_frame(frame_data, ts_ms))
 
                 # Persist events
                 for evt in frame_data.get("events", []):
@@ -524,6 +536,46 @@ class VideoProcessor:
         self._frame_buffer.append(frame)
         return frame_data
 
+    # ── Per-frame bbox snapshot (for frontend time-based lookup) ─────────────
+
+    def _snapshot_frame(self, frame_data: dict, timestamp_ms: int) -> dict:
+        """
+        Compact per-processed-frame snapshot stored to disk at finalize.
+
+        Frontend fetches the full list and does binary search by ts to find the
+        nearest entry for video.currentTime → frame-accurate bbox rendering
+        regardless of video scrubbing, pause, or replay.
+        """
+        tracking = frame_data.get("tracking", {})
+        players_out = []
+        for player in tracking.get("tracked_players", []):
+            tid    = player["track_id"]
+            jersey = self._tracker.get_jersey_number(tid) if self._tracker else None
+            team   = player.get("team", "") or ""
+            raw    = player.get("bbox", [])
+            if len(raw) == 4 and self._frame_width > 0:
+                w, h = self._frame_width, self._frame_height
+                norm = [
+                    round(raw[0] / w, 4), round(raw[1] / h, 4),
+                    round(raw[2] / w, 4), round(raw[3] / h, 4),
+                ]
+            else:
+                norm = list(raw)
+            players_out.append({"i": tid, "j": jersey, "t": team, "b": norm})
+
+        ball_raw = tracking.get("tracked_ball")
+        ball_out = None
+        if ball_raw:
+            bb = ball_raw.get("bbox", [])
+            if len(bb) == 4 and self._frame_width > 0:
+                w, h = self._frame_width, self._frame_height
+                ball_out = {"b": [
+                    round(bb[0] / w, 4), round(bb[1] / h, 4),
+                    round(bb[2] / w, 4), round(bb[3] / h, 4),
+                ]}
+
+        return {"ts": timestamp_ms, "p": players_out, "bl": ball_out}
+
     # ── WebSocket message builder ─────────────────────────────────────────────
 
     def _build_ws_message(self, frame_data: dict, stats: dict) -> dict:
@@ -709,13 +761,30 @@ class VideoProcessor:
 
     async def _finalize(self, match_id: str) -> None:
         """Update MongoDB match status; push final stats snapshot to Redis."""
+
+        # Write per-frame bbox store to JSON file so frontend can do time-lookup
+        if self._frame_store and self._video_path:
+            frames_path = os.path.splitext(self._video_path)[0] + "_frames.json"
+            try:
+                with open(frames_path, "w") as fp:
+                    fp.write(json.dumps(self._frame_store, separators=(',', ':')))
+                self._frames_json_path = frames_path
+                logger.info("Frame store written: %s  entries=%d",
+                            frames_path, len(self._frame_store))
+            except Exception as e:
+                logger.warning("Frame store write failed: %s", e)
+
         if self._mongo_db is not None:
             try:
+                extra = {}
+                if self._frames_json_path:
+                    extra["frames_json_path"] = self._frames_json_path
                 self._mongo_db["matches"].update_one(   # pymongo is sync — no await
                     {"match_id": match_id},
                     {"$set": {"match_id": match_id,
                                "status": self._status,
-                               "processed_at": time.time()}},
+                               "processed_at": time.time(),
+                               **extra}},
                     upsert=True,
                 )
             except Exception as e:

@@ -87,6 +87,11 @@ class WebSocketManager:
         Subscribe to a Redis channel and forward messages to all WebSocket
         clients watching match_id.  Auto-reconnects on transient errors.
 
+        Uses get_message(timeout=5) instead of listen() to avoid socket-level
+        TimeoutError spam that occurs when no messages arrive for a while.
+        get_message uses asyncio.wait_for internally and returns None on idle —
+        no exception, no reconnect spam.
+
         If redis_client is None, the loop is a no-op (dev mode without Redis).
         """
         if redis_client is None:
@@ -100,15 +105,19 @@ class WebSocketManager:
                 await pubsub.subscribe(channel)
                 logger.info("Redis sub: channel=%s  match=%s", channel, match_id)
 
-                async for message in pubsub.listen():
-                    if message.get("type") != "message":
+                while True:
+                    # Block up to 5 s waiting for a message; returns None on idle.
+                    # Never raises TimeoutError — avoids reconnect spam on quiet channels.
+                    message = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=5.0
+                    )
+                    if message is None:
+                        await asyncio.sleep(0.02)   # yield to event loop briefly
                         continue
                     data = message.get("data", "")
                     if isinstance(data, bytes):
                         data = data.decode()
                     await self.broadcast(match_id, data)
-
-                break  # clean exit — publisher closed channel intentionally
 
             except asyncio.CancelledError:
                 break
@@ -121,6 +130,6 @@ class WebSocketManager:
             finally:
                 try:
                     await pubsub.unsubscribe(channel)
-                    await pubsub.close()
+                    await pubsub.aclose()
                 except Exception:
                     pass

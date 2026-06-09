@@ -30,8 +30,8 @@ DEFAULT_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "homography_c
 COURT_W = 28.0   # meters, x-axis (baseline to baseline)
 COURT_H = 15.0   # meters, y-axis (sideline to sideline)
 
-HOOP_LEFT  = [1.28,   7.47]   # back-projected from cl-sample.mp4 (was 1.575, 7.5)
-HOOP_RIGHT = [26.425, 7.5]
+HOOP_LEFT  = [1.575,  7.5]    # FIBA standard
+HOOP_RIGHT = [26.425, 7.5]    # FIBA standard
 THREE_PT_RADIUS = 6.75          # arc radius in meters
 THREE_PT_STRAIGHT_X = 2.99     # x where arc meets corner straight section (left basket)
 
@@ -52,11 +52,11 @@ KP_INDEX_TO_LABEL: list[int] = [
 # Label ID → [x_meter, y_meter]  (FIBA origin = bottom-left corner of court)
 LABEL_TO_COURT: dict[int, list[float]] = {
     # ── Outer boundary ──────────────────────────────────────────────────
-    1:  [0.0,   12.674], # corner top-left  (back-projected; was 15.0)
+    1:  [0.0,   15.0],   # corner top-left
     8:  [0.0,    0.0],   # corner bottom-left
     34: [28.0,  15.0],   # corner top-right
     41: [28.0,   0.0],   # corner bottom-right
-    # label 15 removed: model index 12 detects right side (x≈19m), conflicts with label 25 at index 18
+    15: [9.3,   15.0],   # top boundary left-center
     25: [18.7,  15.0],   # top boundary right-center
     17: [9.3,    0.0],   # bottom boundary left-center
     27: [18.7,   0.0],   # bottom boundary right-center
@@ -67,15 +67,15 @@ LABEL_TO_COURT: dict[int, list[float]] = {
     # ── Left paint area ─────────────────────────────────────────────────
     2:  [0.0,   11.35],  # baseline left, top of paint
     7:  [0.0,    3.65],  # baseline left, bottom of paint
-    4:  [0.0,    8.325], # baseline left, top-center
-    5:  [0.0,    6.675], # baseline left, bottom-center
+    4:  [0.0,    9.3],   # baseline left, top paint corner (sama y dengan label 12)
+    5:  [0.0,    5.7],   # baseline left, bottom paint corner (sama y dengan label 14)
     10: [5.8,   11.35],  # left inner paint top
     11: [5.8,    3.65],  # left inner paint bottom
-    12: [6.99,   8.402], # left paint top corner  (back-projected; was 5.8, 9.3)
-    14: [4.915,  6.779], # left paint bottom corner  (back-projected; was 5.8, 5.7)
-    13: [5.8,    7.5],   # free throw line left
-    9:  [1.28,   7.47],  # hoop left  (back-projected; matches HOOP_LEFT)
-    16: [8.03,   7.47],  # left 3PT arc tangent point  (HOOP_LEFT[0] + THREE_PT_RADIUS = 1.28 + 6.75)
+    12: [5.8,    9.3],   # left paint top corner (pojok atas dalam paint)
+    14: [5.8,    5.7],   # left paint bottom corner (pojok bawah dalam paint)
+    13: [5.8,    7.5],   # free throw line left (tengah)
+    9:  [1.575,  7.5],   # hoop left
+    16: [8.325,  7.5],   # left 3PT arc tangent = 1.575 + 6.75
     # ── Right paint area ────────────────────────────────────────────────
     35: [28.0,  11.35],  # baseline right, top of paint
     40: [28.0,   3.65],  # baseline right, bottom of paint
@@ -83,16 +83,16 @@ LABEL_TO_COURT: dict[int, list[float]] = {
     38: [28.0,   5.7],   # baseline right, bottom-center
     31: [22.2,  11.35],  # right inner paint top
     32: [22.2,   3.65],  # right inner paint bottom
-    28: [23.75,  9.3],   # right paint top corner
-    29: [23.75,  5.7],   # right paint bottom corner
-    33: [26.425, 7.5],   # hoop right  (HOOP_RIGHT constant)
-    30: [22.2,   5.7],   # free throw line right
-    26: [19.675, 7.5],   # right 3PT arc tangent point  (HOOP_RIGHT[0] - THREE_PT_RADIUS = 26.425 - 6.75)
+    28: [22.2,   9.3],   # right paint top corner (pojok atas dalam paint)
+    29: [22.2,   7.5],   # free throw line right (tengah)
+    30: [22.2,   5.7],   # right paint bottom corner (pojok bawah dalam paint)
+    33: [26.425, 7.5],   # hoop right
+    26: [19.675, 7.5],   # right 3PT arc tangent = 28.0 - 8.325
 }
 
 LABEL_NAMES: dict[int, str] = {
     1:  "corner_top_left",        2:  "baseline_left_top_paint",
-    4:  "baseline_left_top_ctr",  5:  "baseline_left_bot_ctr",
+    4:  "baseline_left_top_paint_x", 5: "baseline_left_bot_paint_x",
     7:  "baseline_left_bot_paint",8:  "corner_bottom_left",
     9:  "hoop_left",              10: "paint_left_inner_top",
     11: "paint_left_inner_bot",   12: "paint_left_top",
@@ -102,7 +102,7 @@ LABEL_NAMES: dict[int, str] = {
     21: "center_court",           23: "center_bottom",
     25: "boundary_top_right_ctr", 26: "arc_3pt_right",
     27: "boundary_bot_right_ctr", 28: "paint_right_top",
-    29: "paint_right_bottom",     30: "free_throw_right",
+    29: "free_throw_right",       30: "paint_right_bottom",
     31: "paint_right_inner_top",  32: "paint_right_inner_bot",
     33: "hoop_right",             34: "corner_top_right",
     35: "baseline_right_top_paint",37: "baseline_right_top_ctr",
@@ -111,11 +111,19 @@ LABEL_NAMES: dict[int, str] = {
 }
 
 # Thresholds
-CONF_THRESHOLD     = 0.5    # min visibility score to use a keypoint (general)
-LOW_CONF_THRESHOLD = 0.3    # lower threshold for corner/baseline-bottom labels
-LOW_CONF_LABELS    = {7, 8, 40, 41}  # often occluded by crowd/camera angle
-MIN_KEYPOINTS      = 4      # minimum for RANSAC homography (was 6 — too strict for partial views)
-CAMERA_MOVE_PX     = 20.0  # avg shift (pixels) that triggers homography recompute
+CONF_THRESHOLD      = 0.5    # general threshold
+LOW_CONF_THRESHOLD  = 0.3    # titik sudut bawah (sering occluded)
+HIGH_CONF_THRESHOLD = 0.75   # titik boundary atas (sering false detect ke tribun)
+
+# Titik yang sering occluded oleh penonton/kamera sudut bawah
+LOW_CONF_LABELS  = {7, 8, 40, 41}
+
+# Titik boundary atas yang sering false detect ke area tribun
+# Naikkan threshold agar hanya dipakai kalau model sangat yakin
+HIGH_CONF_LABELS = {1, 2, 10, 25, 34, 35}
+
+MIN_KEYPOINTS    = 4      # minimum untuk RANSAC
+CAMERA_MOVE_PX   = 20.0  # threshold deteksi kamera bergerak
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +219,13 @@ class CourtMapper:
             court_coord = LABEL_TO_COURT.get(label_id)
             if court_coord is None:
                 continue
-            effective_threshold = (
-                LOW_CONF_THRESHOLD if label_id in LOW_CONF_LABELS else CONF_THRESHOLD
-            )
+            # Per-label confidence threshold
+            if label_id in HIGH_CONF_LABELS:
+                effective_threshold = HIGH_CONF_THRESHOLD  # 0.75 — hindari false detect tribun
+            elif label_id in LOW_CONF_LABELS:
+                effective_threshold = LOW_CONF_THRESHOLD   # 0.3 — sudut bawah sering occluded
+            else:
+                effective_threshold = CONF_THRESHOLD       # 0.5 default
             keypoints.append({
                 "point_id":   label_id,
                 "name":       LABEL_NAMES.get(label_id, f"kp_{label_id}"),

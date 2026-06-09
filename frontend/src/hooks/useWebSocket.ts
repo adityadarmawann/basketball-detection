@@ -104,7 +104,11 @@ export const useWebSocket = () => {
     // Derive MPI from per-player speed
     const updatedMpi = { ...s.mpi }
     frame.players.forEach((player) => {
-      const pid = player.trackId
+      // Match by jerseyNumber → playerId when available; fall back to trackId
+      const byJersey = player.jerseyNumber != null
+        ? Object.values(s.stats).find((p) => p.jerseyNumber === player.jerseyNumber)
+        : null
+      const pid = byJersey?.playerId ?? player.trackId
       if (!updatedMpi[pid]) return
       const prev     = updatedMpi[pid]
       const newDist  = prev.distanceCoveredM + player.speedKmh / 36_000   // km/h × 0.1 s → m

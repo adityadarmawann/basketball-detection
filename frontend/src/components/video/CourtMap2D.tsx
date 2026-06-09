@@ -72,9 +72,12 @@ export default function CourtMap2D() {
     const xScale = d3.scaleLinear().domain([0, COURT_LENGTH]).range([0, width])
     const yScale = d3.scaleLinear().domain([0, COURT_WIDTH]).range([height, 0])
 
+    // Only render players that have a court position
+    const playersWithPos = players.filter((p) => p.courtPos != null)
+
     svg
       .selectAll<SVGCircleElement, typeof players[number]>('.player-dot')
-      .data(players, (d) => d.trackId)
+      .data(playersWithPos, (d) => d.trackId)
       .join(
         (enter) =>
           enter
@@ -86,9 +89,9 @@ export default function CourtMap2D() {
         (update) => update,
         (exit) => exit.remove()
       )
-      .attr('cx', (d) => xScale(d.courtPos[0]))
-      .attr('cy', (d) => yScale(d.courtPos[1]))
-      .attr('fill', (d) => (d.team === 'A' ? '#00BCD4' : '#1A1A2E'))
+      .attr('cx', (d) => xScale(d.courtPos![0]))
+      .attr('cy', (d) => yScale(d.courtPos![1]))
+      .attr('fill', (d) => (d.team === 'A' ? '#00BCD4' : d.team === 'B' ? '#F97316' : '#9CA3AF'))
 
     if (ball?.courtPos) {
       svg

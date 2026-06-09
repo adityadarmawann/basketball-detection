@@ -1,10 +1,10 @@
 export interface Player {
   trackId: number;
-  jerseyNumber: number;
+  jerseyNumber: number | null;  // null until OCR confirms jersey
   name: string;
-  team: 'A' | 'B';
+  team: 'A' | 'B' | '';
   bbox: [number, number, number, number];
-  courtPos: [number, number];
+  courtPos: [number, number] | null;
   action: ActionLabel;
   speedKmh: number;
   keypoints: Array<[number, number, number]>;

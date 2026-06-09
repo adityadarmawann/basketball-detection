@@ -46,6 +46,7 @@ export default function VideoScanningStatus({ matchId, onComplete }: Props) {
         setProgress(pct)
 
         if (status === 'done') {
+          setProgress(100)
           setPhase('done')
         } else if (status === 'error') {
           setPhase('error')

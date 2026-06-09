@@ -119,6 +119,7 @@ export default function MatchPage() {
             <video
               src={videoUrl}
               controls
+              muted
               className="w-full max-h-80 object-contain bg-black"
             />
           </div>
@@ -158,8 +159,36 @@ export default function MatchPage() {
             isLive={store.isLive}
           />
 
-          {/* Video Player */}
-          {videoUrl && <VideoPlayer videoUrl={videoUrl} showCourtMap={true} />}
+          {/* Video Section: original + analyzed side by side */}
+          {videoUrl && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Original video */}
+              <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
+                <div className="px-4 py-2 border-b border-gray-100">
+                  <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
+                    Video Original
+                  </span>
+                </div>
+                <video
+                  src={videoUrl}
+                  controls
+                  muted
+                  className="w-full object-contain bg-black"
+                  style={{ maxHeight: '360px' }}
+                />
+              </div>
+
+              {/* Analyzed video with bbox overlay */}
+              <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
+                <div className="px-4 py-2 border-b border-gray-100">
+                  <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
+                    Video Analisis AI
+                  </span>
+                </div>
+                <VideoPlayer videoUrl={videoUrl} showCourtMap={true} />
+              </div>
+            </div>
+          )}
 
           {/* Dashboard Grid */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

@@ -28,6 +28,6 @@ Thumbs.db
 
 # Project specific
 uploads/
-data/
+backend/data/
 *.log
 .sixth/

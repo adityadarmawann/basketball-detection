@@ -90,17 +90,17 @@ export class MockWebSocketServer {
 
     // ── Update positions for confirmed players only ────────────────────────────
     this.confirmedPlayers.forEach((player) => {
-      player.courtPos[0] = Math.max(0, Math.min(COURT_LENGTH,
-        player.courtPos[0] + (Math.random() - 0.5) * 0.5))
-      player.courtPos[1] = Math.max(0, Math.min(COURT_WIDTH,
-        player.courtPos[1] + (Math.random() - 0.5) * 0.3))
+      // Mock always initialises courtPos — non-null assertion is safe here
+      const pos = player.courtPos!
+      pos[0] = Math.max(0, Math.min(COURT_LENGTH, pos[0] + (Math.random() - 0.5) * 0.5))
+      pos[1] = Math.max(0, Math.min(COURT_WIDTH,  pos[1] + (Math.random() - 0.5) * 0.3))
 
       // Perspective-aware bbox (smaller near top of frame)
-      const ps         = 0.5 + (player.courtPos[1] / COURT_WIDTH) * 0.5
+      const ps         = 0.5 + (pos[1] / COURT_WIDTH) * 0.5
       const bboxWidth  = 0.05 * ps
       const bboxHeight = 0.18 * ps
-      const vx = player.courtPos[0] / COURT_LENGTH
-      const vy = player.courtPos[1] / COURT_WIDTH
+      const vx = pos[0] / COURT_LENGTH
+      const vy = pos[1] / COURT_WIDTH
 
       player.bbox = [
         vx - bboxWidth / 2, vy - bboxHeight / 2,
@@ -154,7 +154,7 @@ export class MockWebSocketServer {
       eventType:  etype,
       playerId:   p.trackId,
       playerName: p.name,
-      team:       p.team,
+      team:       (p.team || 'A') as 'A' | 'B',
       points,
       quarter:    this.quarter,
       gameClock:  this.formatTime(this.gameTimeSec),

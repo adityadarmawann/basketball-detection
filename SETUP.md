@@ -79,16 +79,29 @@ Verifikasi: `redis-cli ping` → harus balas `PONG`
 
 ## 5. Python Dependencies
 
+Install dalam urutan berikut (urutan penting):
+
 ```bash
 cd backend
+
+# Step 1 — PyTorch GPU (WAJIB duluan, jangan lewati)
+pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu121
+
+# Step 2 — Semua dependency lain
 pip install -r requirements.txt
+
+# Step 3 — BoxMOT (harus --no-deps agar tidak konflik numpy)
+#   boxmot 10.0.43 mendeklarasikan numpy==1.23.1 di metadata-nya, padahal
+#   runtime-compatible dengan numpy 2.x. --no-deps melewati cek tersebut.
+pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
 ```
 
-> **Catatan PyTorch GPU:** kalau device punya GPU CUDA, install torch terpisah dulu:
+> **CPU-only (tanpa GPU):** ganti step 1 dengan:
 > ```bash
-> pip install torch==2.12.0 torchvision==0.27.0 --index-url https://download.pytorch.org/whl/cu121
+> pip install torch==2.2.2 torchvision==0.17.2
 > ```
-> Baru jalankan `pip install -r requirements.txt`.
+>
+> **Warning "NumPy 1.x compiled"** saat import torch adalah normal — tidak menyebabkan crash.
 
 ---
 

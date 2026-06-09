@@ -69,6 +69,7 @@ export default function VideoPlayer({ videoUrl, showCourtMap }: VideoPlayerProps
         <video
           ref={videoRef}
           src={videoUrl}
+          muted
           className="w-full h-full object-contain"
         ></video>
 

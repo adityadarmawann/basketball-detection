@@ -28,10 +28,10 @@ export const useVideoUpload = () => {
       formData.append('file', file)
       formData.append('match_id', matchId || `match-${Date.now()}`)
 
-      // Send roster as JSON map: { jersey_number: name }
+      // Send roster as JSON: { jersey_number: { name, team } }
       if (roster.length > 0) {
-        const rosterMap: Record<string, string> = {}
-        roster.forEach((p) => { rosterMap[String(p.jerseyNumber)] = p.name })
+        const rosterMap: Record<string, { name: string; team: string }> = {}
+        roster.forEach((p) => { rosterMap[String(p.jerseyNumber)] = { name: p.name, team: p.team } })
         formData.append('roster', JSON.stringify(rosterMap))
       }
 

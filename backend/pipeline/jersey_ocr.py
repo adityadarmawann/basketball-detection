@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "jersey_no.pt"
 
-VOTE_THRESHOLD    = 3     # frames required to confirm a jersey number
+VOTE_THRESHOLD    = 2     # frames required to confirm a jersey number
 MAX_VOTE_HISTORY  = 30   # rolling window per track_id
 CONF_THRESHOLD    = 0.5  # jersey_no.pt detection confidence
 OCR_HEIGHT_PX     = 64   # resize crop to this height for OCR

@@ -125,10 +125,18 @@ async def upload_video(
         )
 
     # ── Parse roster ───────────────────────────────────────────────────────
+    # Accepts two formats:
+    #   new: { "7": {"name": "Bima", "team": "A"}, ... }
+    #   old: { "7": "Bima", ... }  (legacy — team defaults to "")
     roster_data: dict = {}
     if roster:
         try:
-            roster_data = json.loads(roster)
+            raw = json.loads(roster)
+            for jersey, val in raw.items():
+                if isinstance(val, dict):
+                    roster_data[jersey] = {"name": val.get("name", ""), "team": val.get("team", "")}
+                else:
+                    roster_data[jersey] = {"name": str(val), "team": ""}
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"Invalid roster JSON: {e}")
 

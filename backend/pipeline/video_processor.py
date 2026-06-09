@@ -69,6 +69,11 @@ QUARTER_DURATION_S   = 600   # FIBA 10-minute quarters
 FPS_LOG_INTERVAL     = 100   # frames between FPS log lines
 FPS_DEFAULT          = 30
 
+# CPU performance: skip heavy models on intermediate frames
+PROCESS_STRIDE       = int(os.getenv("PROCESS_STRIDE", "25"))  # process 1 in N source frames (≈1fps on 25fps source)
+OCR_EVERY_N_FRAMES   = int(os.getenv("OCR_EVERY_N", "5"))      # PaddleOCR interval (proc frames)
+ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N", "3"))  # SlowFast interval (proc frames)
+
 
 # ── Main class ────────────────────────────────────────────────────────────────
 
@@ -116,6 +121,8 @@ class VideoProcessor:
         self._quarter_start_frame: int   = 0
         self._start_time:          float = 0.0
         self._source_fps:          float = float(FPS_DEFAULT)
+        self._frame_width:         int   = 0
+        self._frame_height:        int   = 0
         self._roster:              dict  = {}
 
         # Threading
@@ -232,6 +239,8 @@ class VideoProcessor:
 
         self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self._source_fps   = cap.get(cv2.CAP_PROP_FPS) or FPS_DEFAULT
+        self._frame_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1920
+        self._frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
 
         logger.info("Video: %s  frames=%d  src_fps=%.1f",
                     Path(video_path).name, self._total_frames, self._source_fps)
@@ -243,7 +252,8 @@ class VideoProcessor:
         grab_thread.start()
 
         loop     = asyncio.get_event_loop()
-        frame_id = 0
+        frame_id = 0       # source frame counter (every frame read from video)
+        proc_id  = 0       # processed frame counter (after stride filter)
 
         try:
             while not self._stop_signal.is_set():
@@ -259,20 +269,28 @@ class VideoProcessor:
                 if frame is None:   # sentinel — video exhausted
                     break
 
+                # Skip intermediate frames on CPU to hit a reasonable throughput.
+                # PROCESS_STRIDE=1 disables skipping entirely.
+                if PROCESS_STRIDE > 1 and frame_id % PROCESS_STRIDE != 0:
+                    frame_id += 1
+                    self._frame_count = frame_id
+                    continue
+
                 ts_ms = int(frame_id / self._source_fps * 1000)
 
                 # Heavy sync pipeline runs off the event loop
                 frame_data = await loop.run_in_executor(
-                    self._executor, self._process_frame, frame, frame_id, ts_ms
+                    self._executor, self._process_frame, frame, proc_id, ts_ms
                 )
+                proc_id += 1
 
                 # Persist events
                 for evt in frame_data.get("events", []):
                     if evt:
                         await self._save_event_mongo(evt, match_id)
 
-                # WebSocket update every N frames
-                if frame_id % STATS_UPDATE_INTERVAL == 0 and self._stats:
+                # WebSocket update every 5 processed frames (~7 sec on CPU)
+                if proc_id % 5 == 0 and self._stats:
                     stats = self._stats.get_live_stats()
                     msg   = self._build_ws_message(frame_data, stats)
                     await self._push_redis(match_id, msg)
@@ -289,10 +307,10 @@ class VideoProcessor:
 
                 if frame_id % FPS_LOG_INTERVAL == 0:
                     logger.info(
-                        "Frame %d/%d  FPS=%.1f  dropped=%d  Q%d",
-                        frame_id, self._total_frames,
+                        "Frame %d/%d (proc %d)  FPS=%.1f  dropped=%d  Q%d  stride=%d",
+                        frame_id, self._total_frames, proc_id,
                         self._fps_actual, self._frames_dropped,
-                        self._current_quarter,
+                        self._current_quarter, PROCESS_STRIDE,
                     )
 
                 if self._detect_quarter_change(frame_data):
@@ -325,7 +343,9 @@ class VideoProcessor:
                 if not ret:
                     break
                 try:
-                    self._frame_queue.put_nowait(frame)
+                    # Block up to 10 s so frames aren't silently dropped on slow CPU.
+                    # For live streams switch to put_nowait to avoid back-pressure.
+                    self._frame_queue.put(frame, block=True, timeout=10.0)
                 except queue.Full:
                     self._frames_dropped += 1
         except Exception as e:
@@ -416,16 +436,26 @@ class VideoProcessor:
             except Exception as e:
                 logger.debug("Pose frame %d: %s", frame_id, e)
 
-        # ── 5. Jersey OCR ─────────────────────────────────────────────────
-        if self._jersey and tracked_players:
+        # ── 5. Jersey OCR — run every OCR_EVERY_N_FRAMES (jersey number is stable) ──
+        if self._jersey and tracked_players and frame_id % OCR_EVERY_N_FRAMES == 0:
             try:
                 jersey = self._jersey.process(frame, tracked_players, self._tracker)
                 frame_data["jersey"] = jersey
             except Exception as e:
                 logger.debug("Jersey OCR frame %d: %s", frame_id, e)
 
-        # ── 6. Action classification ──────────────────────────────────────
-        if self._action and tracked_players:
+        # ── Annotate tracked_players with team from roster (roster is source of truth) ──
+        if self._tracker and self._roster:
+            for player in tracked_players:
+                tid = player["track_id"]
+                jersey_num = self._tracker.get_jersey_number(tid)
+                if jersey_num is not None:
+                    entry = self._roster.get(str(jersey_num), {})
+                    if isinstance(entry, dict) and entry.get("team"):
+                        player["team"] = entry["team"]
+
+        # ── 6. Action classification — run every ACTION_EVERY_N_FRAMES ───────────
+        if self._action and tracked_players and frame_id % ACTION_EVERY_N_FRAMES == 0:
             try:
                 actions = self._action.classify(
                     frame, tracked_players,
@@ -454,17 +484,31 @@ class VideoProcessor:
                     tracking_snapshot[player["track_id"]] = (
                         cp[0], cp[1], timestamp_ms
                     )
+                elif self._frame_width > 0 and self._frame_height > 0:
+                    # Fallback: normalize pixel center to approximate court meters.
+                    # court is 28m × 15m; pixel origin top-left → y is inverted.
+                    center = player.get("center")
+                    if center:
+                        x_m = center[0] / self._frame_width  * 28.0
+                        y_m = center[1] / self._frame_height * 15.0
+                        tracking_snapshot[player["track_id"]] = (x_m, y_m, timestamp_ms)
 
             # Build stats-compatible roster: {track_id: {name, jersey_number, team}}
             # using tracker jersey map + raw upload roster (jersey_str → name)
             stats_roster: dict = {}
             if self._tracker and self._roster:
                 for tid, jersey in self._tracker.track_jersey_map.items():
-                    name = self._roster.get(str(jersey), f"#{jersey}")
+                    entry = self._roster.get(str(jersey), {})
+                    if isinstance(entry, dict):
+                        name = entry.get("name", f"#{jersey}")
+                        team = entry.get("team", "")
+                    else:
+                        name = str(entry) if entry else f"#{jersey}"
+                        team = ""
                     stats_roster[tid] = {
                         "name":         name,
                         "jersey_number": jersey,
-                        "team":          "",
+                        "team":          team,
                     }
 
             try:
@@ -508,10 +552,9 @@ class VideoProcessor:
             tid          = player["track_id"]
             jersey_number = (self._tracker.get_jersey_number(tid)
                              if self._tracker else None)
-
-            # Skip until jersey confirmed
-            if jersey_number is None:
-                continue
+            # Don't gate on jersey confirmation — send all tracked players.
+            # jerseyNumber will be null in WS until OCR confirms it; bbox overlay
+            # and MPI distance/speed accumulate regardless.
 
             pstat      = player_stats_all.get(tid, {})
             mpi        = pstat.get("mpi", {})
@@ -523,12 +566,25 @@ class VideoProcessor:
                 for kp in pose_entry.get("keypoints", [])
             ]
 
+            # Normalize pixel bbox → [0, 1] for CourtOverlay canvas rendering
+            raw_bbox = player.get("bbox", [])
+            if len(raw_bbox) == 4 and self._frame_width > 0 and self._frame_height > 0:
+                bx1, by1, bx2, by2 = raw_bbox
+                norm_bbox = [
+                    bx1 / self._frame_width,
+                    by1 / self._frame_height,
+                    bx2 / self._frame_width,
+                    by2 / self._frame_height,
+                ]
+            else:
+                norm_bbox = raw_bbox
+
             players.append({
                 "trackId":      tid,
                 "jerseyNumber": jersey_number,
                 "name":         pstat.get("name", f"Player_{tid}"),
                 "team":         pstat.get("team", ""),
-                "bbox":         player.get("bbox", []),
+                "bbox":         norm_bbox,
                 "courtPos":     player.get("court_pos"),
                 "action":       act_entry.get("action", "Stand"),
                 "speedKmh":     mpi.get("avg_speed_kmh", 0.0),
@@ -564,8 +620,8 @@ class VideoProcessor:
             "teamB": poss_raw.get("B", 50.0),
         }
 
-        events      = frame_data.get("events", [])
-        latest_event = events[-1] if events else None
+        events       = frame_data.get("events", [])
+        latest_event = self._map_event_for_ws(events[-1]) if events else None
 
         return {
             "type":       "frame_update",
@@ -581,6 +637,49 @@ class VideoProcessor:
                 "trajectory": list(self._ball_trajectory),
             },
             "event": latest_event,
+        }
+
+    # ── Event format mapper ───────────────────────────────────────────────────
+
+    _EVENT_TYPE_MAP = {
+        "MADE_FG": "FGM", "MADE_3": "FGM", "SHOT_MADE": "FGM",
+        "MISSED_FG": "FGA", "MISSED_3": "FGA", "SHOT_MISSED": "FGA",
+        "REBOUND": "REB", "OREB": "REB", "DREB": "REB",
+        "AST": "AST", "ASSIST": "AST",
+        "STL": "STL", "STEAL": "STL",
+        "BLK": "BLK", "BLOCK": "BLK",
+        "TOV": "TOV", "TURNOVER": "TOV",
+        "FOUL": "FOUL", "PERSONAL_FOUL": "FOUL",
+    }
+
+    def _map_event_for_ws(self, event: Optional[dict]) -> Optional[dict]:
+        """Convert backend event dict → frontend GameEvent format."""
+        if not event:
+            return None
+        etype      = str(event.get("type", "")).upper()
+        event_type = self._EVENT_TYPE_MAP.get(etype)
+        if not event_type:
+            return None
+
+        track_id   = event.get("track_id", 0)
+        jersey_num = (self._tracker.get_jersey_number(track_id)
+                      if self._tracker else None)
+
+        points = None
+        if event_type == "FGM":
+            points = 3 if event.get("is_three") else 2
+
+        return {
+            "type":       "event",
+            "eventType":  event_type,
+            "playerId":   jersey_num if jersey_num is not None else track_id,
+            "playerName": (f"#{jersey_num}" if jersey_num is not None
+                           else f"Track_{track_id}"),
+            "team":       event.get("team", ""),
+            "points":     points,
+            "quarter":    event.get("quarter", self._current_quarter),
+            "gameClock":  self._format_game_clock(),
+            "courtPos":   event.get("court_pos"),
         }
 
     # ── Persistence helpers ───────────────────────────────────────────────────
@@ -613,8 +712,9 @@ class VideoProcessor:
         if self._mongo_db is not None:
             try:
                 self._mongo_db["matches"].update_one(   # pymongo is sync — no await
-                    {"_id": match_id},
-                    {"$set": {"status": self._status,
+                    {"match_id": match_id},
+                    {"$set": {"match_id": match_id,
+                               "status": self._status,
                                "processed_at": time.time()}},
                     upsert=True,
                 )

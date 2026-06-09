@@ -88,12 +88,17 @@ class PlayerTracker:
     def _build_tracker(self):
         """Instantiate a fresh tracker. Raises ImportError if BoxMOT missing."""
         try:
-            from boxmot.trackers import ByteTrack, BotSort
+            # boxmot 10.x: classes live in submodule paths, not the top-level trackers package
+            from boxmot.trackers.bytetrack.byte_tracker import BYTETracker
+            from boxmot.trackers.botsort.bot_sort import BoTSORT
 
             if self.tracker_type == "bytetrack":
-                return ByteTrack(track_buffer=25, frame_rate=self.frame_rate)
+                return BYTETracker(track_buffer=25, frame_rate=self.frame_rate)
             else:  # botsort
-                return BotSort(track_buffer=30, frame_rate=self.frame_rate)
+                return BoTSORT(
+                    model_weights=None, device="cpu", fp16=False,
+                    track_buffer=30, frame_rate=self.frame_rate,
+                )
 
         except ImportError as exc:
             raise ImportError(

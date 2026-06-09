@@ -85,8 +85,7 @@ class WebSocketManager:
     ) -> None:
         """
         Subscribe to a Redis channel and forward messages to all WebSocket
-        clients watching match_id.  Runs until the caller cancels or the
-        Redis connection drops.
+        clients watching match_id.  Auto-reconnects on transient errors.
 
         If redis_client is None, the loop is a no-op (dev mode without Redis).
         """
@@ -95,26 +94,33 @@ class WebSocketManager:
             await asyncio.Future()   # block forever until cancelled
             return
 
-        pubsub = redis_client.pubsub()
-        try:
-            await pubsub.subscribe(channel)
-            logger.info("Redis sub: channel=%s  match=%s", channel, match_id)
-
-            async for message in pubsub.listen():
-                if message.get("type") != "message":
-                    continue
-                data = message.get("data", "")
-                if isinstance(data, bytes):
-                    data = data.decode()
-                await self.broadcast(match_id, data)
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.warning("Redis listener error match=%s: %s", match_id, e)
-        finally:
+        while True:
+            pubsub = redis_client.pubsub()
             try:
-                await pubsub.unsubscribe(channel)
-                await pubsub.close()
-            except Exception:
-                pass
+                await pubsub.subscribe(channel)
+                logger.info("Redis sub: channel=%s  match=%s", channel, match_id)
+
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    data = message.get("data", "")
+                    if isinstance(data, bytes):
+                        data = data.decode()
+                    await self.broadcast(match_id, data)
+
+                break  # clean exit — publisher closed channel intentionally
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(
+                    "Redis listener error match=%s: %s — reconnecting in 2 s",
+                    match_id, e,
+                )
+                await asyncio.sleep(2.0)
+            finally:
+                try:
+                    await pubsub.unsubscribe(channel)
+                    await pubsub.close()
+                except Exception:
+                    pass

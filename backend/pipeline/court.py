@@ -114,7 +114,7 @@ LABEL_NAMES: dict[int, str] = {
 CONF_THRESHOLD     = 0.5    # min visibility score to use a keypoint (general)
 LOW_CONF_THRESHOLD = 0.3    # lower threshold for corner/baseline-bottom labels
 LOW_CONF_LABELS    = {7, 8, 40, 41}  # often occluded by crowd/camera angle
-MIN_KEYPOINTS      = 6      # minimum for RANSAC homography
+MIN_KEYPOINTS      = 4      # minimum for RANSAC homography (was 6 — too strict for partial views)
 CAMERA_MOVE_PX     = 20.0  # avg shift (pixels) that triggers homography recompute
 
 

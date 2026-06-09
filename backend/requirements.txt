@@ -10,10 +10,16 @@ pymongo==4.16.0
 redis>=5.0.0            # redis.asyncio untuk pub/sub; jalankan: pip install redis
 
 # ── PyTorch ───────────────────────────────────────────────────────────────────
-# GPU / CUDA install — jalankan sebelum pip install -r requirements.txt:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-torch==2.12.0
-torchvision==0.27.0
+# WAJIB install torch GPU dulu sebelum pip install -r requirements.txt:
+#   pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu121
+# Baris di bawah hanya sebagai marker versi — jangan install langsung dari PyPI
+# karena akan install versi CPU-only.
+torch==2.2.2
+torchvision==0.17.2
+
+# ── Numpy ─────────────────────────────────────────────────────────────────────
+# torch 2.2.2 dikompil dengan NumPy 1.x — warning "compiled using NumPy 1.x"
+# saat import adalah normal dan tidak menyebabkan crash.
 
 # ── Computer Vision / ML ──────────────────────────────────────────────────────
 opencv-python==4.13.0.92
@@ -21,7 +27,9 @@ ultralytics==8.4.33     # YOLOv8: player detection, ball detection, jersey_no.pt
 pytorchvideo==0.1.5     # SlowFast-R50 action recognition (action_best_v1.pt)
 
 # ── Tracking ──────────────────────────────────────────────────────────────────
-boxmot==21.0.0          # BotSort + ByteTrack
+# boxmot metadata-nya declare numpy==1.23.1 (terlalu strict) padahal jalan di numpy 2.x
+# Install terpisah dengan --no-deps:
+#   pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
 lapx==0.9.4             # dependency boxmot
 
 # ── OCR (jersey number reading) ───────────────────────────────────────────────
@@ -29,12 +37,12 @@ paddlepaddle==3.0.0     # paddleocr 3.x requires paddlepaddle 3.x
 paddleocr==3.5.0
 
 # ── Numerics / Signal processing ──────────────────────────────────────────────
-numpy==2.3.5
+numpy==2.3.5            # warning "compiled with NumPy 1.x" dari torch adalah normal
 scipy==1.17.1
 filterpy==1.4.5         # Kalman filter used by tracker fallback
 scikit-learn==1.8.0     # K-Means untuk kalibrasi warna tim
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
-Pillow==12.1.1
+Pillow==12.2.0
 pydantic==2.11.7
 python-dotenv==1.2.2

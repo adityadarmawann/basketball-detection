@@ -9,9 +9,13 @@ interface CourtOverlayProps {
 const TEAM_A_COLOR = '#00BCD4' // cyan
 const TEAM_B_COLOR = '#F97316' // orange — kontras di background gelap
 
+// Hide bboxes when video playback is more than this many ms ahead of last WS update
+const STALE_THRESHOLD_MS = 2500
+
 export default function CourtOverlay({ videoRef }: CourtOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const players = useMatchStore((s) => s.players)
+  const players        = useMatchStore((s) => s.players)
+  const playersVideoTs = useMatchStore((s) => s.playersVideoTs)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -24,7 +28,6 @@ export default function CourtOverlay({ videoRef }: CourtOverlayProps) {
     let animationFrameId: number
 
     const render = () => {
-      // Match canvas size to video element's rendered size
       if (canvas.width !== video.clientWidth || canvas.height !== video.clientHeight) {
         canvas.width = video.clientWidth
         canvas.height = video.clientHeight
@@ -32,9 +35,16 @@ export default function CourtOverlay({ videoRef }: CourtOverlayProps) {
 
       ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-      players.forEach((player: Player) => {
-        drawPlayer(ctx, player, canvas.width, canvas.height)
-      })
+      // Don't render stale bboxes: if video has moved more than threshold ahead
+      // of the last WS update, the positions are too wrong to be useful
+      const videoMs = video.currentTime * 1000
+      const isStale = playersVideoTs > 0 && (videoMs - playersVideoTs) > STALE_THRESHOLD_MS
+
+      if (!isStale) {
+        players.forEach((player: Player) => {
+          drawPlayer(ctx, player, canvas.width, canvas.height)
+        })
+      }
 
       animationFrameId = window.requestAnimationFrame(render)
     }
@@ -44,7 +54,7 @@ export default function CourtOverlay({ videoRef }: CourtOverlayProps) {
     return () => {
       window.cancelAnimationFrame(animationFrameId)
     }
-  }, [players, videoRef])
+  }, [players, playersVideoTs, videoRef])
 
   const drawPlayer = (
     ctx: CanvasRenderingContext2D,

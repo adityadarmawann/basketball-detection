@@ -70,7 +70,7 @@ FPS_LOG_INTERVAL     = 100   # frames between FPS log lines
 FPS_DEFAULT          = 30
 
 # CPU performance: skip heavy models on intermediate frames
-PROCESS_STRIDE       = int(os.getenv("PROCESS_STRIDE", "25"))  # process 1 in N source frames (≈1fps on 25fps source)
+PROCESS_STRIDE       = int(os.getenv("PROCESS_STRIDE", "6"))   # process 1 in N source frames (≈4fps on 25fps source)
 OCR_EVERY_N_FRAMES   = int(os.getenv("OCR_EVERY_N", "5"))      # PaddleOCR interval (proc frames)
 ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N", "3"))  # SlowFast interval (proc frames)
 

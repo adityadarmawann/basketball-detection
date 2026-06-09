@@ -91,7 +91,7 @@ export const useWebSocket = () => {
     s.setScore(frame.score.teamA, frame.score.teamB)
     s.setQuarter(frame.quarter)
     s.setGameClock(frame.gameClock)
-    s.setPlayers(frame.players)
+    s.setPlayers(frame.players, frame.timestamp)
     s.setBall(frame.ball)
     s.setPossession(frame.possession)
 

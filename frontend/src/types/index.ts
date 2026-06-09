@@ -102,6 +102,7 @@ export interface MatchState {
   possession: { teamA: number; teamB: number };
   isLive: boolean;
   players: Player[];
+  playersVideoTs: number;
   ball: BallState | null;
   events: GameEvent[];
   stats: Record<number, PlayerStats>;

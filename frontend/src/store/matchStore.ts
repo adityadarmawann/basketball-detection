@@ -13,6 +13,7 @@ const initialState: MatchState = {
   possession: { teamA: 0.5, teamB: 0.5 },
   isLive: false,
   players: [],
+  playersVideoTs: 0,
   ball: null,
   events: [],
   stats: {},
@@ -31,7 +32,7 @@ export const useMatchStore = create<MatchState & {
   setShotClock: (clock: number) => void
   setPossession: (possession: { teamA: number; teamB: number }) => void
   setIsLive: (live: boolean) => void
-  setPlayers: (players: Player[]) => void
+  setPlayers: (players: Player[], videoTs?: number) => void
   setBall: (ball: BallState | null) => void
   updatePlayer: (trackId: number, player: Partial<Player>) => void
   addEvent: (event: GameEvent) => void
@@ -60,7 +61,10 @@ export const useMatchStore = create<MatchState & {
       setShotClock: (clock) => set({ shotClock: clock }),
       setPossession: (possession) => set({ possession }),
       setIsLive: (live) => set({ isLive: live }),
-      setPlayers: (players) => set({ players }),
+      setPlayers: (players, videoTs) => set({
+        players,
+        playersVideoTs: videoTs ?? 0,
+      }),
       setBall: (ball) => set({ ball }),
       updatePlayer: (trackId, updates) =>
         set((state) => ({

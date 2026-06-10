@@ -178,24 +178,33 @@ export default function CourtMap2D() {
           fill="none" stroke="#fff" strokeWidth={0.8}
         />
 
-        {/* ── Player dots ────────────────────────────────────────────────── */}
+        {/* ── Player dots + ID label ─────────────────────────────────────── */}
         {players
           .filter(p => p.courtPos != null)
-          .map(p => (
-            <circle
-              key={p.trackId}
-              cx={mx(p.courtPos![0])}
-              cy={my(p.courtPos![1])}
-              r={3.5}
-              fill={
-                p.team === 'A' ? '#00BCD4'
-              : p.team === 'B' ? '#F97316'
-              : '#9CA3AF'
-              }
-              stroke="#fff"
-              strokeWidth={0.5}
-            />
-          ))
+          .map(p => {
+            const cx   = mx(p.courtPos![0])
+            const cy   = my(p.courtPos![1])
+            const r    = 3.5
+            const fill = p.team === 'A' ? '#00BCD4'
+                       : p.team === 'B' ? '#F97316'
+                       : '#9CA3AF'
+            const label = p.jerseyNumber != null ? `${p.jerseyNumber}` : `${p.trackId}`
+            return (
+              <g key={p.trackId}>
+                {/* number above the dot */}
+                <text
+                  x={cx} y={cy - r - 1.5}
+                  textAnchor="middle" dominantBaseline="auto"
+                  fontSize={7} fontWeight="bold"
+                  fill={fill}
+                  stroke="#000" strokeWidth={0.4} paintOrder="stroke"
+                >
+                  {label}
+                </text>
+                <circle cx={cx} cy={cy} r={r} fill={fill} stroke="#fff" strokeWidth={0.5} />
+              </g>
+            )
+          })
         }
 
         {/* ── Ball dot ───────────────────────────────────────────────────── */}

@@ -18,17 +18,18 @@ torch==2.2.2
 torchvision==0.17.2
 
 # ── Computer Vision / ML ──────────────────────────────────────────────────────
-opencv-python==4.13.0.92   # metadata minta numpy>=2 tapi jalan fine di 1.26.4
+# opencv-python 4.9.0.80: numpy>=1.23.5 (Python 3.11) — kompatibel dengan 1.26.4.
+# Jangan upgrade ke 4.11+ karena mulai dari sana metadata declare numpy>=2,
+# yang membuat pip resolver menolak numpy==1.26.4 meski runtime-nya fine.
+opencv-python==4.9.0.80
 ultralytics==8.4.33        # YOLOv8: player detection, ball detection, jersey_no.pt
 pytorchvideo==0.1.5        # SlowFast-R50 action recognition (action_best_v1.pt)
 
 # ── Tracking ──────────────────────────────────────────────────────────────────
-# boxmot dan lapx harus diinstall dengan --no-deps karena metadata-nya declare
-# numpy==1.23.1 (terlalu strict) dan akan konflik resolver.
-# Jalankan SETELAH pip install -r requirements.txt:
+# boxmot dan lapx TIDAK boleh ada di sini — metadata-nya declare numpy==1.23.1
+# sehingga pip resolver akan konflik dengan numpy==1.26.4 di atas.
+# Install TERPISAH setelah pip install -r requirements.txt selesai:
 #   pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
-boxmot==10.0.43            # ByteTrack / BoT-SORT tracker  [install dengan --no-deps]
-lapx==0.9.4                # dependency boxmot              [install dengan --no-deps]
 
 # ── OCR (jersey number reading) ───────────────────────────────────────────────
 paddlepaddle==3.0.0     # paddleocr 3.x requires paddlepaddle 3.x

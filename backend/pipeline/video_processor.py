@@ -12,7 +12,9 @@ Threading model
 """
 
 import asyncio
+import bisect
 import concurrent.futures
+import csv
 import json
 import logging
 import os
@@ -60,6 +62,9 @@ _create_stats      = _rel_or_abs("stats_calculator",   "create_stats_calculator"
 
 MODELS_DIR           = os.getenv("MODELS_PATH",
                         os.path.join(os.path.dirname(__file__), "..", "models"))
+OUTPUT_DIR           = os.getenv("OUTPUT_PATH",
+                        os.path.join(os.path.dirname(__file__), "..", "output"))
+RENDER_OUTPUT_VIDEO  = os.getenv("RENDER_OUTPUT_VIDEO", "1") == "1"
 TARGET_FPS           = 25
 STATS_UPDATE_INTERVAL = 30    # frames between WebSocket pushes
 BALL_TRAJ_MAXLEN     = 60    # court positions kept for ball trajectory
@@ -128,9 +133,11 @@ class VideoProcessor:
         self._roster:              dict  = {}
 
         # Per-frame bbox store — written to JSON at finalize for frontend time-lookup
-        self._frame_store:      list = []   # [{ts, p:[{i,j,t,b}], bl}]
-        self._video_path:       str  = ""   # set in process_video, used in _finalize
-        self._frames_json_path: str  = ""   # output path written in _finalize
+        self._frame_store:        list = []   # [{ts, p:[{i,j,t,b}], bl}]
+        self._video_path:         str  = ""   # set in process_video, used in _finalize
+        self._frames_json_path:   str  = ""   # output path written in _finalize
+        self._output_video_path:  str  = ""   # rendered video with overlay
+        self._output_csv_path:    str  = ""   # player stats CSV
 
         # Threading
         self._frame_queue = queue.Queue(maxsize=FRAME_QUEUE_MAXSIZE)
@@ -760,9 +767,9 @@ class VideoProcessor:
             logger.debug("Redis publish error: %s", e)
 
     async def _finalize(self, match_id: str) -> None:
-        """Update MongoDB match status; push final stats snapshot to Redis."""
+        """Update MongoDB match status; push final stats; write output files."""
 
-        # Write per-frame bbox store to JSON file so frontend can do time-lookup
+        # ── 1. Write per-frame bbox JSON (frontend time-lookup) ───────────────
         if self._frame_store and self._video_path:
             frames_path = os.path.splitext(self._video_path)[0] + "_frames.json"
             try:
@@ -774,12 +781,41 @@ class VideoProcessor:
             except Exception as e:
                 logger.warning("Frame store write failed: %s", e)
 
+        # ── 2 & 3. Output folder artefacts ────────────────────────────────────
+        # Wrapped in a single try/except so any failure here (disk full,
+        # permission error, rendering crash) never prevents MongoDB + Redis
+        # from running — dashboard always gets its processing_complete signal.
+        out_dir = os.path.join(OUTPUT_DIR, match_id)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+
+            csv_path = self._save_stats_csv(out_dir, match_id)
+            if csv_path:
+                self._output_csv_path = csv_path
+                logger.info("Stats CSV: %s", csv_path)
+
+            if RENDER_OUTPUT_VIDEO and self._frame_store:
+                loop = asyncio.get_event_loop()
+                video_out = await loop.run_in_executor(
+                    None, self._render_output_video, out_dir, match_id
+                )
+                if video_out:
+                    self._output_video_path = video_out
+
+        except Exception as exc:
+            logger.warning("Output file generation failed (dashboard unaffected): %s", exc)
+
+        # ── 4. Persist to MongoDB (always runs) ────────────────────────────────
         if self._mongo_db is not None:
             try:
-                extra = {}
+                extra: dict = {}
                 if self._frames_json_path:
-                    extra["frames_json_path"] = self._frames_json_path
-                self._mongo_db["matches"].update_one(   # pymongo is sync — no await
+                    extra["frames_json_path"]  = self._frames_json_path
+                if self._output_csv_path:
+                    extra["output_csv_path"]   = self._output_csv_path
+                if self._output_video_path:
+                    extra["output_video_path"] = self._output_video_path
+                self._mongo_db["matches"].update_one(
                     {"match_id": match_id},
                     {"$set": {"match_id": match_id,
                                "status": self._status,
@@ -790,17 +826,171 @@ class VideoProcessor:
             except Exception as e:
                 logger.warning("MongoDB finalize error: %s", e)
 
+        # ── 5. Redis broadcast (always runs) ───────────────────────────────────
         if self._redis is not None and self._stats is not None:
             try:
                 await self._push_redis(match_id, {
-                    "type":   "processing_complete",
-                    "status": self._status,
-                    "stats":  self._stats.get_live_stats(),
+                    "type":              "processing_complete",
+                    "status":            self._status,
+                    "stats":             self._stats.get_live_stats(),
+                    "output_video_path": self._output_video_path or None,
+                    "output_csv_path":   self._output_csv_path   or None,
                 })
             except Exception as e:
                 logger.debug("Redis finalize error: %s", e)
 
         self._executor.shutdown(wait=False)
+
+    # ── Output helpers ───────────────────────────────────────────────────────
+
+    def _save_stats_csv(self, out_dir: str, match_id: str) -> Optional[str]:
+        """Write final player stats to CSV matching the frontend export format."""
+        if self._stats is None:
+            return None
+        try:
+            live = self._stats.get_live_stats()
+            player_stats = live.get("player_stats", {})
+            if not player_stats:
+                return None
+
+            os.makedirs(out_dir, exist_ok=True)
+            csv_path = os.path.join(out_dir, f"{match_id}_stats.csv")
+
+            headers = [
+                "#", "Name", "Team", "MIN", "PTS",
+                "2P", "3P", "FT", "FG%",
+                "OFF", "DEF", "TOT", "AST", "STL", "TOV",
+                "C", "R", "M", "+/-", "EFF",
+            ]
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                for tid, ps in sorted(player_stats.items(),
+                                      key=lambda x: x[1].get("jersey_number") or 0):
+                    ts = ps.get("total_stats", {})
+                    writer.writerow([
+                        ps.get("jersey_number") or tid,
+                        ps.get("name", f"Player_{tid}"),
+                        ps.get("team", ""),
+                        round(ts.get("min", 0) / 60, 1),
+                        ts.get("pts", 0),
+                        f"{ts.get('fgm', 0)}/{ts.get('fga', 0)}",
+                        f"{ts.get('three_pm', 0)}/{ts.get('three_pa', 0)}",
+                        f"{ts.get('ftm', 0)}/{ts.get('fta', 0)}",
+                        round(ts.get("fg_pct", 0.0) * 100, 1),
+                        ts.get("oreb", 0),
+                        ts.get("dreb", 0),
+                        ts.get("reb", 0),
+                        ts.get("ast", 0),
+                        ts.get("stl", 0),
+                        ts.get("tov", 0),
+                        ts.get("pf", 0),
+                        ts.get("blk", 0),
+                        0,   # not in current schema
+                        ts.get("plus_minus", 0),
+                        round(ts.get("eff", 0.0), 1),
+                    ])
+            return csv_path
+        except Exception as exc:
+            logger.warning("_save_stats_csv failed: %s", exc)
+            return None
+
+    def _render_output_video(self, out_dir: str, match_id: str) -> Optional[str]:
+        """
+        Re-read the original video and draw bbox overlays from stored frame data.
+        Writes to out_dir/{match_id}_analyzed.mp4.  Returns path or None on error.
+        Runs synchronously — call via run_in_executor to avoid blocking the loop.
+        """
+        if not self._frame_store or not self._video_path:
+            return None
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+
+            cap = cv2.VideoCapture(self._video_path)
+            if not cap.isOpened():
+                logger.warning("_render_output_video: cannot open %s", self._video_path)
+                return None
+
+            src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            width   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            out_path = os.path.join(out_dir, f"{match_id}_analyzed.mp4")
+            fourcc   = cv2.VideoWriter_fourcc(*"mp4v")
+            writer   = cv2.VideoWriter(out_path, fourcc, src_fps, (width, height))
+            if not writer.isOpened():
+                cap.release()
+                logger.warning("_render_output_video: VideoWriter could not be opened")
+                return None
+
+            # Pre-build sorted timestamp list for O(log n) binary search per frame
+            ts_list = [e["ts"] for e in self._frame_store]
+
+            # BGR color palette (matches frontend CourtOverlay colors)
+            C_A    = (212, 188,   0)   # Team A — cyan   #00BCD4
+            C_B    = ( 22, 115, 249)   # Team B — orange #F97316
+            C_UNK  = (175, 163, 156)   # unknown — gray  #9CA3AF
+            C_BALL = ( 21, 204, 250)   # ball — yellow   #FACC15
+
+            frame_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                ts_ms = int(frame_idx / src_fps * 1000)
+
+                # Binary search: nearest stored snapshot within 2 s
+                idx = bisect.bisect_left(ts_list, ts_ms)
+                if idx >= len(ts_list):
+                    idx = len(ts_list) - 1
+                elif idx > 0 and abs(ts_list[idx - 1] - ts_ms) < abs(ts_list[idx] - ts_ms):
+                    idx -= 1
+
+                if abs(ts_list[idx] - ts_ms) < 2000:
+                    snap = self._frame_store[idx]
+
+                    for p in snap.get("p", []):
+                        b = p.get("b", [])
+                        if len(b) != 4:
+                            continue
+                        x1, y1 = int(b[0] * width), int(b[1] * height)
+                        x2, y2 = int(b[2] * width), int(b[3] * height)
+                        if (x2 - x1) < 4 or (y2 - y1) < 4:
+                            continue
+                        t     = p.get("t", "")
+                        color = C_A if t == "A" else C_B if t == "B" else C_UNK
+                        label = f"#{p['j']}" if p.get("j") is not None else f"ID:{p['i']}"
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                        cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 6, y1), color, -1)
+                        cv2.putText(frame, label, (x1 + 3, y1 - 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1,
+                                    cv2.LINE_AA)
+
+                    bl = snap.get("bl")
+                    if bl:
+                        b = bl.get("b", [])
+                        if len(b) == 4:
+                            x1, y1 = int(b[0] * width), int(b[1] * height)
+                            x2, y2 = int(b[2] * width), int(b[3] * height)
+                            if (x2 - x1) >= 4 and (y2 - y1) >= 4:
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), C_BALL, 2)
+                                cv2.putText(frame, "BALL", (x1, max(y1 - 4, 12)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, C_BALL, 1,
+                                            cv2.LINE_AA)
+
+                writer.write(frame)
+                frame_idx += 1
+
+            cap.release()
+            writer.release()
+            logger.info("Output video: %s  (frames=%d)", out_path, frame_idx)
+            return out_path
+
+        except Exception as exc:
+            logger.warning("_render_output_video failed: %s", exc)
+            return None
 
     # ── Quarter management ────────────────────────────────────────────────────
 

@@ -91,6 +91,30 @@ export interface BallState {
   trajectory: Array<[number, number]>;
 }
 
+/**
+ * Compact per-frame bbox snapshot written by VideoProcessor and served via
+ * GET /api/upload/frames/{match_id}.
+ *
+ * Short field names (i/j/t/b/bl) keep the JSON file small.
+ *   ts  — video timestamp in milliseconds
+ *   p   — player array
+ *     i — trackId
+ *     j — jerseyNumber (null until OCR confirms)
+ *     t — team ('A' | 'B' | '')
+ *     b — normalized bbox [x1, y1, x2, y2] ∈ [0,1]
+ *   bl  — ball (null if not detected), same b format
+ */
+export interface FrameBboxEntry {
+  ts: number
+  p: Array<{
+    i: number
+    j: number | null
+    t: string
+    b: [number, number, number, number]
+  }>
+  bl: { b: [number, number, number, number] } | null
+}
+
 export interface MatchState {
   matchId: string;
   region: string;

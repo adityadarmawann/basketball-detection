@@ -17,27 +17,30 @@ redis>=5.0.0            # redis.asyncio untuk pub/sub; jalankan: pip install red
 torch==2.2.2
 torchvision==0.17.2
 
-# ── Numpy ─────────────────────────────────────────────────────────────────────
-# torch 2.2.2 dikompil dengan NumPy 1.x — warning "compiled using NumPy 1.x"
-# saat import adalah normal dan tidak menyebabkan crash.
-
 # ── Computer Vision / ML ──────────────────────────────────────────────────────
-opencv-python==4.13.0.92
-ultralytics==8.4.33     # YOLOv8: player detection, ball detection, jersey_no.pt
-pytorchvideo==0.1.5     # SlowFast-R50 action recognition (action_best_v1.pt)
+opencv-python==4.13.0.92   # metadata minta numpy>=2 tapi jalan fine di 1.26.4
+ultralytics==8.4.33        # YOLOv8: player detection, ball detection, jersey_no.pt
+pytorchvideo==0.1.5        # SlowFast-R50 action recognition (action_best_v1.pt)
 
 # ── Tracking ──────────────────────────────────────────────────────────────────
-# boxmot metadata-nya declare numpy==1.23.1 (terlalu strict) padahal jalan di numpy 2.x
-# Install terpisah dengan --no-deps:
+# boxmot dan lapx harus diinstall dengan --no-deps karena metadata-nya declare
+# numpy==1.23.1 (terlalu strict) dan akan konflik resolver.
+# Jalankan SETELAH pip install -r requirements.txt:
 #   pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
-lapx==0.9.4             # dependency boxmot
+boxmot==10.0.43            # ByteTrack / BoT-SORT tracker  [install dengan --no-deps]
+lapx==0.9.4                # dependency boxmot              [install dengan --no-deps]
 
 # ── OCR (jersey number reading) ───────────────────────────────────────────────
 paddlepaddle==3.0.0     # paddleocr 3.x requires paddlepaddle 3.x
 paddleocr==3.5.0
 
 # ── Numerics / Signal processing ──────────────────────────────────────────────
-numpy==2.3.5            # warning "compiled with NumPy 1.x" dari torch adalah normal
+# WAJIB numpy==1.26.4 — torch 2.2.2 dikompil dengan numpy 1.x ABI.
+# numpy 2.x menyebabkan RuntimeError: Numpy is not available di torch.from_numpy()
+# yang membuat detector.detect() gagal diam-diam setiap frame → nol bbox di output.
+# opencv-python 4.13 dan boxmot deklarasi numpy>=2 / ==1.23.1 tapi keduanya
+# berjalan baik dengan 1.26.4 (konflik hanya di metadata resolver, bukan runtime).
+numpy==1.26.4
 scipy==1.17.1
 filterpy==1.4.5         # Kalman filter used by tracker fallback
 scikit-learn==1.8.0     # K-Means untuk kalibrasi warna tim

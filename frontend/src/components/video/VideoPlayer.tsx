@@ -2,14 +2,17 @@ import { useRef, useState, useEffect } from 'react'
 import { Play, Pause, Volume2, VolumeX } from 'lucide-react'
 import CourtMap2D from './CourtMap2D'
 import CourtOverlay from './CourtOverlay'
+import { FrameBboxEntry } from '../../types'
 
 interface VideoPlayerProps {
   videoUrl: string
-  onFrameUpdate?: (frameData: any) => void
+  onFrameUpdate?: (frameData: unknown) => void
   showCourtMap?: boolean
+  /** Per-frame bbox data for frame-accurate overlay. Fetched after analysis. */
+  frameData?: FrameBboxEntry[]
 }
 
-export default function VideoPlayer({ videoUrl, showCourtMap }: VideoPlayerProps) {
+export default function VideoPlayer({ videoUrl, showCourtMap, frameData }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [volume, setVolume] = useState(1)
@@ -95,7 +98,7 @@ export default function VideoPlayer({ videoUrl, showCourtMap }: VideoPlayerProps
         </div>
 
         {/* Canvas Overlay Layer - Renders player bounding boxes */}
-        <CourtOverlay videoRef={videoRef} />
+        <CourtOverlay videoRef={videoRef} frameData={frameData} />
 
         {showCourtMap && (
           <div className="absolute top-4 right-4 w-[140px] md:w-[180px] lg:w-[220px] z-10">

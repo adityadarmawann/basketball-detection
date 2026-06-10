@@ -31,3 +31,9 @@ uploads/
 backend/data/
 *.log
 .sixth/
+
+# Output folder — keep the folder, ignore generated files
+backend/output/*.mp4
+backend/output/*.csv
+backend/output/*.json
+!backend/output/.gitkeep

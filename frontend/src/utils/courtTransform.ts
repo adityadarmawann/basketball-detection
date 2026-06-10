@@ -11,16 +11,18 @@
 export const courtElements: Array<{ path: string }> = [
   // Outer boundary: baseline + both sidelines (center line drawn separately)
   { path: 'M 0 0 L 0 15 M 0 0 L 14 0 M 0 15 L 14 15' },
-  // Paint area (key box): 5.8m deep × 4.9m wide, centred at y=7.5
-  { path: 'M 0 5.05 L 5.8 5.05 M 5.8 5.05 L 5.8 9.95 M 5.8 9.95 L 0 9.95' },
+  // Outer paint boundary: 7.7m wide at baseline (y=3.65–y=11.35), 5.8m deep
+  { path: 'M 0 3.65 L 5.8 3.65 M 5.8 3.65 L 5.8 11.35 M 5.8 11.35 L 0 11.35' },
+  // Inner lane boundary: 3.6m wide (y=5.7–y=9.3), 5.8m deep
+  { path: 'M 0 5.7 L 5.8 5.7 M 5.8 5.7 L 5.8 9.3 M 5.8 9.3 L 0 9.3' },
   // Free throw circle: centre (5.8, 7.5), r=1.8m
   { path: 'M 4.0 7.5 A 1.8 1.8 0 1 0 7.6 7.5 A 1.8 1.8 0 1 0 4.0 7.5' },
   // 3-point line: corner straights + arc (r=6.75m from basket at 1.575, 7.5)
   { path: 'M 0 0.9 L 2.99 0.9 A 6.75 6.75 0 1 0 2.99 14.1 L 0 14.1' },
   // Centre-circle half (only the half facing inward, x ≤ 14)
   { path: 'M 14 5.7 A 1.8 1.8 0 0 0 14 9.3' },
-  // Restricted area (no-charge semicircle): r=1.25m, curves away from baseline
-  { path: 'M 1.28 6.25 A 1.25 1.25 0 0 1 1.28 8.75' },
+  // Restricted area (no-charge semicircle): r=1.25m from FIBA hoop at (1.575, 7.5)
+  { path: 'M 1.575 6.25 A 1.25 1.25 0 0 1 1.575 8.75' },
 ]
 
 export interface HomographyMatrix {
@@ -68,6 +70,6 @@ export const courtCoordinates = {
   threePointRight: [7.24, 15],
   freethrowLeft: [5.8, 3.675],
   freethrowRight: [5.8, 11.325],
-  hoop1: [1.28,   7.47],  // Left basket — back-projected from court_keypoints.pt
-  hoop2: [26.425, 7.5],   // Right basket — matches backend HOOP_RIGHT (not yet back-projected)
+  hoop1: [1.575, 7.5],    // Left basket — FIBA standard
+  hoop2: [26.425, 7.5],   // Right basket — FIBA standard
 }

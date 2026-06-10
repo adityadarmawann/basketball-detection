@@ -24,6 +24,9 @@ UPLOAD_PATH   = os.getenv("UPLOAD_PATH", "./uploads")
 MODELS_PATH   = os.getenv("MODELS_PATH", os.path.join(
     os.path.dirname(__file__), "..", "..", "models"
 ))
+OUTPUT_PATH   = os.getenv("OUTPUT_PATH", os.path.join(
+    os.path.dirname(__file__), "..", "..", "output"
+))
 MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024   # 5 GB
 CHUNK_SIZE    = 1 * 1024 * 1024           # 1 MB streaming chunks
 
@@ -317,3 +320,120 @@ async def get_frame_data(match_id: str):
             logger.warning("MongoDB frames lookup error: %s", e)
 
     raise HTTPException(status_code=404, detail="Frame data not ready yet")
+
+
+# ── GET /output/{match_id}/video ──────────────────────────────────────────────
+
+@router.get("/output/{match_id}/video")
+async def get_output_video(match_id: str):
+    """
+    Download the analyzed video (original frames + bbox overlay) written to
+    backend/output/{match_id}/{match_id}_analyzed.mp4 after processing finishes.
+
+    Returns 202 while rendering is still in progress.
+    Returns 404 if the match hasn't been processed yet.
+    """
+    # Check live processor first
+    processor = _processors.get(match_id)
+    if processor:
+        path = getattr(processor, "_output_video_path", "")
+        if path and os.path.exists(path):
+            fname = os.path.basename(path)
+            return FileResponse(
+                path,
+                media_type="video/mp4",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{fname}"',
+                    "Cache-Control": "public, max-age=86400",
+                },
+            )
+        # Processor exists but video not written yet
+        status = getattr(processor, "_status", "unknown")
+        if status in ("processing", "done"):
+            raise HTTPException(
+                status_code=202,
+                detail="Analyzed video is still being rendered. Try again shortly.",
+            )
+
+    # Fall back to MongoDB
+    db = get_db()
+    if db:
+        try:
+            match = db["matches"].find_one({"match_id": match_id}, {"output_video_path": 1})
+            if match:
+                path = match.get("output_video_path", "")
+                if path and os.path.exists(path):
+                    fname = os.path.basename(path)
+                    return FileResponse(
+                        path,
+                        media_type="video/mp4",
+                        headers={
+                            "Content-Disposition": f'attachment; filename="{fname}"',
+                            "Cache-Control": "public, max-age=86400",
+                        },
+                    )
+        except Exception as e:
+            logger.warning("MongoDB output video lookup: %s", e)
+
+    # Try filesystem fallback
+    candidate = os.path.join(OUTPUT_PATH, match_id, f"{match_id}_analyzed.mp4")
+    if os.path.exists(candidate):
+        return FileResponse(
+            candidate,
+            media_type="video/mp4",
+            headers={"Content-Disposition": f'attachment; filename="{match_id}_analyzed.mp4"'},
+        )
+
+    raise HTTPException(status_code=404, detail="Output video not found. Processing may still be running.")
+
+
+# ── GET /output/{match_id}/stats ──────────────────────────────────────────────
+
+@router.get("/output/{match_id}/stats")
+async def get_output_stats_csv(match_id: str):
+    """
+    Download the player stats CSV written to
+    backend/output/{match_id}/{match_id}_stats.csv after processing finishes.
+
+    This mirrors the frontend dashboard CSV export but is server-generated and
+    persisted even when the browser session ends.
+    """
+    # Check live processor first
+    processor = _processors.get(match_id)
+    if processor:
+        path = getattr(processor, "_output_csv_path", "")
+        if path and os.path.exists(path):
+            fname = os.path.basename(path)
+            return FileResponse(
+                path,
+                media_type="text/csv",
+                headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+            )
+
+    # Fall back to MongoDB
+    db = get_db()
+    if db:
+        try:
+            match = db["matches"].find_one({"match_id": match_id}, {"output_csv_path": 1})
+            if match:
+                path = match.get("output_csv_path", "")
+                if path and os.path.exists(path):
+                    fname = os.path.basename(path)
+                    return FileResponse(
+                        path,
+                        media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+                    )
+        except Exception as e:
+            logger.warning("MongoDB output stats lookup: %s", e)
+
+    # Try filesystem fallback
+    candidate = os.path.join(OUTPUT_PATH, match_id, f"{match_id}_stats.csv")
+    if os.path.exists(candidate):
+        return FileResponse(
+            candidate,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{match_id}_stats.csv"'},
+        )
+
+    raise HTTPException(status_code=404, detail="Stats CSV not found. Processing may still be running.")

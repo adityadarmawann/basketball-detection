@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { ChevronLeft, LayoutDashboard } from 'lucide-react'
+import axios from 'axios'
 import { useMatchStore } from '../store/matchStore'
 import FormSetupMatch from '../components/match/FormSetupMatch'
 import RosterManager from '../components/match/RosterManager'
@@ -12,12 +13,14 @@ import MvpRanking from '../components/dashboard/MvpRanking'
 import LiveEventFeed from '../components/dashboard/LiveEventFeed'
 import TabsStatsLineup from '../components/match/TabsStatsLineup'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { FrameBboxEntry } from '../types'
 
 type MatchStep = 'setup' | 'roster' | 'upload' | 'analyzing' | 'live'
 
 export default function MatchPage() {
   const [step, setStep] = useState<MatchStep>('setup')
   const [videoUrl, setVideoUrl] = useState<string>('')
+  const [frameData, setFrameData] = useState<FrameBboxEntry[]>([])
 
   const store = useMatchStore()
   const { connect, disconnect } = useWebSocket()
@@ -49,9 +52,24 @@ export default function MatchPage() {
     setStep('analyzing')
   }
 
-  const handleAnalysisComplete = () => {
+  const handleAnalysisComplete = useCallback(async () => {
     setStep('live')
-  }
+    // Fetch the per-frame bbox JSON written by VideoProcessor._finalize().
+    // On success, CourtOverlay switches to frame-accurate time-lookup mode.
+    // On error (dev mode / backend offline), it falls back to WS overlay silently.
+    const { matchId } = useMatchStore.getState()
+    if (!matchId) return
+    try {
+      const res = await axios.get<FrameBboxEntry[]>(
+        `${import.meta.env.VITE_API_URL}/api/upload/frames/${matchId}`
+      )
+      if (Array.isArray(res.data) && res.data.length > 0) {
+        setFrameData(res.data)
+      }
+    } catch {
+      // Expected in dev mode or when backend is unavailable — WS fallback stays active
+    }
+  }, [])
 
   const goToVideo = useCallback(() => {
     setStep('analyzing')
@@ -185,7 +203,7 @@ export default function MatchPage() {
                     Video Analisis AI
                   </span>
                 </div>
-                <VideoPlayer videoUrl={videoUrl} showCourtMap={true} />
+                <VideoPlayer videoUrl={videoUrl} showCourtMap={true} frameData={frameData} />
               </div>
             </div>
           )}

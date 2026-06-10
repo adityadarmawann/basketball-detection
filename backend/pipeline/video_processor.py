@@ -58,6 +58,22 @@ _create_action     = _rel_or_abs("action",             "create_action_classifier
 _create_events     = _rel_or_abs("event_engine",       "create_event_engine")
 _create_stats      = _rel_or_abs("stats_calculator",   "create_stats_calculator")
 
+# ── Device detection ──────────────────────────────────────────────────────────
+
+def _detect_device() -> str:
+    """Auto-detect CUDA GPU; fall back to CPU. Called once at VideoProcessor init."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0)
+            logger.info("GPU detected: %s — using CUDA", name)
+            return "cuda"
+    except ImportError:
+        pass
+    logger.info("No CUDA GPU detected — using CPU")
+    return "cpu"
+
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 MODELS_DIR           = os.getenv("MODELS_PATH",
@@ -68,18 +84,21 @@ RENDER_OUTPUT_VIDEO  = os.getenv("RENDER_OUTPUT_VIDEO", "1") == "1"
 TARGET_FPS           = 25
 STATS_UPDATE_INTERVAL = 30    # frames between WebSocket pushes
 BALL_TRAJ_MAXLEN     = 60    # court positions kept for ball trajectory
-FRAME_QUEUE_MAXSIZE  = 5
+FRAME_QUEUE_MAXSIZE  = 8     # slightly larger buffer for GPU burst
 FRAME_BUFFER_SIZE    = 16    # temporal window for action classifier
 QUARTER_DURATION_S   = 600   # FIBA 10-minute quarters
 FPS_LOG_INTERVAL     = 100   # frames between FPS log lines
 FPS_DEFAULT          = 30
 
-# CPU performance: skip heavy models on intermediate frames
-# PROCESS_STRIDE=1 → every source frame goes through detect+track (best bbox accuracy, needs GPU)
-# PROCESS_STRIDE=6 → 1-in-6 frames processed (CPU-friendly, bbox data at ~4fps)
-PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE", "1"))   # 1=every frame (GPU), 6=CPU mode
-OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N", "25"))     # PaddleOCR ~1s interval at 25fps
-ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N", "10"))  # SlowFast ~0.4s interval at 25fps
+# Model frequency — how often each heavy model runs (in processed-frame units)
+# Stride=2: process 1-in-2 source frames (GPU recommended)
+# Court keypoints: camera moves slowly → run every 30 processed frames
+# Action: SlowFast needs temporal clip, result is stable → run every 20 frames
+# OCR: jersey number is stable once confirmed → run every 30 frames
+PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every other frame
+COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",   "30"))   # court keypoint YOLOv8-pose
+OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "30"))   # PaddleOCR
+ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "20"))   # SlowFast action
 
 # ── Action label normalisation ────────────────────────────────────────────────
 # Backend action.py returns Title-case ("Shoot", "Dribble", "Rebound_attempt").
@@ -119,7 +138,7 @@ class VideoProcessor:
         self._models_path = models_path or MODELS_DIR
         self._mongo_db    = mongo_db
         self._redis       = redis_client
-        self._device      = device or "cpu"
+        self._device      = device or _detect_device()
         self._target_fps  = TARGET_FPS
 
         # Pipeline components — populated by _init_pipeline()
@@ -145,6 +164,9 @@ class VideoProcessor:
         self._frame_width:         int   = 0
         self._frame_height:        int   = 0
         self._roster:              dict  = {}
+
+        # Court result cache — avoid running YOLOv8-pose every frame (camera is slow)
+        self._last_court_result:  dict = {"is_calibrated": False}
 
         # Per-frame bbox store — written to JSON at finalize for frontend time-lookup
         self._frame_store:        list = []   # [{ts, p:[{i,j,t,b}], bl}]
@@ -358,7 +380,7 @@ class VideoProcessor:
                 if self._detect_quarter_change(frame_data):
                     self._handle_quarter_change()
 
-                await self._throttle_fps(self._target_fps, frame_start)
+                # Offline analysis — process at GPU max speed, no artificial throttle
 
         except asyncio.CancelledError:
             self._status = "cancelled"
@@ -452,17 +474,21 @@ class VideoProcessor:
                 logger.debug("Tracker frame %d: %s", frame_id, e)
 
         # ── 3. Court mapping ──────────────────────────────────────────────
+        # YOLOv8-pose keypoint inference runs only every COURT_EVERY_N_FRAMES;
+        # pixel_to_court() uses the cached H matrix on skipped frames.
         if self._court:
             try:
-                court = self._court.process_frame(frame)
+                if frame_id % COURT_EVERY_N_FRAMES == 0:
+                    court = self._court.process_frame(frame)
+                    self._last_court_result = court
+                else:
+                    court = self._last_court_result
                 frame_data["court"] = court
                 if court.get("is_calibrated"):
-                    # Annotate each player with court-space position
                     for player in tracked_players:
                         pc = player.get("center")
                         if pc:
                             player["court_pos"] = self._court.pixel_to_court(pc)
-                    # Ball court position
                     if ball_info:
                         bc = ball_info.get("center")
                         if bc:

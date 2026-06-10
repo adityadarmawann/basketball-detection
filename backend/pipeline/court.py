@@ -169,7 +169,9 @@ class CourtMapper:
             target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
             self.model = YOLO(str(path))
             self.model.to(target)
-            logger.info("CourtMapper loaded: %s (device=%s)", path.name, target)
+            self._use_half = target.startswith("cuda")
+            logger.info("CourtMapper loaded: %s (device=%s, fp16=%s)",
+                        path.name, target, self._use_half)
         except ImportError as exc:
             raise ImportError(
                 "ultralytics and torch required. pip install ultralytics torch"
@@ -192,7 +194,8 @@ class CourtMapper:
         if self.model is None or frame is None or frame.size == 0:
             return []
 
-        results = self.model.predict(frame, verbose=False, conf=0.1)
+        results = self.model.predict(frame, verbose=False, conf=0.1,
+                                     half=getattr(self, "_use_half", False))
         if not results or results[0].keypoints is None:
             return []
 

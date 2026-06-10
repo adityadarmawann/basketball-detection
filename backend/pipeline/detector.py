@@ -68,6 +68,7 @@ class BasketballDetector:
 
             self.model = YOLO(str(path))
             self.model.to(target_device)
+            self._use_half = target_device.startswith("cuda")
 
             # Sync class name list from model metadata when available
             if hasattr(self.model, "names") and self.model.names:
@@ -76,7 +77,8 @@ class BasketballDetector:
                     self.model.names[i] for i in sorted(self.model.names.keys())
                 ]
 
-            logger.info("Loaded detector model: %s (device=%s)", path.name, target_device)
+            logger.info("Loaded detector model: %s (device=%s, fp16=%s)",
+                        path.name, target_device, self._use_half)
 
         except ImportError as exc:
             raise ImportError(
@@ -116,6 +118,7 @@ class BasketballDetector:
             conf=self.conf_threshold,
             iou=self.iou_threshold,
             verbose=False,
+            half=getattr(self, "_use_half", False),
         )
 
         parsed = self._parse_results(results)

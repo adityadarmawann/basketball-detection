@@ -110,7 +110,7 @@ FPS_DEFAULT          = 30
 # OCR: jersey number is stable once confirmed → run every 30 frames
 PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every other frame
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",   "10"))   # court keypoint YOLOv8-pose
-OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "30"))   # PaddleOCR
+OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "15"))   # PaddleOCR
 ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "20"))   # SlowFast action
 
 # ── Action label normalisation ────────────────────────────────────────────────
@@ -182,6 +182,8 @@ class VideoProcessor:
         self._last_court_result:  dict = {"is_calibrated": False}
         # Sticky courtPos cache: {track_id → [x,y]} — last known valid position per player
         self._last_court_pos:     dict = {}
+        # Sticky team cache: {track_id → "A"|"B"} — persists even when OCR not running
+        self._last_known_team:    dict = {}
 
         # Per-frame bbox store — written to JSON at finalize for frontend time-lookup
         self._frame_store:        list = []   # [{ts, p:[{i,j,t,b}], bl}]
@@ -550,6 +552,10 @@ class VideoProcessor:
                     entry = self._roster.get(str(jersey_num), {})
                     if isinstance(entry, dict) and entry.get("team"):
                         player["team"] = entry["team"]
+                        self._last_known_team[tid] = entry["team"]
+                elif tid in self._last_known_team:
+                    # OCR not running this frame — use last confirmed team
+                    player["team"] = self._last_known_team[tid]
 
         # ── 6. Action classification — run every ACTION_EVERY_N_FRAMES ───────────
         if self._action and tracked_players and frame_id % ACTION_EVERY_N_FRAMES == 0:
@@ -742,7 +748,7 @@ class VideoProcessor:
                 "trackId":      tid,
                 "jerseyNumber": jersey_number,
                 "name":         pstat.get("name", f"Player_{tid}"),
-                "team":         pstat.get("team", ""),
+                "team":         player.get("team", "") or pstat.get("team", ""),
                 "bbox":         norm_bbox,
                 "courtPos":     cur_court_pos,
                 "action":       _norm_action(act_entry.get("action", "Stand")),

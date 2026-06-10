@@ -197,6 +197,14 @@ class StatsCalculator:
         self._all_tids.add(tid)
         s = self._get_qstats_d(tid, quarter)
 
+        # Auto-register team from event so _compute_team_stats works even without OCR.
+        # Once any scoring/stat event carries team info, that mapping is retained.
+        if team in ("A", "B"):
+            rec = self._roster.setdefault(tid, {})
+            if not rec.get("team"):
+                rec["team"] = team
+                rec.setdefault("name", f"Player_{tid}")
+
         is_three = bool(event.get("is_three", etype in ("MADE_3", "MISSED_3")))
 
         if etype in ("MADE_FG", "MADE_3", "SHOT_MADE", "MADE_SHOT"):

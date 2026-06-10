@@ -30,11 +30,11 @@ logger = logging.getLogger(__name__)
 MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "jersey_no.pt"
 
-VOTE_THRESHOLD    = 5     # frames required to confirm a jersey number (raised: 2→5)
-MAX_VOTE_HISTORY  = 40   # rolling window per track_id (raised: 30→40)
-CONF_THRESHOLD    = 0.45 # jersey_no.pt detection confidence (slightly relaxed)
-OCR_HEIGHT_PX     = 112  # resize crop to this height for OCR (raised: 64→112)
-OCR_MIN_SCORE     = 0.55 # minimum PaddleOCR confidence to accept a result
+VOTE_THRESHOLD    = 3     # frames required to confirm a jersey number (3 = faster, still reliable)
+MAX_VOTE_HISTORY  = 30   # rolling window per track_id
+CONF_THRESHOLD    = 0.40 # jersey_no.pt detection confidence
+OCR_HEIGHT_PX     = 112  # resize crop to this height for OCR
+OCR_MIN_SCORE     = 0.50 # minimum PaddleOCR confidence to accept a result
 BLUR_THRESHOLD    = 80.0 # Laplacian variance below this = too blurry for OCR (25fps tuned)
                          # Raise if too many frames skipped; lower if blurry frames still pass
 

@@ -111,6 +111,8 @@ export interface FrameBboxEntry {
     j: number | null
     t: string
     b: [number, number, number, number]
+    a: string        // action UPPER e.g. "DRIBBLE" — empty string if unknown
+    s: number        // speedKmh — 0 if not yet computed
   }>
   bl: { b: [number, number, number, number] } | null
 }

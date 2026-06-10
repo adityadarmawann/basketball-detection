@@ -21,6 +21,7 @@ export default function MatchPage() {
   const [step, setStep] = useState<MatchStep>('setup')
   const [videoUrl, setVideoUrl] = useState<string>('')
   const [frameData, setFrameData] = useState<FrameBboxEntry[]>([])
+  const [overlayLoading, setOverlayLoading] = useState(false)
 
   const store = useMatchStore()
   const { connect, disconnect } = useWebSocket()
@@ -54,11 +55,9 @@ export default function MatchPage() {
 
   const handleAnalysisComplete = useCallback(async () => {
     setStep('live')
-    // Fetch the per-frame bbox JSON written by VideoProcessor._finalize().
-    // On success, CourtOverlay switches to frame-accurate time-lookup mode.
-    // On error (dev mode / backend offline), it falls back to WS overlay silently.
+    setOverlayLoading(true)
     const { matchId } = useMatchStore.getState()
-    if (!matchId) return
+    if (!matchId) { setOverlayLoading(false); return }
     try {
       const res = await axios.get<FrameBboxEntry[]>(
         `${import.meta.env.VITE_API_URL}/api/upload/frames/${matchId}`
@@ -69,6 +68,7 @@ export default function MatchPage() {
     } catch {
       // Expected in dev mode or when backend is unavailable — WS fallback stays active
     }
+    setOverlayLoading(false)
   }, [])
 
   const goToVideo = useCallback(() => {
@@ -134,12 +134,21 @@ export default function MatchPage() {
                 Preview Video Asli
               </span>
             </div>
-            <video
-              src={videoUrl}
-              controls
-              muted
-              className="w-full max-h-80 object-contain bg-black"
-            />
+            <div className="relative">
+              <video
+                src={videoUrl}
+                controls
+                muted
+                className="w-full max-h-80 object-contain bg-black"
+              />
+              {/* Info banner — bbox overlay belum tersedia selama analisis berjalan */}
+              <div className="absolute bottom-10 inset-x-0 flex justify-center pointer-events-none">
+                <div className="bg-black/75 text-white text-xs px-3 py-1.5 rounded-full flex items-center gap-2">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  AI sedang menganalisis — bbox overlay tampil setelah selesai
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* AI scanning progress */}
@@ -198,10 +207,16 @@ export default function MatchPage() {
 
               {/* Analyzed video with bbox overlay */}
               <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
-                <div className="px-4 py-2 border-b border-gray-100">
+                <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between">
                   <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
                     Video Analisis AI
                   </span>
+                  {overlayLoading && (
+                    <span className="flex items-center gap-1.5 text-xs text-amber-500 font-medium">
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                      Menyiapkan overlay...
+                    </span>
+                  )}
                 </div>
                 <VideoPlayer videoUrl={videoUrl} showCourtMap={true} frameData={frameData} />
               </div>

@@ -81,6 +81,20 @@ PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE", "1"))   # 1=every frame 
 OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N", "25"))     # PaddleOCR ~1s interval at 25fps
 ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N", "10"))  # SlowFast ~0.4s interval at 25fps
 
+# ── Action label normalisation ────────────────────────────────────────────────
+# Backend action.py returns Title-case ("Shoot", "Dribble", "Rebound_attempt").
+# Frontend ActionLabel type uses UPPER ("SHOOT", "DRIBBLE", "REBOUND").
+# Normalise here once so every output path (WS + snapshot) is consistent.
+_ACTION_WS_MAP: dict[str, str] = {
+    "shoot": "SHOOT", "pass": "PASS", "dribble": "DRIBBLE",
+    "catch": "CATCH", "steal": "STEAL", "block": "BLOCK",
+    "rebound_attempt": "REBOUND", "rebound": "REBOUND",
+    "jump": "JUMP", "stand": "STAND", "jump_action": "JUMP",
+}
+
+def _norm_action(action_str: str) -> str:
+    return _ACTION_WS_MAP.get((action_str or "stand").lower(), (action_str or "STAND").upper())
+
 
 # ── Main class ────────────────────────────────────────────────────────────────
 
@@ -148,6 +162,10 @@ class VideoProcessor:
         # Data buffers
         self._frame_buffer:    deque = deque(maxlen=FRAME_BUFFER_SIZE)
         self._ball_trajectory: deque = deque(maxlen=BALL_TRAJ_MAXLEN)
+
+        # Speed cache: track_id → avg_speed_kmh, updated every WS cycle (~5 frames)
+        # Used by _snapshot_frame so the per-frame JSON has speed without calling get_live_stats() every frame.
+        self._speed_cache:     dict  = {}   # {track_id: float}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -311,6 +329,11 @@ class VideoProcessor:
                 # WebSocket update every 5 processed frames (~7 sec on CPU)
                 if proc_id % 5 == 0 and self._stats:
                     stats = self._stats.get_live_stats()
+                    # Refresh speed cache so _snapshot_frame can embed speed in JSON
+                    for tid, pstat in stats.get("player_stats", {}).items():
+                        spd = pstat.get("mpi", {}).get("avg_speed_kmh", 0.0)
+                        if spd > 0:
+                            self._speed_cache[tid] = round(spd, 1)
                     msg   = self._build_ws_message(frame_data, stats)
                     await self._push_redis(match_id, msg)
                     if ws_manager:
@@ -552,8 +575,18 @@ class VideoProcessor:
         Frontend fetches the full list and does binary search by ts to find the
         nearest entry for video.currentTime → frame-accurate bbox rendering
         regardless of video scrubbing, pause, or replay.
+
+        Fields per player: i=trackId, j=jersey, t=team, b=norm_bbox, a=action, s=speedKmh
         """
         tracking = frame_data.get("tracking", {})
+
+        # Build action lookup from this frame's action results (already in frame_data)
+        actions_data = frame_data.get("actions", {})
+        action_map: dict[int, str] = {
+            a["track_id"]: _norm_action(a.get("action", ""))
+            for a in actions_data.get("actions", [])
+        }
+
         players_out = []
         for player in tracking.get("tracked_players", []):
             tid    = player["track_id"]
@@ -568,7 +601,12 @@ class VideoProcessor:
                 ]
             else:
                 norm = list(raw)
-            players_out.append({"i": tid, "j": jersey, "t": team, "b": norm})
+            action_label = action_map.get(tid, "")
+            players_out.append({
+                "i": tid, "j": jersey, "t": team, "b": norm,
+                "a": action_label,
+                "s": self._speed_cache.get(tid, 0.0),
+            })
 
         ball_raw = tracking.get("tracked_ball")
         ball_out = None
@@ -645,7 +683,7 @@ class VideoProcessor:
                 "team":         pstat.get("team", ""),
                 "bbox":         norm_bbox,
                 "courtPos":     player.get("court_pos"),
-                "action":       act_entry.get("action", "Stand"),
+                "action":       _norm_action(act_entry.get("action", "Stand")),
                 "speedKmh":     mpi.get("avg_speed_kmh", 0.0),
                 "keypoints":    keypoints,
             })

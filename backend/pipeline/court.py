@@ -118,10 +118,11 @@ LABEL_NAMES: dict[int, str] = {
     41: "corner_bottom_right",
 }
 
-# Thresholds
-CONF_THRESHOLD      = 0.5    # general threshold
-LOW_CONF_THRESHOLD  = 0.3    # titik sudut bawah (sering occluded)
-HIGH_CONF_THRESHOLD = 0.75   # titik boundary atas (sering false detect ke tribun)
+# Thresholds — lowered from 0.5 to 0.35 because broadcast-camera videos produced
+# only 1-2 visible keypoints at 0.5, never enough for RANSAC (needs ≥4).
+CONF_THRESHOLD      = 0.35   # general threshold
+LOW_CONF_THRESHOLD  = 0.20   # titik sudut bawah (sering occluded)
+HIGH_CONF_THRESHOLD = 0.55   # titik boundary atas (sering false detect ke tribun)
 
 # Titik yang sering occluded oleh penonton/kamera sudut bawah
 LOW_CONF_LABELS  = {7, 8, 41}
@@ -290,10 +291,11 @@ class CourtMapper:
         src_px = np.array([kp["pixel_pos"] for kp in visible], dtype=np.float32)
         src_ct = np.array([kp["court_pos"] for kp in visible], dtype=np.float32)
 
-        # court→pixel: RANSAC threshold 10 px (tighter than 15 px — less outlier slip-through)
+        # court→pixel: 20 px threshold — 10 px was too tight for broadcast camera
+        # angle/lens distortion, causing all keypoints to be rejected as outliers.
         try:
             H_ct2px, mask = cv2.findHomography(
-                src_ct, src_px, cv2.RANSAC, ransacReprojThreshold=10.0
+                src_ct, src_px, cv2.RANSAC, ransacReprojThreshold=20.0
             )
         except cv2.error as exc:
             logger.warning("findHomography failed: %s", exc)
@@ -306,7 +308,14 @@ class CourtMapper:
             return None
 
         inliers = int(mask.sum()) if mask is not None else 0
-        logger.debug("Homography: %d/%d RANSAC inliers", inliers, len(visible))
+        logger.info("Homography: %d/%d RANSAC inliers (threshold=20px)", inliers, len(visible))
+
+        if inliers < MIN_KEYPOINTS:
+            logger.warning(
+                "compute_homography: only %d RANSAC inliers after fit — H rejected",
+                inliers,
+            )
+            return None
 
         inlier_kps = []
         for i, kp in enumerate(visible):

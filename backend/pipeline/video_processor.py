@@ -109,7 +109,7 @@ FPS_DEFAULT          = 30
 # Action: SlowFast needs temporal clip, result is stable → run every 20 frames
 # OCR: jersey number is stable once confirmed → run every 30 frames
 PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every other frame
-COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",   "10"))   # court keypoint YOLOv8-pose
+COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
 OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "15"))   # PaddleOCR
 ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "20"))   # SlowFast action
 
@@ -241,11 +241,10 @@ class VideoProcessor:
         if _create_court:
             court = _try("CourtMapper", _create_court, mp, device=dev)
             if court:
-                try:
-                    court.load_model()
-                    self._court = court
-                except Exception as e:
-                    logger.warning("CourtMapper.load_model: %s", e)
+                # create_court_mapper already calls load_model() internally.
+                # Calling it again here caused a silent double-load failure that left
+                # self._court = None, disabling 2D court overlay entirely.
+                self._court = court
 
         if _create_pose:
             pose = _try("PoseEstimator", _create_pose, mp, device=dev)
@@ -531,7 +530,7 @@ class VideoProcessor:
                     for player in tracked_players:
                         self._last_court_pos.pop(player["track_id"], None)
             except Exception as e:
-                logger.debug("Court frame %d: %s", frame_id, e)
+                logger.warning("Court frame %d: %s", frame_id, e, exc_info=True)
 
         # ── 4. Pose estimation ────────────────────────────────────────────
         if self._pose and tracked_players:

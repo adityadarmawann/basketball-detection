@@ -182,7 +182,9 @@ class StatsCalculator:
         etype   = str(event.get("type", "")).upper()
         tid     = event.get("track_id")
         quarter = int(event.get("quarter", self.current_quarter))
-        team    = event.get("team", "")
+        # Fallback: if the event carries no team (OCR not yet confirmed), try the
+        # roster cache — team may have been registered by an earlier event for this tid.
+        team    = event.get("team", "") or self._roster.get(tid, {}).get("team", "")
 
         # Handle possession-change before tid guard (tid may be None for these)
         if etype == "POSSESSION_CHANGE":

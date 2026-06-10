@@ -30,10 +30,13 @@ logger = logging.getLogger(__name__)
 MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "jersey_no.pt"
 
-VOTE_THRESHOLD    = 2     # frames required to confirm a jersey number
-MAX_VOTE_HISTORY  = 30   # rolling window per track_id
-CONF_THRESHOLD    = 0.5  # jersey_no.pt detection confidence
-OCR_HEIGHT_PX     = 64   # resize crop to this height for OCR
+VOTE_THRESHOLD    = 5     # frames required to confirm a jersey number (raised: 2→5)
+MAX_VOTE_HISTORY  = 40   # rolling window per track_id (raised: 30→40)
+CONF_THRESHOLD    = 0.45 # jersey_no.pt detection confidence (slightly relaxed)
+OCR_HEIGHT_PX     = 112  # resize crop to this height for OCR (raised: 64→112)
+OCR_MIN_SCORE     = 0.55 # minimum PaddleOCR confidence to accept a result
+BLUR_THRESHOLD    = 80.0 # Laplacian variance below this = too blurry for OCR (25fps tuned)
+                         # Raise if too many frames skipped; lower if blurry frames still pass
 
 
 # ---------------------------------------------------------------------------
@@ -53,25 +56,75 @@ def _back_crop_heuristic(player_h: int, player_w: int) -> tuple[int, int, int, i
 
 
 # ---------------------------------------------------------------------------
+# Blur detection (25fps motion blur guard)
+# ---------------------------------------------------------------------------
+
+def _blur_score(crop: np.ndarray) -> float:
+    """
+    Laplacian variance sharpness score. Higher = sharper.
+    At 25fps, sprinting player (~6m/s) moves 15-25px per frame
+    making jersey numbers unreadable. Skip blurry crops entirely.
+
+    Typical indoor court 25fps values:
+      > 200  sharp  (standing / walking)
+      80-200 ok     (light jog)
+      < 80   blurry (sprint / rapid cut) → skip OCR
+    """
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def _is_too_blurry(crop: np.ndarray, threshold: float = BLUR_THRESHOLD) -> bool:
+    """Return True if crop is too blurry to attempt OCR."""
+    if crop is None or crop.size == 0:
+        return True
+    return _blur_score(crop) < threshold
+
+
+# ---------------------------------------------------------------------------
 # Preprocessing helpers
 # ---------------------------------------------------------------------------
 
 def _preprocess_for_ocr(crop: np.ndarray) -> np.ndarray:
     """
-    Grayscale → CLAHE contrast enhancement → resize to OCR_HEIGHT_PX height.
+    Grayscale → denoise → CLAHE contrast enhancement → sharpen →
+    resize to OCR_HEIGHT_PX height with padding.
     Returns a 3-channel BGR image (PaddleOCR expects BGR).
     """
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+
+    # Light blur — faster than fastNlMeansDenoising (~0.1ms vs ~10ms)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    # CLAHE — clamp tileGridSize so tiles never exceed image size
+    h_raw, w_raw = gray.shape[:2]
+    tile_h = max(1, min(4, h_raw // 2))
+    tile_w = max(1, min(4, w_raw // 2))
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(tile_w, tile_h))
     enhanced = clahe.apply(gray)
+
+    # Sharpen — unsharp mask
+    blurred = cv2.GaussianBlur(enhanced, (0, 0), 1.5)
+    enhanced = cv2.addWeighted(enhanced, 1.8, blurred, -0.8, 0)
+
     # Resize to fixed height, keep aspect ratio
     h, w = enhanced.shape[:2]
     if h == 0 or w == 0:
         return np.zeros((OCR_HEIGHT_PX, OCR_HEIGHT_PX, 3), dtype=np.uint8)
     scale = OCR_HEIGHT_PX / h
     new_w = max(1, int(w * scale))
-    resized = cv2.resize(enhanced, (new_w, OCR_HEIGHT_PX))
-    return cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
+    resized = cv2.resize(enhanced, (new_w, OCR_HEIGHT_PX), interpolation=cv2.INTER_CUBIC)
+
+    # Guarantee minimum width (single digit "1" from far away can be very narrow)
+    MIN_WIDTH = 48
+    if resized.shape[1] < MIN_WIDTH:
+        resized = cv2.resize(resized, (MIN_WIDTH, OCR_HEIGHT_PX), interpolation=cv2.INTER_CUBIC)
+
+    # Add horizontal padding so OCR doesn't clip edge digits
+    pad = max(8, resized.shape[1] // 4)
+    padded = cv2.copyMakeBorder(resized, 6, 6, pad, pad, cv2.BORDER_CONSTANT, value=0)
+
+    return cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +217,13 @@ class JerseyOCR:
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,
+                text_det_limit_side_len=32,   # allow small crops (jersey from distance)
+                text_det_limit_type="min",
+                text_det_box_thresh=0.3,      # relaxed: catch faint digits
+                text_det_unclip_ratio=2.0,    # wider bbox — prevents digit clipping
+                text_rec_score_thresh=0.4,    # pre-filter low-conf results
             )
-            logger.info("PaddleOCR 3.5.0 initialised (lang=en)")
+            logger.info("PaddleOCR 3.5.0 initialised (lang=en, tuned for jersey numbers)")
         except ImportError as exc:
             raise ImportError(
                 "paddleocr required. pip install paddleocr paddlepaddle"
@@ -173,6 +231,31 @@ class JerseyOCR:
 
     def is_model_loaded(self) -> bool:
         return self.model is not None
+
+    # ------------------------------------------------------------------
+    # Blur threshold tuning (runtime-adjustable for different venues)
+    # ------------------------------------------------------------------
+
+    def set_blur_threshold(self, threshold: float) -> None:
+        """
+        Adjust blur rejection threshold at runtime.
+
+        Guidelines for 25fps indoor basketball:
+          Bright venue, sharp camera  → 100-120
+          Normal Campus League setup  →  80 (default)
+          Dim venue / shaky camera    →  50-60
+          Disable blur filter         →   0
+        """
+        global BLUR_THRESHOLD
+        BLUR_THRESHOLD = threshold
+        logger.info("Blur threshold updated to %.1f", threshold)
+
+    def get_blur_stats(self) -> dict:
+        """Return current blur threshold for monitoring/debug dashboard."""
+        return {
+            "blur_threshold": BLUR_THRESHOLD,
+            "description": "Laplacian variance cutoff. Crops below this are skipped.",
+        }
 
     # ------------------------------------------------------------------
     # Core pipeline
@@ -224,6 +307,26 @@ class JerseyOCR:
                 results.append(self._empty_result(track_id))
                 continue
 
+            # Blur guard — skip OCR on motion-blurred crops (25fps tuned)
+            # Blurry frames: candidate stays None, vote history unchanged,
+            # confirmed from previous sharp frames is still returned.
+            if _is_too_blurry(number_crop):
+                logger.debug(
+                    "track %d: blur score=%.1f < %.1f — OCR skipped",
+                    track_id, _blur_score(number_crop), BLUR_THRESHOLD,
+                )
+                team = self._classify_team(player_crop, track_id)
+                team_hsv = self._team_colors.get(team, []) if team else []
+                results.append({
+                    "track_id":       track_id,
+                    "jersey_number":  self._current_confirmed(track_id),
+                    "confidence":     self._vote_confidence(track_id),
+                    "team":           team,
+                    "team_color_hsv": team_hsv,
+                    "blur_skipped":   True,
+                })
+                continue
+
             # Layer 2 — OCR
             candidate = self._run_ocr(number_crop)
             confirmed  = self._vote_number(track_id, candidate)
@@ -241,6 +344,7 @@ class JerseyOCR:
                 "confidence":     self._vote_confidence(track_id),
                 "team":           team,
                 "team_color_hsv": team_hsv,
+                "blur_skipped":   False,
             })
 
         return {"jersey_results": results, "team_colors": self._team_colors}
@@ -259,7 +363,7 @@ class JerseyOCR:
         Falls back to heuristic torso-center crop if no detection passes conf threshold.
         """
         h, w = player_crop.shape[:2]
-        if h < 8 or w < 4:
+        if h < 20 or w < 10:   # too small to read any number (raised from 8×4)
             return None
 
         if self.model is not None and self._number_class_idx is not None:
@@ -294,7 +398,8 @@ class JerseyOCR:
     def _run_ocr(self, number_crop: np.ndarray) -> Optional[int]:
         """
         Preprocess crop → PaddleOCR → parse first numeric result in [0-99].
-        Returns None if no valid number is found or OCR is not loaded.
+        Tries normal and inverted image (light number on dark jersey and vice versa).
+        Returns None if no valid number found or confidence below OCR_MIN_SCORE.
         """
         if self._ocr is None:
             return None
@@ -303,33 +408,49 @@ class JerseyOCR:
 
         processed = _preprocess_for_ocr(number_crop)
 
-        try:
-            results = self._ocr.predict(processed)
-        except Exception as exc:
-            logger.debug("PaddleOCR predict error: %s", exc)
-            return None
-
-        if not results:
-            return None
-
-        # PaddleOCR 3.5.0: predict() returns list[OCRResult]
-        # Each OCRResult is dict-like: res['rec_texts'], res['rec_scores']
-        for res in results:
+        # Try both normal and inverted (handles dark-on-light & light-on-dark jerseys)
+        candidates: list[tuple[int, float]] = []
+        for img in [processed, cv2.bitwise_not(processed)]:
             try:
-                texts  = res["rec_texts"]
-                scores = res["rec_scores"]
-            except (TypeError, KeyError):
+                results = self._ocr.predict(img)
+            except Exception as exc:
+                logger.debug("PaddleOCR predict error: %s", exc)
                 continue
 
-            for text, score in zip(texts or [], scores or []):
-                number = self._parse_jersey_number(text)
-                if number is not None:
-                    logger.debug(
-                        "OCR: '%s' (score=%.2f) → jersey %d", text, score, number
-                    )
-                    return number
+            if not results:
+                continue
 
-        return None
+            # PaddleOCR 3.5.0: predict() returns list[OCRResult]
+            # Each OCRResult is dict-like: res['rec_texts'], res['rec_scores']
+            for res in results:
+                try:
+                    texts  = res["rec_texts"]
+                    scores = res["rec_scores"]
+                except (TypeError, KeyError):
+                    continue
+
+                for text, score in zip(texts or [], scores or []):
+                    # Filter low-confidence results
+                    if score < OCR_MIN_SCORE:
+                        logger.debug(
+                            "OCR: '%s' rejected (score=%.2f < %.2f)",
+                            text, score, OCR_MIN_SCORE,
+                        )
+                        continue
+                    number = self._parse_jersey_number(text)
+                    if number is not None:
+                        candidates.append((number, score))
+                        logger.debug(
+                            "OCR: '%s' (score=%.2f) → jersey %d", text, score, number
+                        )
+
+        if not candidates:
+            return None
+
+        # Return highest-confidence candidate
+        best_number, best_score = max(candidates, key=lambda x: x[1])
+        logger.debug("OCR best: jersey %d (score=%.2f)", best_number, best_score)
+        return best_number
 
     @staticmethod
     def _parse_jersey_number(text: str) -> Optional[int]:
@@ -352,21 +473,16 @@ class JerseyOCR:
     def _vote_number(self, track_id: int, candidate: Optional[int]) -> Optional[int]:
         """
         Accumulate candidate votes per track_id.
-        Returns the confirmed jersey number (mode) once >= VOTE_THRESHOLD votes,
-        or None if not yet confirmed.
+        - None candidates are ignored (not added to history), preserving existing votes.
+        - Returns confirmed jersey number (mode) once >= VOTE_THRESHOLD votes exist,
+          else None.
         """
-        if candidate is None:
-            return self._current_confirmed(track_id)
+        if candidate is not None:
+            if track_id not in self._votes:
+                self._votes[track_id] = deque(maxlen=MAX_VOTE_HISTORY)
+            self._votes[track_id].append(candidate)
 
-        if track_id not in self._votes:
-            self._votes[track_id] = deque(maxlen=MAX_VOTE_HISTORY)
-        self._votes[track_id].append(candidate)
-
-        counter = Counter(self._votes[track_id])
-        most_common, count = counter.most_common(1)[0]
-        if count >= VOTE_THRESHOLD:
-            return most_common
-        return None
+        return self._current_confirmed(track_id)
 
     def _current_confirmed(self, track_id: int) -> Optional[int]:
         if track_id not in self._votes or not self._votes[track_id]:

@@ -113,8 +113,9 @@ export interface FrameBboxEntry {
     b: [number, number, number, number]
     a: string        // action UPPER e.g. "DRIBBLE" — empty string if unknown
     s: number        // speedKmh — 0 if not yet computed
+    cp: [number, number] | null  // court position [x_m, y_m] for 2D overlay
   }>
-  bl: { b: [number, number, number, number] } | null
+  bl: { b: [number, number, number, number]; cp?: [number, number] | null } | null
 }
 
 export interface MatchState {

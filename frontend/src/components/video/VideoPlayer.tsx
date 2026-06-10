@@ -102,7 +102,7 @@ export default function VideoPlayer({ videoUrl, showCourtMap, frameData }: Video
 
         {showCourtMap && (
           <div className="absolute top-4 right-4 w-[140px] md:w-[180px] lg:w-[220px] z-10">
-            <CourtMap2D />
+            <CourtMap2D videoRef={videoRef} frameData={frameData} />
           </div>
         )}
       </div>

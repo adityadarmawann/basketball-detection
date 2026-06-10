@@ -515,6 +515,7 @@ class VideoProcessor:
                 else:
                     court = self._last_court_result
                 frame_data["court"] = court
+                court_ran = (frame_id % COURT_EVERY_N_FRAMES == 0)
                 if court.get("is_calibrated"):
                     for player in tracked_players:
                         pc = player.get("center")
@@ -524,6 +525,11 @@ class VideoProcessor:
                         bc = ball_info.get("center")
                         if bc:
                             ball_info["court_pos"] = self._court.pixel_to_court(bc)
+                elif court_ran:
+                    # Court detection ran this frame but failed — clear stale sticky
+                    # positions so players don't appear frozen at old coordinates.
+                    for player in tracked_players:
+                        self._last_court_pos.pop(player["track_id"], None)
             except Exception as e:
                 logger.debug("Court frame %d: %s", frame_id, e)
 
@@ -663,10 +669,12 @@ class VideoProcessor:
             else:
                 norm = list(raw)
             action_label = action_map.get(tid, "")
+            court_pos = player.get("court_pos")
             players_out.append({
                 "i": tid, "j": jersey, "t": team, "b": norm,
                 "a": action_label,
                 "s": self._speed_cache.get(tid, 0.0),
+                "cp": court_pos,   # [x_m, y_m] or None — for 2D court overlay sync
             })
 
         ball_raw = tracking.get("tracked_ball")
@@ -675,10 +683,13 @@ class VideoProcessor:
             bb = ball_raw.get("bbox", [])
             if len(bb) == 4 and self._frame_width > 0:
                 w, h = self._frame_width, self._frame_height
-                ball_out = {"b": [
-                    round(bb[0] / w, 4), round(bb[1] / h, 4),
-                    round(bb[2] / w, 4), round(bb[3] / h, 4),
-                ]}
+                ball_out = {
+                    "b": [
+                        round(bb[0] / w, 4), round(bb[1] / h, 4),
+                        round(bb[2] / w, 4), round(bb[3] / h, 4),
+                    ],
+                    "cp": ball_raw.get("court_pos"),
+                }
 
         return {"ts": timestamp_ms, "p": players_out, "bl": ball_out}
 

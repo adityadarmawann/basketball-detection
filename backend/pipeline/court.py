@@ -467,12 +467,16 @@ class CourtMapper:
     # ------------------------------------------------------------------
 
     def pixel_to_court(self, pixel_pos: list[float]) -> Optional[list[float]]:
-        """[px, py] → [x_meter, y_meter].  None if not calibrated."""
+        """[px, py] → [x_meter, y_meter].  None if not calibrated or out of bounds."""
         if self._H is None:
             return None
         pt  = np.array([[pixel_pos]], dtype=np.float32)
         out = cv2.perspectiveTransform(pt, self._H)
-        return [float(out[0, 0, 0]), float(out[0, 0, 1])]
+        x, y = float(out[0, 0, 0]), float(out[0, 0, 1])
+        # Reject coordinates outside court + 2m margin (stale H artifact)
+        if not (-2.0 <= x <= COURT_W + 2.0 and -2.0 <= y <= COURT_H + 2.0):
+            return None
+        return [x, y]
 
     def court_to_pixel(self, court_pos: list[float]) -> Optional[list[float]]:
         """[x_meter, y_meter] → [px, py].  None if not calibrated."""
@@ -540,7 +544,14 @@ class CourtMapper:
             self._H_raw = None
             logger.debug("Camera moved — EMA H reset")
         if needs_calib:
+            prev_H = self._H
             self.compute_homography(keypoints)
+            # If camera moved but recalibration failed, clear stale H to avoid
+            # pixel_to_court returning wrong positions from the old camera angle.
+            if camera_moved and self._H is prev_H and prev_H is not None:
+                self._H     = None
+                self._H_inv = None
+                logger.debug("Camera moved but recalib failed — clearing stale H")
 
         # Estimate occluded corner positions using current H (runs after RANSAC,
         # so estimated points never feed back into compute_homography).

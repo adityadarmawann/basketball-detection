@@ -74,6 +74,19 @@ def _detect_device() -> str:
     return "cpu"
 
 
+def _fmt_video_ts(ts_ms: int) -> str:
+    """Format video timestamp (ms) as MM:SS.mmm — used in scoring logs."""
+    total_s, ms = divmod(int(ts_ms), 1000)
+    m, s = divmod(total_s, 60)
+    return f"{m:02d}:{s:02d}.{ms:03d}"
+
+
+def _fmt_wall_clock() -> str:
+    """Current wall-clock time as HH:MM:SS — used in scoring logs for live context."""
+    import datetime
+    return datetime.datetime.now().strftime("%H:%M:%S")
+
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 MODELS_DIR           = os.getenv("MODELS_PATH",
@@ -96,7 +109,7 @@ FPS_DEFAULT          = 30
 # Action: SlowFast needs temporal clip, result is stable → run every 20 frames
 # OCR: jersey number is stable once confirmed → run every 30 frames
 PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every other frame
-COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",   "30"))   # court keypoint YOLOv8-pose
+COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",   "10"))   # court keypoint YOLOv8-pose
 OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "30"))   # PaddleOCR
 ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "20"))   # SlowFast action
 
@@ -167,6 +180,8 @@ class VideoProcessor:
 
         # Court result cache — avoid running YOLOv8-pose every frame (camera is slow)
         self._last_court_result:  dict = {"is_calibrated": False}
+        # Sticky courtPos cache: {track_id → [x,y]} — last known valid position per player
+        self._last_court_pos:     dict = {}
 
         # Per-frame bbox store — written to JSON at finalize for frontend time-lookup
         self._frame_store:        list = []   # [{ts, p:[{i,j,t,b}], bl}]
@@ -344,19 +359,33 @@ class VideoProcessor:
                 self._frame_store.append(self._snapshot_frame(frame_data, ts_ms))
 
                 # Persist events
+                scoring_types = {"MADE_FG", "MADE_3", "SHOT_MADE", "MADE_FT", "FT_MADE"}
+                has_score_event = False
                 for evt in frame_data.get("events", []):
                     if evt:
                         await self._save_event_mongo(evt, match_id)
+                        if evt.get("type", "").upper() in scoring_types:
+                            has_score_event = True
 
-                # WebSocket update every 5 processed frames (~7 sec on CPU)
-                if proc_id % 5 == 0 and self._stats:
+                # WebSocket update: every 5 processed frames OR immediately on scoring
+                do_broadcast = (proc_id % 5 == 0) or has_score_event
+                if do_broadcast and self._stats:
                     stats = self._stats.get_live_stats()
                     # Refresh speed cache so _snapshot_frame can embed speed in JSON
                     for tid, pstat in stats.get("player_stats", {}).items():
                         spd = pstat.get("mpi", {}).get("avg_speed_kmh", 0.0)
                         if spd > 0:
                             self._speed_cache[tid] = round(spd, 1)
-                    msg   = self._build_ws_message(frame_data, stats)
+                    msg = self._build_ws_message(frame_data, stats)
+                    if has_score_event:
+                        score_a = stats.get("team_stats", {}).get("A", {}).get("pts", 0)
+                        score_b = stats.get("team_stats", {}).get("B", {}).get("pts", 0)
+                        logger.info(
+                            "SCORE_UPDATE  A=%d  B=%d  video=%s  wall=%s",
+                            score_a, score_b,
+                            _fmt_video_ts(ts_ms),
+                            _fmt_wall_clock(),
+                        )
                     await self._push_redis(match_id, msg)
                     if ws_manager:
                         try:
@@ -541,7 +570,7 @@ class VideoProcessor:
                 events = self._events_engine.process(frame_data)
                 frame_data["events"] = events or []
             except Exception as e:
-                logger.debug("EventEngine frame %d: %s", frame_id, e)
+                logger.warning("EventEngine frame %d: %s", frame_id, e, exc_info=True)
 
         # ── 8. Stats update ───────────────────────────────────────────────
         if self._stats:
@@ -587,7 +616,7 @@ class VideoProcessor:
                     roster=stats_roster or None,
                 )
             except Exception as e:
-                logger.debug("Stats update frame %d: %s", frame_id, e)
+                logger.warning("Stats update frame %d: %s", frame_id, e, exc_info=True)
 
         self._frame_buffer.append(frame)
         return frame_data
@@ -702,13 +731,20 @@ class VideoProcessor:
             else:
                 norm_bbox = raw_bbox
 
+            # Sticky courtPos: use current if available, else keep last known position
+            cur_court_pos = player.get("court_pos")
+            if cur_court_pos is not None:
+                self._last_court_pos[tid] = cur_court_pos
+            else:
+                cur_court_pos = self._last_court_pos.get(tid)
+
             players.append({
                 "trackId":      tid,
                 "jerseyNumber": jersey_number,
                 "name":         pstat.get("name", f"Player_{tid}"),
                 "team":         pstat.get("team", ""),
                 "bbox":         norm_bbox,
-                "courtPos":     player.get("court_pos"),
+                "courtPos":     cur_court_pos,
                 "action":       _norm_action(act_entry.get("action", "Stand")),
                 "speedKmh":     mpi.get("avg_speed_kmh", 0.0),
                 "keypoints":    keypoints,
@@ -747,13 +783,14 @@ class VideoProcessor:
         latest_event = self._map_event_for_ws(events[-1]) if events else None
 
         return {
-            "type":       "frame_update",
-            "timestamp":  frame_data.get("timestamp_ms", 0),
-            "quarter":    frame_data.get("quarter", self._current_quarter),
-            "gameClock":  self._format_game_clock(),
-            "score":      score,
-            "possession": possession,
-            "players":    players,
+            "type":         "frame_update",
+            "timestamp":    frame_data.get("timestamp_ms", 0),
+            "wallClockMs":  int(time.time() * 1000),  # absolute wall time — useful for live mode
+            "quarter":      frame_data.get("quarter", self._current_quarter),
+            "gameClock":    self._format_game_clock(),
+            "score":        score,
+            "possession":   possession,
+            "players":      players,
             "ball": {
                 "bbox":       ball_raw.get("bbox", []) if ball_raw else [],
                 "courtPos":   ball_court_pos,

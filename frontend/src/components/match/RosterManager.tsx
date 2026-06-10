@@ -152,7 +152,7 @@ export default function RosterManager({
 
   return (
     <div className="bg-surface rounded-lg p-6 shadow-sm">
-      <h2 className="font-display text-2xl font-bold mb-6">Input Roster Pemain</h2>
+      <h2 className="text-2xl font-bold mb-6">Input Roster Pemain</h2>
 
       {error && (
         <div className="mb-4 p-3 bg-danger/10 border border-danger rounded-lg text-danger text-sm">

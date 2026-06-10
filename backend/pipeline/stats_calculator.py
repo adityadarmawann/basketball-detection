@@ -209,6 +209,10 @@ class StatsCalculator:
                 s["three_pa"] += 1
             if team:
                 self._apply_plus_minus(quarter, team, pts)
+            logger.info(
+                "STATS_SCORED  +%dpts  tid=%s  team=%s  Q%d  total_pts=%d",
+                pts, tid, team or "?", quarter, s["pts"],
+            )
 
         elif etype in ("MISSED_FG", "MISSED_3", "SHOT_MISSED", "MISSED_SHOT"):
             s["fga"] += 1
@@ -221,6 +225,10 @@ class StatsCalculator:
             s["pts"] += 1
             if team:
                 self._apply_plus_minus(quarter, team, 1)
+            logger.info(
+                "STATS_SCORED  +1pt(FT)  tid=%s  team=%s  Q%d  total_pts=%d",
+                tid, team or "?", quarter, s["pts"],
+            )
 
         elif etype in ("MISSED_FT", "FT_MISSED"):
             s["fta"] += 1

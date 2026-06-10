@@ -35,10 +35,12 @@ POSSESSION_DIST_PX     = 80     # pixels  — ball "owned" if player inside this
 POSSESSION_DIST_M      = 1.2    # meters
 POSSESSION_CONFIRM_F   = 3      # consecutive frames to confirm new possession
 
-FG_HOOP_RADIUS_PX      = 60     # pixels  — "ball in hoop zone"
-FG_HOOP_RADIUS_M       = 0.9    # meters
+FG_HOOP_RADIUS_PX      = 55     # pixels  — ball inside hoop zone
+FG_HOOP_RADIUS_M       = 0.45   # meters  — tighter in court space (no action gate)
 FG_COOLDOWN_F          = 45     # frames before another FG can fire
-FG_ATTEMPT_WINDOW_F    = 90     # frames after SHOOT action to detect MADE_FG
+FG_ABOVE_MARGIN_PX     = 20     # ball must be ≥ this many px above hoop_y to arm
+FG_ABOVE_WINDOW_F      = 30     # frames to look back for "was above" check
+FG_ATTEMPT_WINDOW_F    = 150    # kept for MISSED_FG accounting only (not scoring gate)
 FG_MISS_TIMEOUT_F      = 100    # frames after SHOOT with no MADE → MISSED_FG
 
 REBOUND_HOOP_RADIUS_PX = 90
@@ -63,6 +65,13 @@ def _dist(a, b) -> float:
     if a is None or b is None:
         return float("inf")
     return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
+
+
+def _fmt_ts(ts_ms: int) -> str:
+    """Format millisecond video-timestamp as MM:SS.mmm for log readability."""
+    total_s, ms = divmod(int(ts_ms), 1000)
+    m, s = divmod(total_s, 60)
+    return f"{m:02d}:{s:02d}.{ms:03d}"
 
 
 def _bbox_center(bbox) -> Optional[list]:
@@ -125,6 +134,21 @@ class EventEngine:
         # ── Foul state ────────────────────────────────────────────────────
         self._contact_frames: dict = {}   # (id_a, id_b) → consecutive frames
 
+        # ── Hoop pixel-position cache (for pixel-space scoring fallback) ───
+        self._last_hoops_px: list = []    # last detected hoop dicts in pixel space
+
+        # ── Trajectory-based scoring — pixel-space ball history ───────────
+        # Stores recent (ball_x, ball_y) in pixel coords regardless of court calib.
+        # Used to check ball came from ABOVE the hoop before counting a score.
+        self._ball_px_hist: deque = deque(maxlen=FG_ABOVE_WINDOW_F)
+
+        # ── Per-player court-position history for 2PT/3PT estimation ─────
+        # When action model doesn't fire (no last_shot_pos), we look back in
+        # a player's recent court positions and pick the one furthest from the
+        # hoop — that's the best proxy for where they actually released the ball.
+        # Only populated when is_court=True (court calibrated).
+        self._player_court_hist: dict = {}   # track_id → deque[(x_m, y_m)]
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def process(self, frame_data: dict) -> list:
@@ -153,6 +177,16 @@ class EventEngine:
         quarter  = int(frame_data.get("quarter", 1))
         ts_ms    = int(frame_data.get("timestamp_ms", 0))
 
+        # Keep pixel hoop cache fresh whenever hoops are detected
+        if hoops:
+            self._last_hoops_px = hoops
+
+        # Maintain pixel-space ball history for from-above scoring check.
+        # ball.center is always pixel coords regardless of court calibration.
+        ball_px_center = ball.get("center") if ball else None
+        if ball_px_center:
+            self._ball_px_hist.append(ball_px_center)
+
         events: list = []
 
         # ── Tick cooldowns ────────────────────────────────────────────────
@@ -164,6 +198,17 @@ class EventEngine:
         if ball_pos is not None:
             self.ball_trajectory.append(ball_pos)
 
+        # ── Record player court positions for 2PT/3PT estimation ─────────
+        # Only when calibrated — pixel positions can't be used for 3PT geometry.
+        if is_court:
+            for p in players:
+                tid   = p["track_id"]
+                c_pos = p.get("court_pos")
+                if c_pos:
+                    if tid not in self._player_court_hist:
+                        self._player_court_hist[tid] = deque(maxlen=90)
+                    self._player_court_hist[tid].append(c_pos)
+
         # ── Possession tracking ───────────────────────────────────────────
         poss_evt = self._track_possession(ball, players, is_court, quarter, ts_ms)
         if poss_evt:
@@ -173,16 +218,51 @@ class EventEngine:
         action_map = {a["track_id"]: a.get("action", "") for a in actions}
 
         # ── Detect SHOOT action → record shot state ───────────────────────
+        # Also treat JUMP near basket as shot attempt — action model often
+        # classifies shooting as jump_action instead of Shoot.
+        SHOT_AREA_M  = 5.5   # metres from hoop to count a jump as shot attempt
+        SHOT_AREA_PX = 200   # pixels from hoop (pixel mode)
+        # Pixel-space hoop candidates: detected this frame + last-seen cache
+        px_hoops = hoops or self._last_hoops_px
         for act in actions:
-            if act.get("action", "").upper() in ("SHOOT", "SHOOTING"):
-                tid = act["track_id"]
-                p   = next((x for x in players if x["track_id"] == tid), None)
-                if p:
-                    self._last_shooter_id    = tid
-                    self._shot_attempt_frame = self.frame_count
-                    self._fg_miss_emitted    = False
-                    self._last_shooter_team  = p.get("team", "")
-                    self.last_shot_pos       = self._player_pos(p, is_court)
+            raw_act = act.get("action", "").upper()
+            is_shoot = raw_act in ("SHOOT", "SHOOTING")
+            tid = act["track_id"]
+            p   = next((x for x in players if x["track_id"] == tid), None)
+            if not p:
+                continue
+            if not is_shoot and raw_act == "JUMP":
+                # Promote JUMP→shot if player is close to any known hoop position
+                p_pos = self._player_pos(p, is_court)
+                if p_pos is not None:
+                    th = SHOT_AREA_M if is_court else SHOT_AREA_PX
+                    near = False
+                    if is_court:
+                        # Court mode: compare against FIBA fixed positions
+                        for h_pos in (HOOP_LEFT, HOOP_RIGHT):
+                            if _dist(p_pos, h_pos) < th:
+                                near = True
+                                break
+                    else:
+                        # Pixel mode: compare against detected/cached hoop centers
+                        for h in px_hoops:
+                            h_c = h.get("center") or _bbox_center(h.get("bbox"))
+                            if h_c and _dist(p_pos, h_c) < th:
+                                near = True
+                                break
+                    if near:
+                        is_shoot = True
+            if is_shoot:
+                self._last_shooter_id    = tid
+                self._shot_attempt_frame = self.frame_count
+                self._fg_miss_emitted    = False
+                self._last_shooter_team  = p.get("team", "")
+                self.last_shot_pos       = self._player_pos(p, is_court)
+                trigger = "JUMP→SHOOT" if raw_act == "JUMP" else raw_act
+                logger.info(
+                    "SHOT_ATTEMPT  trigger=%s  shooter=%s  team=%s  frame=%d  video=%s",
+                    trigger, tid, p.get("team", "?"), self.frame_count, _fmt_ts(ts_ms),
+                )
 
         # ── Field goal (made) ─────────────────────────────────────────────
         if self._fg_cooldown == 0:
@@ -243,18 +323,31 @@ class EventEngine:
         ts_ms:    int,
     ) -> list:
         """
-        Emit MADE_FG when the ball enters the hoop zone after a SHOOT action.
-        Uses zone-entry transition (outside → inside) to fire exactly once.
+        Emit MADE_FG using ball-trajectory detection — no action model required.
+
+        Scoring condition (both must be true):
+          1. Zone entry: ball transitions from outside → inside the hoop zone.
+             Uses best_object_basketball.pt hoop detections; falls back to last
+             cached hoop position when hoop leaves frame.
+          2. From above: ball's pixel-y was above the hoop's pixel-y (by at least
+             FG_ABOVE_MARGIN_PX) at some point in the last FG_ABOVE_WINDOW_F frames.
+             This is the broadcast-camera equivalent of "ball came down through ring"
+             and filters out dribbles, rolling balls, and side-entry false positives.
+
+        Action model (SHOOT/JUMP) is still used for MISSED_FG accounting and
+        action labels, but is NOT a gate for MADE_FG.
         """
         events = []
 
+        # ── 1. Zone detection in the best available coordinate space ─────
         ball_pos = self._ball_pos(ball, is_court)
         if ball_pos is None:
             self._ball_in_hoop_prev = False
             return events
 
-        # Distance to nearest detected or known hoop
-        nearest_d, nearest_h = self._nearest_hoop(ball_pos, hoops, is_court)
+        nearest_d, nearest_h = self._nearest_hoop(
+            ball_pos, hoops, is_court, self._last_hoops_px
+        )
         if nearest_h is None:
             self._ball_in_hoop_prev = False
             return events
@@ -267,12 +360,29 @@ class EventEngine:
         if not zone_entry:
             return events
 
-        # Only emit if a SHOOT action fired recently
-        frames_since_shot = self.frame_count - self._shot_attempt_frame
-        if frames_since_shot > FG_ATTEMPT_WINDOW_F:
-            return events
+        # ── 2. "From above" check — always in pixel space ────────────────
+        # Pixel y increases downward; "above hoop" means smaller y value.
+        # If we have no hoop pixel position at all, allow scoring (safe fallback).
+        hoop_px = self._nearest_hoop_px_center(ball.get("center") if ball else None)
+        if hoop_px is not None and self._ball_px_hist:
+            hoop_y = float(hoop_px[1])
+            ball_was_above = any(
+                float(pos[1]) < hoop_y - FG_ABOVE_MARGIN_PX
+                for pos in self._ball_px_hist
+            )
+            if not ball_was_above:
+                logger.debug(
+                    "FG zone entry rejected — ball did not come from above hoop "
+                    "(hoop_y=%.0f, recent ball_y range=[%.0f–%.0f])",
+                    hoop_y,
+                    min(p[1] for p in self._ball_px_hist),
+                    max(p[1] for p in self._ball_px_hist),
+                )
+                return events
 
-        # Identify shooter
+        # ── 3. Identify shooter ──────────────────────────────────────────
+        # Prefer the last player the action model flagged as shooter;
+        # fall back to whoever is closest to the ball right now.
         shooter = None
         if self._last_shooter_id is not None:
             shooter = next(
@@ -284,30 +394,80 @@ class EventEngine:
         if shooter is None:
             return events
 
-        shot_pos = self.last_shot_pos or self._player_pos(shooter, is_court)
-        is_three = self._is_three(shot_pos) if shot_pos else False
+        # ── 4. Determine shot position & 2PT/3PT ────────────────────────
+        # Priority: (a) last_shot_pos from action model (most accurate — recorded
+        # at the moment of jump), (b) furthest recent court position from the hoop
+        # (best proxy for release point when action model didn't fire), (c) current
+        # player position (last resort).
+        # 3PT geometry only works in court coordinates — pixel space can't be used.
+        shot_pos = (
+            self.last_shot_pos
+            or self._estimate_shot_pos(shooter["track_id"], is_court)
+        )
+        is_three = self._is_three(shot_pos) if (shot_pos and is_court) else False
 
+        # ── 5. Emit event ────────────────────────────────────────────────
         events.append({
-            "type":       "MADE_FG",
-            "track_id":   shooter["track_id"],
-            "quarter":    quarter,
-            "team":       shooter.get("team", ""),
-            "is_three":   is_three,
-            "court_pos":  shot_pos,
+            "type":         "MADE_FG",
+            "track_id":     shooter["track_id"],
+            "quarter":      quarter,
+            "team":         shooter.get("team", ""),
+            "is_three":     is_three,
+            "court_pos":    shot_pos,
             "timestamp_ms": ts_ms,
         })
 
         self._fg_cooldown     = FG_COOLDOWN_F
-        self._miss_frame      = -999         # made → no rebound window
+        self._miss_frame      = -999
         self._last_shooter_id = None
         self.last_shot_pos    = None
         self._fg_miss_emitted = True
 
-        logger.debug(
-            "EventEngine MADE_FG  3PT=%s  shooter=%s  team=%s",
-            is_three, shooter["track_id"], shooter.get("team"),
+        pts = 3 if is_three else 2
+        logger.info(
+            "MADE_FG  +%dPTS  shooter=%s  team=%s  3pt=%s  Q%d  video=%s",
+            pts, shooter["track_id"], shooter.get("team", "?"),
+            is_three, quarter, _fmt_ts(ts_ms),
         )
         return events
+
+    def _nearest_hoop_px_center(self, ball_px) -> Optional[list]:
+        """Return pixel-space center of the hoop nearest to ball_px."""
+        candidates = self._last_hoops_px
+        best_d, best_c = float("inf"), None
+        if ball_px:
+            for h in candidates:
+                c = h.get("center") or _bbox_center(h.get("bbox"))
+                if c:
+                    d = _dist(ball_px, c)
+                    if d < best_d:
+                        best_d, best_c = d, c
+        return best_c
+
+    def _estimate_shot_pos(self, track_id: int, is_court: bool) -> Optional[list]:
+        """
+        Estimate where the player released the ball.
+
+        When the action model fires (last_shot_pos is set) that's more accurate.
+        This method is the fallback: scan the player's recent court-position history
+        and return the point FURTHEST from the nearest hoop — that's the best proxy
+        for the launch position (player was still at their shooting spot).
+
+        Returns None when is_court=False (pixel coords can't determine 2/3PT).
+        """
+        if not is_court:
+            return None
+        hist = self._player_court_hist.get(track_id)
+        if not hist:
+            return None
+        best_pos, best_d = None, -1.0
+        for pos in hist:
+            d_l = _dist(pos, HOOP_LEFT)
+            d_r = _dist(pos, HOOP_RIGHT)
+            d   = min(d_l, d_r)
+            if d > best_d:
+                best_d, best_pos = d, pos
+        return best_pos
 
     def _check_fg_miss_timeout(
         self,
@@ -341,6 +501,10 @@ class EventEngine:
 
         tid = shooter["track_id"] if shooter else 0
 
+        logger.info(
+            "MISSED_FG  shooter=%s  team=%s  3pt=%s  Q%d  video=%s",
+            tid, team, is_three, quarter, _fmt_ts(ts_ms),
+        )
         return {
             "type":       "MISSED_FG",
             "track_id":   tid,
@@ -770,6 +934,9 @@ class EventEngine:
         self._prev_poss_player   = None
         self._prev_poss_team     = None
         self._contact_frames     = {}
+        self._last_hoops_px      = []
+        self._ball_px_hist       = deque(maxlen=FG_ABOVE_WINDOW_F)
+        self._player_court_hist  = {}
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
@@ -810,14 +977,20 @@ class EventEngine:
 
     @staticmethod
     def _nearest_hoop(
-        ball_pos: list,
-        hoops:    list,
-        is_court: bool,
+        ball_pos:       list,
+        hoops:          list,
+        is_court:       bool,
+        fallback_hoops: list = [],
     ):
-        """Return (distance, position) of the nearest hoop to ball_pos."""
+        """Return (distance, position) of the nearest hoop to ball_pos.
+
+        fallback_hoops: cached pixel-space hoops used when hoops is empty and
+        is_court is False — keeps scoring alive when hoop leaves frame.
+        """
         best_d, best_h = float("inf"), None
 
-        for h in hoops:
+        effective_hoops = hoops if hoops else fallback_hoops
+        for h in effective_hoops:
             h_c = h.get("center") or _bbox_center(h.get("bbox"))
             if h_c:
                 d = _dist(ball_pos, h_c)

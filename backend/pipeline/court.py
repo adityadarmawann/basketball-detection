@@ -64,30 +64,38 @@ LABEL_TO_COURT: dict[int, list[float]] = {
     19: [14.0,  15.0],   # center top
     23: [14.0,   0.0],   # center bottom
     21: [14.0,   7.5],   # center court
-    # ── Left paint area (FIBA 4.9m wide: y 5.05–9.95) ──────────────────
-    2:  [0.0,    9.95],  # baseline left, top of paint (outer)
-    7:  [0.0,    5.05],  # baseline left, bottom of paint (outer)
-    4:  [0.0,    9.95],  # baseline left, top paint corner (inner → same as outer FIBA)
-    5:  [0.0,    5.05],  # baseline left, bottom paint corner (inner → same as outer FIBA)
-    10: [5.8,    9.95],  # left paint top at FT line (outer)
-    11: [5.8,    5.05],  # left paint bottom at FT line (outer)
-    12: [5.8,    9.95],  # left paint top corner (inner → same as outer FIBA)
-    14: [5.8,    5.05],  # left paint bottom corner (inner → same as outer FIBA)
-    13: [5.8,    7.5],   # free throw line left (tengah)
-    9:  [1.575,  7.5],   # hoop left
-    16: [8.325,  7.5],   # left 3PT arc tangent = 1.575 + 6.75
-    # ── Right paint area (FIBA 4.9m wide: y 5.05–9.95) ─────────────────
-    35: [28.0,   9.95],  # baseline right, top of paint (outer)
-    40: [28.0,   5.05],  # baseline right, bottom of paint (outer)
-    37: [28.0,   9.95],  # baseline right, top-center (inner → same as outer FIBA)
-    38: [28.0,   5.05],  # baseline right, bottom-center (inner → same as outer FIBA)
-    31: [22.2,   9.95],  # right paint top at FT line (outer)
-    32: [22.2,   5.05],  # right paint bottom at FT line (outer)
-    28: [22.2,   9.95],  # right paint top corner (inner → same as outer FIBA)
-    29: [22.2,   7.5],   # free throw line right (tengah)
-    30: [22.2,   5.05],  # right paint bottom corner (inner → same as outer FIBA)
-    33: [26.425, 7.5],   # hoop right
-    26: [19.675, 7.5],   # right 3PT arc tangent = 28.0 - 8.325
+    # ── Left paint area ──────────────────────────────────────────────────
+    # The CL court has TWO sets of paint lines: outer (old/non-standard) and
+    # inner (FIBA 4.9m).  In the image, from top-to-bottom on the left baseline:
+    #   2 (outer top, y=11.35) → 4 (FIBA inner top, y=9.95)
+    #   5 (FIBA inner bottom, y=5.05) → 7 (outer bottom, y=3.65)
+    # Giving them DISTINCT court y-values is critical — RANSAC collapses if two
+    # keypoints share the same court coordinate but have different pixel positions.
+    2:  [0.0,    11.35], # baseline left, outer top paint
+    4:  [0.0,     9.95], # baseline left, FIBA inner top paint
+    5:  [0.0,     5.05], # baseline left, FIBA inner bottom paint
+    7:  [0.0,     3.65], # baseline left, outer bottom paint
+    10: [5.8,    11.35], # left FT line, outer top corner
+    12: [5.8,     9.95], # left FT line, FIBA inner top corner
+    13: [5.8,     7.5],  # free throw line center
+    14: [5.8,     5.05], # left FT line, FIBA inner bottom corner
+    11: [5.8,     3.65], # left FT line, outer bottom corner
+    9:  [1.575,   7.5],  # hoop left
+    16: [8.325,   7.5],  # left 3PT arc tangent = 1.575 + 6.75
+    # ── Right paint area ─────────────────────────────────────────────────
+    # Mirror of left side. From top-to-bottom on right baseline:
+    #   35 (outer top) → 37 (FIBA inner top) … 38 (FIBA inner bottom) → 40 (outer bottom)
+    35: [28.0,   11.35], # baseline right, outer top paint
+    37: [28.0,    9.95], # baseline right, FIBA inner top paint
+    38: [28.0,    5.05], # baseline right, FIBA inner bottom paint
+    40: [28.0,    3.65], # baseline right, outer bottom paint
+    31: [22.2,   11.35], # right FT line, outer top corner
+    28: [22.2,    9.95], # right FT line, FIBA inner top corner
+    29: [22.2,    7.5],  # free throw line center
+    30: [22.2,    5.05], # right FT line, FIBA inner bottom corner
+    32: [22.2,    3.65], # right FT line, outer bottom corner
+    33: [26.425,  7.5],  # hoop right
+    26: [19.675,  7.5],  # right 3PT arc tangent = 28.0 - 8.325
 }
 
 LABEL_NAMES: dict[int, str] = {
@@ -116,14 +124,21 @@ LOW_CONF_THRESHOLD  = 0.3    # titik sudut bawah (sering occluded)
 HIGH_CONF_THRESHOLD = 0.75   # titik boundary atas (sering false detect ke tribun)
 
 # Titik yang sering occluded oleh penonton/kamera sudut bawah
-LOW_CONF_LABELS  = {7, 8, 40, 41}
+LOW_CONF_LABELS  = {7, 8, 41}
 
 # Titik boundary atas yang sering false detect ke area tribun
 # Naikkan threshold agar hanya dipakai kalau model sangat yakin
 HIGH_CONF_LABELS = {1, 2, 10, 25, 34, 35}
 
-MIN_KEYPOINTS    = 4      # minimum untuk RANSAC
+# Titik yang model prediksi-nya tidak presisi di viewpoint khas CL —
+# dideteksi dan ditampilkan, tapi TIDAK dimasukkan ke H computation.
+# Baseline kanan: 40 ([28.0,3.65]) sering muncul di tengah garis bukan di pojok;
+# sudah di-cover oleh 38 ([28.0,5.05]) dan 41 ([28.0,0.0]).
+H_SKIP_LABELS = {40}
+
+MIN_KEYPOINTS    = 4      # minimum untuk cv2.findHomography (OpenCV wajib ≥4 titik)
 CAMERA_MOVE_PX   = 20.0  # threshold deteksi kamera bergerak
+H_EMA_ALPHA      = 0.35  # EMA weight for new H (higher = faster response, more noise)
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +161,9 @@ class CourtMapper:
         self.model_path = model_path or os.path.join(MODELS_DIR, MODEL_FILENAME)
         self.device = device
         self.model = None
-        self._H: Optional[np.ndarray] = None      # pixel → court
-        self._H_inv: Optional[np.ndarray] = None  # court → pixel
+        self._H: Optional[np.ndarray] = None      # pixel → court  (EMA-smoothed)
+        self._H_inv: Optional[np.ndarray] = None  # court → pixel (EMA-smoothed)
+        self._H_raw: Optional[np.ndarray] = None  # last raw RANSAC result (court→pixel)
         self._prev_pixels: Optional[dict[int, list[float]]] = None  # for shift check
         self._frame_shape: tuple[int, int] = (720, 1280)  # (h, w) updated each frame
 
@@ -235,8 +251,9 @@ class CourtMapper:
                 "pixel_pos":  [x, y],
                 "court_pos":  court_coord,
                 "confidence": conf,
-                "occluded":   conf < effective_threshold,
-                "estimated":  False,
+                "occluded":        conf < effective_threshold,
+                "estimated":       False,
+                "ransac_outlier":  label_id in H_SKIP_LABELS,  # pre-excluded, shown orange
             })
 
         return keypoints
@@ -248,15 +265,20 @@ class CourtMapper:
     def compute_homography(self, keypoints: list[dict]) -> Optional[np.ndarray]:
         """
         Fit pixel→court homography with RANSAC.
-        Requires at least MIN_KEYPOINTS (6) visible (conf >= 0.5) points.
+        Requires at least MIN_KEYPOINTS (4) visible keypoints — OpenCV minimum.
         Returns the 3×3 H (pixel→court) matrix and caches it internally.
 
         RANSAC direction: court→pixel so the reprojection threshold (15 px)
         is applied in pixel space, giving meaningful outlier rejection.
         _H (pixel→court) = inv(H_ct2px); _H_inv (court→pixel) = H_ct2px.
         """
-        # Use occluded flag so per-label thresholds (LOW_CONF_LABELS) are honoured
-        visible = [kp for kp in keypoints if not kp["occluded"] and not kp.get("estimated", False)]
+        # Exclude H_SKIP_LABELS — detected & displayed but not fed into RANSAC
+        visible = [
+            kp for kp in keypoints
+            if not kp["occluded"]
+            and not kp.get("estimated", False)
+            and kp["point_id"] not in H_SKIP_LABELS
+        ]
 
         if len(visible) < MIN_KEYPOINTS:
             logger.warning(
@@ -268,10 +290,10 @@ class CourtMapper:
         src_px = np.array([kp["pixel_pos"] for kp in visible], dtype=np.float32)
         src_ct = np.array([kp["court_pos"] for kp in visible], dtype=np.float32)
 
-        # court→pixel: RANSAC threshold in pixel space (15 px ≈ 0.3–0.5 m)
+        # court→pixel: RANSAC threshold 10 px (tighter than 15 px — less outlier slip-through)
         try:
             H_ct2px, mask = cv2.findHomography(
-                src_ct, src_px, cv2.RANSAC, ransacReprojThreshold=15.0
+                src_ct, src_px, cv2.RANSAC, ransacReprojThreshold=10.0
             )
         except cv2.error as exc:
             logger.warning("findHomography failed: %s", exc)
@@ -288,7 +310,9 @@ class CourtMapper:
 
         inlier_kps = []
         for i, kp in enumerate(visible):
-            if mask is not None and mask[i]:
+            is_inlier = mask is None or bool(mask[i])
+            kp["ransac_outlier"] = not is_inlier  # propagate to callers
+            if is_inlier:
                 inlier_kps.append(kp)
             else:
                 logger.warning(
@@ -309,8 +333,28 @@ class CourtMapper:
             logger.warning("H inversion failed — singular matrix")
             return None
 
-        self._H     = H_px2ct.astype(np.float64)   # pixel → court
-        self._H_inv = H_ct2px.astype(np.float64)   # court → pixel
+        # EMA smoothing: blend new raw H with previous smoothed H
+        # This averages out per-frame keypoint detection noise without losing camera-move response
+        if self._H_raw is None:
+            # First calibration — use raw values directly (no history to blend)
+            smoothed_ct2px = H_ct2px.astype(np.float64)
+        else:
+            smoothed_ct2px = (
+                H_EMA_ALPHA * H_ct2px.astype(np.float64)
+                + (1.0 - H_EMA_ALPHA) * self._H_raw
+            )
+
+        self._H_raw = smoothed_ct2px.copy()
+
+        try:
+            H_smoothed_px2ct = np.linalg.inv(smoothed_ct2px)
+        except np.linalg.LinAlgError:
+            logger.warning("Smoothed H inversion failed — falling back to raw")
+            H_smoothed_px2ct = H_px2ct.astype(np.float64)
+            smoothed_ct2px   = H_ct2px.astype(np.float64)
+
+        self._H     = H_smoothed_px2ct          # pixel → court (smoothed)
+        self._H_inv = smoothed_ct2px            # court → pixel (smoothed)
 
         # Update pixel cache for camera-move detection
         self._prev_pixels = {
@@ -489,7 +533,13 @@ class CourtMapper:
         self._frame_shape = (frame.shape[0], frame.shape[1])
         keypoints = self.detect_keypoints(frame)
 
-        if self._H is None or self._camera_moved(keypoints):
+        camera_moved = self._camera_moved(keypoints)
+        needs_calib  = self._H is None or camera_moved
+        if camera_moved and self._H_raw is not None:
+            # Reset EMA history so the new camera angle doesn't blend with old
+            self._H_raw = None
+            logger.debug("Camera moved — EMA H reset")
+        if needs_calib:
             self.compute_homography(keypoints)
 
         # Estimate occluded corner positions using current H (runs after RANSAC,
@@ -497,10 +547,22 @@ class CourtMapper:
         keypoints = self._estimate_missing_corners(keypoints)
 
         visible_count = sum(1 for kp in keypoints if not kp["occluded"])
+        calibrated    = self._H is not None
+
+        # Log every calibration attempt (INFO) so the backend log shows clearly
+        # how many keypoints the model finds and whether H was computed.
+        if needs_calib:
+            logger.info(
+                "Court calib: visible=%d  calibrated=%s",
+                visible_count, calibrated,
+            )
+        else:
+            logger.debug("Court keypoints: visible=%d  calibrated=True", visible_count)
+
         return {
             "homography_matrix":  self._H,
             "court_keypoints":    keypoints,
-            "is_calibrated":      self._H is not None,
+            "is_calibrated":      calibrated,
             "keypoints_detected": visible_count,
         }
 
@@ -514,6 +576,7 @@ class CourtMapper:
     def reset_calibration(self) -> None:
         self._H = None
         self._H_inv = None
+        self._H_raw = None
         self._prev_pixels = None
         logger.info("CourtMapper calibration reset")
 

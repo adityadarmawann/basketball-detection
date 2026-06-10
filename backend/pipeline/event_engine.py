@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 # ── FIBA constants (mirror court.py — avoid circular import) ──────────────────
 COURT_W              = 28.0
 COURT_H              = 15.0
-HOOP_LEFT            = [1.28,   7.47]
-HOOP_RIGHT           = [26.425, 7.5]
+HOOP_LEFT            = [1.575,  7.5]    # FIBA: backboard inner face 1.2m + ring 0.375m
+HOOP_RIGHT           = [26.425, 7.5]   # 28.0 - 1.575 = 26.425
 THREE_PT_RADIUS      = 6.75
 THREE_PT_STRAIGHT_X  = 2.99    # x where corner straight meets arc (left basket)
 
@@ -944,10 +944,10 @@ if __name__ == "__main__":
     print("✅  7. reset() clears state")
 
     # 8 — _is_three geometry
-    # HOOP_LEFT=[1.28,7.47], 3PT arc radius=6.75 m → arc tangent at x≈8.03
+    # HOOP_LEFT=[1.575,7.5], 3PT arc radius=6.75 m → arc tangent at x=8.325
     assert EventEngine._is_three([14.0, 7.5]) is True    # half-court
-    assert EventEngine._is_three([8.5,  7.5]) is True    # just outside left arc (8.5-1.28=7.22 > 6.75)
-    assert EventEngine._is_three([7.0,  7.5]) is False   # inside left arc (7.0-1.28=5.72 < 6.75)
+    assert EventEngine._is_three([8.5,  7.5]) is True    # just outside left arc (8.5-1.575=6.925 > 6.75)
+    assert EventEngine._is_three([7.0,  7.5]) is False   # inside left arc (7.0-1.575=5.425 < 6.75)
     assert EventEngine._is_three([1.0,  7.5]) is False   # inside left paint
     assert EventEngine._is_three([0.0,  7.5]) is False   # baseline
     print("✅  8. _is_three() geometry OK")

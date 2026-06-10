@@ -82,21 +82,9 @@ export default function CourtMap2D() {
         {/* ── Background ─────────────────────────────────────────────────── */}
         <rect width={W} height={H} fill="#000" />
 
-        {/* ── Paint fills (draw_court.py C_PAINT = very dark) ───────────── */}
-        {/* Left outer paint: x 0–5.8, y 3.65–11.35 */}
-        <rect
-          x={mx(0)}    y={my(11.35)}
-          width={mx(5.8)}
-          height={my(3.65) - my(11.35)}
-          fill="#141414"
-        />
-        {/* Right outer paint: x 22.2–28, y 3.65–11.35 */}
-        <rect
-          x={mx(22.2)} y={my(11.35)}
-          width={mx(28) - mx(22.2)}
-          height={my(3.65) - my(11.35)}
-          fill="#141414"
-        />
+        {/* ── Paint fills — FIBA 4.9m wide (y 5.05–9.95) ───────────────── */}
+        <rect x={mx(0)}    y={my(9.95)} width={mx(5.8)}           height={my(5.05) - my(9.95)} fill="#141414" />
+        <rect x={mx(22.2)} y={my(9.95)} width={mx(28) - mx(22.2)} height={my(5.05) - my(9.95)} fill="#141414" />
 
         {/* ── Court boundary ─────────────────────────────────────────────── */}
         <rect
@@ -116,25 +104,27 @@ export default function CourtMap2D() {
         <path d={PATH_CTR_L} fill="none" stroke="#fff" strokeWidth={0.8} />
         <path d={PATH_CTR_R} fill="none" stroke="#fff" strokeWidth={0.8} />
 
-        {/* ── Outer paint rectangles (3 sides each; baseline = boundary) ── */}
-        <polyline
-          points={`${mx(0)},${my(11.35)} ${mx(5.8)},${my(11.35)} ${mx(5.8)},${my(3.65)} ${mx(0)},${my(3.65)}`}
-          fill="none" stroke="#fff" strokeWidth={0.8}
-        />
-        <polyline
-          points={`${mx(28)},${my(11.35)} ${mx(22.2)},${my(11.35)} ${mx(22.2)},${my(3.65)} ${mx(28)},${my(3.65)}`}
-          fill="none" stroke="#fff" strokeWidth={0.8}
-        />
+        {/* ── Paint outline rectangles — FIBA 4.9m (y 5.05–9.95) ────────── */}
+        <rect x={mx(0)}    y={my(9.95)} width={mx(5.8)}           height={my(5.05) - my(9.95)} fill="none" stroke="#fff" strokeWidth={0.8} />
+        <rect x={mx(22.2)} y={my(9.95)} width={mx(28) - mx(22.2)} height={my(5.05) - my(9.95)} fill="none" stroke="#fff" strokeWidth={0.8} />
 
-        {/* ── Inner paint rectangles ─────────────────────────────────────── */}
-        <polyline
-          points={`${mx(0)},${my(9.3)} ${mx(5.8)},${my(9.3)} ${mx(5.8)},${my(5.7)} ${mx(0)},${my(5.7)}`}
-          fill="none" stroke="#fff" strokeWidth={0.4}
-        />
-        <polyline
-          points={`${mx(28)},${my(9.3)} ${mx(22.2)},${my(9.3)} ${mx(22.2)},${my(5.7)} ${mx(28)},${my(5.7)}`}
-          fill="none" stroke="#fff" strokeWidth={0.4}
-        />
+        {/* ── Hash marks on FT line — 3 pairs, mirrored top/bottom ────────
+             Offsets from court centre (7.5) toward paint walls: [0.9, 1.75, 2.6]
+             Reference: HASH_OFFSETS=[0.9,1.75,2.6], HASH_LEN=0.20m            */}
+        {([0.9, 1.75, 2.6] as const).map(off => {
+          const yT = 7.5 + (2.45 - off)   // upper mark y (court metres)
+          const yB = 7.5 - (2.45 - off)   // lower mark y (court metres)
+          return (
+            <g key={off}>
+              {/* left paint FT line (x=5.8) → hash extends right into paint */}
+              <line x1={mx(5.8)} y1={my(yT)} x2={mx(6.0)} y2={my(yT)} stroke="#fff" strokeWidth={0.5} />
+              <line x1={mx(5.8)} y1={my(yB)} x2={mx(6.0)} y2={my(yB)} stroke="#fff" strokeWidth={0.5} />
+              {/* right paint FT line (x=22.2) → hash extends left into paint */}
+              <line x1={mx(22.2)} y1={my(yT)} x2={mx(22.0)} y2={my(yT)} stroke="#fff" strokeWidth={0.5} />
+              <line x1={mx(22.2)} y1={my(yB)} x2={mx(22.0)} y2={my(yB)} stroke="#fff" strokeWidth={0.5} />
+            </g>
+          )
+        })}
 
         {/* ── Free throw circles (solid outside, dashed inside paint) ────── */}
         <path d={PATH_FT_L_SOLID} fill="none" stroke="#fff" strokeWidth={0.8} />

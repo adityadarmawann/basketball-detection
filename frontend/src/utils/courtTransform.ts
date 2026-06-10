@@ -11,10 +11,8 @@
 export const courtElements: Array<{ path: string }> = [
   // Outer boundary: baseline + both sidelines (center line drawn separately)
   { path: 'M 0 0 L 0 15 M 0 0 L 14 0 M 0 15 L 14 15' },
-  // Outer paint boundary: 7.7m wide at baseline (y=3.65–y=11.35), 5.8m deep
-  { path: 'M 0 3.65 L 5.8 3.65 M 5.8 3.65 L 5.8 11.35 M 5.8 11.35 L 0 11.35' },
-  // Inner lane boundary: 3.6m wide (y=5.7–y=9.3), 5.8m deep
-  { path: 'M 0 5.7 L 5.8 5.7 M 5.8 5.7 L 5.8 9.3 M 5.8 9.3 L 0 9.3' },
+  // Paint boundary: FIBA 4.9m wide at baseline (y=5.05–y=9.95), 5.8m deep
+  { path: 'M 0 5.05 L 5.8 5.05 M 5.8 5.05 L 5.8 9.95 M 5.8 9.95 L 0 9.95' },
   // Free throw circle: centre (5.8, 7.5), r=1.8m
   { path: 'M 4.0 7.5 A 1.8 1.8 0 1 0 7.6 7.5 A 1.8 1.8 0 1 0 4.0 7.5' },
   // 3-point line: corner straights + arc (r=6.75m from basket at 1.575, 7.5)

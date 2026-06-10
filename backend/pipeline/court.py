@@ -64,28 +64,28 @@ LABEL_TO_COURT: dict[int, list[float]] = {
     19: [14.0,  15.0],   # center top
     23: [14.0,   0.0],   # center bottom
     21: [14.0,   7.5],   # center court
-    # ── Left paint area ─────────────────────────────────────────────────
-    2:  [0.0,   11.35],  # baseline left, top of paint
-    7:  [0.0,    3.65],  # baseline left, bottom of paint
-    4:  [0.0,    9.3],   # baseline left, top paint corner (sama y dengan label 12)
-    5:  [0.0,    5.7],   # baseline left, bottom paint corner (sama y dengan label 14)
-    10: [5.8,   11.35],  # left inner paint top
-    11: [5.8,    3.65],  # left inner paint bottom
-    12: [5.8,    9.3],   # left paint top corner (pojok atas dalam paint)
-    14: [5.8,    5.7],   # left paint bottom corner (pojok bawah dalam paint)
+    # ── Left paint area (FIBA 4.9m wide: y 5.05–9.95) ──────────────────
+    2:  [0.0,    9.95],  # baseline left, top of paint (outer)
+    7:  [0.0,    5.05],  # baseline left, bottom of paint (outer)
+    4:  [0.0,    9.95],  # baseline left, top paint corner (inner → same as outer FIBA)
+    5:  [0.0,    5.05],  # baseline left, bottom paint corner (inner → same as outer FIBA)
+    10: [5.8,    9.95],  # left paint top at FT line (outer)
+    11: [5.8,    5.05],  # left paint bottom at FT line (outer)
+    12: [5.8,    9.95],  # left paint top corner (inner → same as outer FIBA)
+    14: [5.8,    5.05],  # left paint bottom corner (inner → same as outer FIBA)
     13: [5.8,    7.5],   # free throw line left (tengah)
     9:  [1.575,  7.5],   # hoop left
     16: [8.325,  7.5],   # left 3PT arc tangent = 1.575 + 6.75
-    # ── Right paint area ────────────────────────────────────────────────
-    35: [28.0,  11.35],  # baseline right, top of paint
-    40: [28.0,   3.65],  # baseline right, bottom of paint
-    37: [28.0,   9.3],   # baseline right, top-center
-    38: [28.0,   5.7],   # baseline right, bottom-center
-    31: [22.2,  11.35],  # right inner paint top
-    32: [22.2,   3.65],  # right inner paint bottom
-    28: [22.2,   9.3],   # right paint top corner (pojok atas dalam paint)
+    # ── Right paint area (FIBA 4.9m wide: y 5.05–9.95) ─────────────────
+    35: [28.0,   9.95],  # baseline right, top of paint (outer)
+    40: [28.0,   5.05],  # baseline right, bottom of paint (outer)
+    37: [28.0,   9.95],  # baseline right, top-center (inner → same as outer FIBA)
+    38: [28.0,   5.05],  # baseline right, bottom-center (inner → same as outer FIBA)
+    31: [22.2,   9.95],  # right paint top at FT line (outer)
+    32: [22.2,   5.05],  # right paint bottom at FT line (outer)
+    28: [22.2,   9.95],  # right paint top corner (inner → same as outer FIBA)
     29: [22.2,   7.5],   # free throw line right (tengah)
-    30: [22.2,   5.7],   # right paint bottom corner (pojok bawah dalam paint)
+    30: [22.2,   5.05],  # right paint bottom corner (inner → same as outer FIBA)
     33: [26.425, 7.5],   # hoop right
     26: [19.675, 7.5],   # right 3PT arc tangent = 28.0 - 8.325
 }
@@ -653,7 +653,7 @@ if __name__ == "__main__":
     test_court_positions = [
         [0.0,   15.0],   # corner
         [14.0,   7.5],   # center
-        [5.8,   11.35],  # paint edge
+        [5.8,    9.95],  # paint edge (FIBA 4.9m top)
         [21.25,  7.5],   # right 3PT arc
     ]
 

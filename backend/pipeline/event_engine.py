@@ -35,11 +35,11 @@ POSSESSION_DIST_PX     = 80     # pixels  — ball "owned" if player inside this
 POSSESSION_DIST_M      = 1.2    # meters
 POSSESSION_CONFIRM_F   = 3      # consecutive frames to confirm new possession
 
-FG_HOOP_RADIUS_PX      = 55     # pixels  — ball inside hoop zone
+FG_HOOP_RADIUS_PX      = 70     # pixels  — ball inside hoop zone (wider → fewer missed baskets)
 FG_HOOP_RADIUS_M       = 0.45   # meters  — tighter in court space (no action gate)
 FG_COOLDOWN_F          = 45     # frames before another FG can fire
-FG_ABOVE_MARGIN_PX     = 20     # ball must be ≥ this many px above hoop_y to arm
-FG_ABOVE_WINDOW_F      = 30     # frames to look back for "was above" check
+FG_ABOVE_MARGIN_PX     = 10     # ball must be ≥ this many px above hoop_y to arm
+FG_ABOVE_WINDOW_F      = 45     # frames to look back for "was above" check (1.5 s @ 30fps eff)
 FG_ATTEMPT_WINDOW_F    = 150    # kept for MISSED_FG accounting only (not scoring gate)
 FG_MISS_TIMEOUT_F      = 100    # frames after SHOOT with no MADE → MISSED_FG
 
@@ -370,8 +370,13 @@ class EventEngine:
         # Skip check when ball history is empty (first frames) — allow scoring.
         if self._ball_px_hist:
             hoop_y = float(hoop_ref_px[1])
+            hoop_x = float(hoop_ref_px[0])
+            # Ball must have been above hoop AND within a horizontal window —
+            # prevents cross-court or dribble history from satisfying this check.
+            horiz_window = FG_HOOP_RADIUS_PX * 3.0
             ball_was_above = any(
                 float(pos[1]) < hoop_y - FG_ABOVE_MARGIN_PX
+                and abs(float(pos[0]) - hoop_x) < horiz_window
                 for pos in self._ball_px_hist
             )
             if not ball_was_above:
@@ -383,6 +388,18 @@ class EventEngine:
                     max(p[1] for p in self._ball_px_hist),
                 )
                 return events
+
+            # Ball must be moving downward (pixel y increasing) at zone entry.
+            # Clearly upward motion means a bounce or pass, not a basket.
+            if len(self._ball_px_hist) >= 3:
+                recent_ys = [float(p[1]) for p in list(self._ball_px_hist)[-3:]]
+                dy = recent_ys[-1] - recent_ys[0]
+                if dy < -12:
+                    logger.debug(
+                        "FG zone entry rejected — ball moving upward at entry (dy=%.1f)",
+                        dy,
+                    )
+                    return events
 
         # ── 3. Identify shooter ──────────────────────────────────────────
         # Prefer the last player the action model flagged as shooter;

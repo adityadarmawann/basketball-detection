@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "jersey_no.pt"
 
-VOTE_THRESHOLD    = 3     # frames required to confirm a jersey number
+VOTE_THRESHOLD    = 2     # frames required to confirm a jersey number
 MAX_VOTE_HISTORY  = 30   # rolling window per track_id
 CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
 OCR_HEIGHT_PX     = 128   # resize crop to this height for OCR (was 112; better for 2-digit far)
@@ -94,6 +94,48 @@ def _otsu_variant(crop: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop.copy()
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    h, w = binary.shape[:2]
+    if h == 0 or w == 0:
+        return np.zeros((OCR_HEIGHT_PX, OCR_HEIGHT_PX, 3), dtype=np.uint8)
+
+    scale  = OCR_HEIGHT_PX / h
+    new_w  = max(48, int(w * scale))
+    binary = cv2.resize(binary, (new_w, OCR_HEIGHT_PX), interpolation=cv2.INTER_NEAREST)
+
+    pad    = max(8, new_w // 4)
+    binary = cv2.copyMakeBorder(binary, 6, 6, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+
+def _adaptive_variant(crop: np.ndarray) -> np.ndarray:
+    """
+    Adaptive threshold with THRESH_BINARY_INV — handles both dark and light jerseys.
+
+    For white jerseys (dark numbers on light background):
+      Local mean is high → dark number pixels fall below (mean - C) → output 255 (white)
+      Result: WHITE numbers on BLACK background → OCR reads well.
+
+    For dark jerseys (light numbers on dark background):
+      Local mean is low → light number pixels exceed (mean - C) → output 0 after INV
+      Result: also produces readable contrast.
+
+    Unlike global Otsu, adaptive handles uneven lighting across the jersey crop.
+    """
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop.copy()
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    # Block size 15 captures neighbourhood larger than a jersey digit stroke (~3-8px)
+    binary = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        blockSize=15, C=10,
+    )
+
+    # Slight dilation reconnects broken digit strokes (common for bold jersey fonts)
+    kernel = np.ones((2, 2), np.uint8)
+    binary = cv2.dilate(binary, kernel, iterations=1)
 
     h, w = binary.shape[:2]
     if h == 0 or w == 0:
@@ -364,9 +406,18 @@ class JerseyOCR:
                 results.append(self._empty_result(track_id))
                 continue
 
-            # Blur guard — skip OCR on motion-blurred crops (25fps tuned).
-            # Blurry: vote history unchanged; previous confirmed still returned.
-            if _is_too_blurry(number_crop):
+            # Blur guard — skip OCR on motion-blurred crops.
+            # White jerseys have naturally lower Laplacian variance (large uniform
+            # bright area → few edges), so we relax the threshold proportionally.
+            # Mean > 160 = light jersey; use 40% of the normal threshold.
+            _crop_gray = cv2.cvtColor(number_crop, cv2.COLOR_BGR2GRAY) \
+                if number_crop.ndim == 3 else number_crop
+            _effective_blur_thr = (
+                BLUR_THRESHOLD * 0.40
+                if float(_crop_gray.mean()) > 160
+                else BLUR_THRESHOLD
+            )
+            if _is_too_blurry(number_crop, threshold=_effective_blur_thr):
                 logger.debug(
                     "track %d: blur score=%.1f < %.1f — OCR skipped",
                     track_id, _blur_score(number_crop), BLUR_THRESHOLD,
@@ -464,11 +515,13 @@ class JerseyOCR:
 
         processed = _preprocess_for_ocr(number_crop)
         otsu      = _otsu_variant(number_crop)
+        adaptive  = _adaptive_variant(number_crop)
 
-        # Three variants: CLAHE-enhanced, its inverse, and Otsu binary.
-        # CLAHE handles gradients; Otsu cuts through solid-colour jersey backgrounds.
+        # Four variants: CLAHE, inverted CLAHE, Otsu binary, adaptive binary.
+        # Adaptive handles light jerseys (dark numbers on white) without needing
+        # a separate bright-crop branch — THRESH_BINARY_INV normalises both cases.
         candidates: list[tuple[int, float]] = []
-        for img in [processed, cv2.bitwise_not(processed), otsu]:
+        for img in [processed, cv2.bitwise_not(processed), otsu, adaptive]:
             try:
                 results = self._ocr.predict(img)
             except Exception as exc:

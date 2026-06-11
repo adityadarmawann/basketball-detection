@@ -110,7 +110,7 @@ FPS_DEFAULT          = 30
 # OCR: jersey number is stable once confirmed → run every 30 frames
 PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every other frame
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
-OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "15"))   # PaddleOCR
+OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "15"))   # fallback default; overridden at runtime
 ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "20"))   # SlowFast action
 
 # ── Action label normalisation ────────────────────────────────────────────────
@@ -174,6 +174,7 @@ class VideoProcessor:
         self._quarter_start_frame: int   = 0
         self._start_time:          float = 0.0
         self._source_fps:          float = float(FPS_DEFAULT)
+        self._ocr_interval:        int   = OCR_EVERY_N_FRAMES  # overridden after FPS known
         self._frame_width:         int   = 0
         self._frame_height:        int   = 0
         self._roster:              dict  = {}
@@ -320,8 +321,16 @@ class VideoProcessor:
         self._frame_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1920
         self._frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
 
-        logger.info("Video: %s  frames=%d  src_fps=%.1f",
-                    Path(video_path).name, self._total_frames, self._source_fps)
+        # FPS-aware OCR interval: target ~4 OCR attempts/second per unconfirmed player.
+        # Aligning to PROCESS_STRIDE prevents the lcm-doubling bug where an odd
+        # OCR_EVERY_N_FRAMES (e.g. 15) combined with PROCESS_STRIDE=2 means the
+        # modulo never fires on a processed frame — effectively halving frequency.
+        _raw = max(PROCESS_STRIDE, int(self._source_fps / 4))
+        self._ocr_interval = (_raw // PROCESS_STRIDE) * PROCESS_STRIDE or PROCESS_STRIDE
+
+        logger.info("Video: %s  frames=%d  src_fps=%.1f  ocr_interval=%d",
+                    Path(video_path).name, self._total_frames, self._source_fps,
+                    self._ocr_interval)
 
         grab_thread = threading.Thread(
             target=self._frame_grabber, args=(cap,),
@@ -547,8 +556,8 @@ class VideoProcessor:
             except Exception as e:
                 logger.debug("Pose frame %d: %s", frame_id, e)
 
-        # ── 5. Jersey OCR — run every OCR_EVERY_N_FRAMES (jersey number is stable) ──
-        if self._jersey and tracked_players and frame_id % OCR_EVERY_N_FRAMES == 0:
+        # ── 5. Jersey OCR — run every self._ocr_interval (FPS-aware, stride-aligned) ──
+        if self._jersey and tracked_players and frame_id % self._ocr_interval == 0:
             try:
                 jersey = self._jersey.process(frame, tracked_players, self._tracker)
                 frame_data["jersey"] = jersey
@@ -1215,10 +1224,10 @@ class VideoProcessor:
                         color = C_A if t == "A" else C_B if t == "B" else C_UNK
                         label = f"#{p['j']}" if p.get("j") is not None else f"ID:{p['i']}"
                         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-                        cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 6, y1), color, -1)
-                        cv2.putText(frame, label, (x1 + 3, y1 - 4),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1,
+                        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+                        cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 8, y1), color, -1)
+                        cv2.putText(frame, label, (x1 + 4, y1 - 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2,
                                     cv2.LINE_AA)
 
                     bl = snap.get("bl")

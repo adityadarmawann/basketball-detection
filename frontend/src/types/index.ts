@@ -30,13 +30,22 @@ export interface FrameUpdate {
 export interface GameEvent {
   type: 'event';
   eventType: 'FGM' | 'FGA' | 'REB' | 'AST' | 'STL' | 'BLK' | 'TOV' | 'FOUL';
-  playerId: number;
+  trackId?: number;       // raw ByteTrack ID — stable anchor for retroactive patches
+  playerId: number;       // jersey_number once confirmed, else trackId
   playerName: string;
-  team: 'A' | 'B';
+  team: 'A' | 'B' | '';
   points?: number;
   quarter: number;
   gameClock: string;
   courtPos: [number, number];
+}
+
+export interface JerseyConfirmedMessage {
+  type: 'jersey_confirmed';
+  trackId: number;
+  jerseyNumber: number;
+  playerName: string;
+  team: 'A' | 'B' | '';
 }
 
 export interface RosterPlayer {
@@ -48,8 +57,8 @@ export interface RosterPlayer {
 export interface PlayerStats {
   playerId: number;
   name: string;
-  jerseyNumber: number;
-  team: 'A' | 'B';
+  jerseyNumber: number | null;
+  team: 'A' | 'B' | '';
   minutes: number;
   pts: number;
   twoPointMade: number;

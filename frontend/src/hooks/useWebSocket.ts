@@ -1,5 +1,5 @@
 import { useRef, useCallback } from 'react'
-import { FrameUpdate, GameEvent, PlayerStats, MpiMetrics } from '../types'
+import { FrameUpdate, GameEvent, JerseyConfirmedMessage, PlayerStats, MpiMetrics } from '../types'
 import { useMatchStore } from '../store/matchStore'
 import { MockWebSocketServer } from '../utils/mockWebSocket'
 
@@ -138,6 +138,15 @@ export const useWebSocket = () => {
     s.setMpi(updatedMpi)
   }, [])
 
+  const handleJerseyConfirmed = useCallback((msg: JerseyConfirmedMessage) => {
+    useMatchStore.getState().patchEventsByTrackId(
+      msg.trackId,
+      msg.jerseyNumber,
+      msg.playerName,
+      msg.team,
+    )
+  }, [])
+
   const handleEvent = useCallback((event: GameEvent) => {
     const s = useMatchStore.getState()
     s.addEvent(event)
@@ -250,6 +259,8 @@ export const useWebSocket = () => {
           if (data['event']) {
             handleEvent(data['event'] as GameEvent)
           }
+        } else if (data['type'] === 'jersey_confirmed') {
+          handleJerseyConfirmed(data as unknown as JerseyConfirmedMessage)
         }
       } catch {
         // ignore unparseable messages
@@ -277,7 +288,7 @@ export const useWebSocket = () => {
         startMock()
       }
     }
-  }, [handleFrameUpdate, handleEvent, startMock])
+  }, [handleFrameUpdate, handleEvent, handleJerseyConfirmed, startMock])
 
   // ── Public API ────────────────────────────────────────────────────────────
 

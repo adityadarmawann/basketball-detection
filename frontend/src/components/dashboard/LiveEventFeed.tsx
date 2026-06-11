@@ -58,7 +58,10 @@ export default function LiveEventFeed({
                   {event.gameClock} — {event.eventType}
                 </div>
                 <div className="text-xs text-text-secondary">
-                  #{event.playerId} {event.playerName}
+                  {event.playerName?.startsWith('Track_')
+                    ? <span className="italic text-orange-400">?? Unidentified</span>
+                    : `#${event.playerId} ${event.playerName}`
+                  }
                   {event.points && ` (+${event.points})`}
                 </div>
               </div>

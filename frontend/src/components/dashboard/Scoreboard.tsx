@@ -6,6 +6,7 @@ interface ScoreboardProps {
   quarter: number
   gameClock: string
   shotClock: number
+  isLive?: boolean
 }
 
 export default function Scoreboard({
@@ -16,6 +17,7 @@ export default function Scoreboard({
   quarter,
   gameClock,
   shotClock,
+  isLive = false,
 }: ScoreboardProps) {
   return (
     <div className="grid grid-cols-2 gap-4">
@@ -25,12 +27,17 @@ export default function Scoreboard({
         <div className="font-display text-3xl font-bold">Q{quarter}</div>
       </div>
 
-      {/* Game Clock */}
+      {/* Game Clock / Video Time */}
       <div className="bg-surface rounded-lg p-4 shadow-sm">
-        <div className="text-text-secondary text-xs font-bold mb-2">TIME</div>
+        <div className="text-text-secondary text-xs font-bold mb-2">
+          {isLive ? 'TIME' : 'VIDEO TIME'}
+        </div>
         <div className="font-mono text-3xl font-bold text-primary">
           {gameClock}
         </div>
+        {!isLive && (
+          <div className="text-[10px] text-text-secondary mt-1">posisi video</div>
+        )}
       </div>
 
       {/* Score Summary */}

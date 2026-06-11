@@ -48,6 +48,26 @@ export default function MatchPage() {
   // game event and periodically. Return value not needed here; side-effect only.
   useMatchStats(store.matchId)
 
+  // Sync TIME display to video position when not actively processing.
+  // We show elapsed video time (not a game clock countdown) because raw video
+  // includes stoppages/timeouts — 1 video-second ≠ 1 game-second.
+  //
+  // If you want FIBA 10-min countdown instead, uncomment the block below
+  // and comment out the elapsed-time block:
+  //
+  // const QUARTER_DURATION_S = 600
+  // const remaining = Math.max(0, QUARTER_DURATION_S - currentTime)
+  // const mm = String(Math.floor(remaining / 60)).padStart(2, '0')
+  // const ss = String(Math.floor(remaining % 60)).padStart(2, '0')
+  // store.setGameClock(`${mm}:${ss}`)
+  //
+  const handleVideoTimeUpdate = useCallback((currentTime: number) => {
+    if (store.isLive) return   // pipeline still running — let WS drive the clock
+    const mm = String(Math.floor(currentTime / 60)).padStart(2, '0')
+    const ss = String(Math.floor(currentTime % 60)).padStart(2, '0')
+    store.setGameClock(`${mm}:${ss}`)
+  }, [store])
+
   // Re-fetch frameData + uploadedQuarters when returning to live with no data
   useEffect(() => {
     if (step !== 'live' || !store.matchId) return
@@ -300,7 +320,12 @@ export default function MatchPage() {
                   </span>
                 )}
               </div>
-              <VideoPlayer videoUrl={videoUrl} showCourtMap={true} frameData={frameData} />
+              <VideoPlayer
+                videoUrl={videoUrl}
+                showCourtMap={true}
+                frameData={frameData}
+                onTimeUpdate={handleVideoTimeUpdate}
+              />
             </div>
           )}
 
@@ -314,6 +339,7 @@ export default function MatchPage() {
               quarter={store.quarter}
               gameClock={store.gameClock}
               shotClock={store.shotClock}
+              isLive={store.isLive}
             />
 
             <MvpRanking players={mvpPlayers} />

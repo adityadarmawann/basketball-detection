@@ -209,6 +209,10 @@ class VideoProcessor:
         # Used by _snapshot_frame so the per-frame JSON has speed without calling get_live_stats() every frame.
         self._speed_cache:     dict  = {}   # {track_id: float}
 
+        # Tracks which track_ids have already had a jersey_confirmed WS message sent.
+        # Reset per quarter so late-confirming players always get a notification.
+        self._confirmed_jersey_sent: set = set()
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def _init_pipeline(self, models_path: str) -> None:
@@ -412,6 +416,33 @@ class VideoProcessor:
                         except Exception as e:
                             logger.debug("WS broadcast error: %s", e)
 
+                        # ── jersey_confirmed: notify frontend to patch past events ──
+                        if self._tracker:
+                            for _tid, _jn in self._tracker.track_jersey_map.items():
+                                if _tid in self._confirmed_jersey_sent:
+                                    continue
+                                self._confirmed_jersey_sent.add(_tid)
+                                _entry = self._roster.get(str(_jn), {})
+                                _name  = (_entry.get("name", f"#{_jn}")
+                                          if isinstance(_entry, dict) else f"#{_jn}")
+                                _team  = (_entry.get("team", "")
+                                          if isinstance(_entry, dict) else "")
+                                _conf_msg = {
+                                    "type":        "jersey_confirmed",
+                                    "trackId":     _tid,
+                                    "jerseyNumber": _jn,
+                                    "playerName":  _name,
+                                    "team":        _team,
+                                }
+                                logger.info(
+                                    "jersey_confirmed  tid=%d  jersey=%s  name=%s  team=%s",
+                                    _tid, _jn, _name, _team,
+                                )
+                                try:
+                                    await ws_manager.broadcast(match_id, _conf_msg)
+                                except Exception as e:
+                                    logger.debug("WS jersey_confirmed error: %s", e)
+
                 frame_id += 1
                 self._frame_count = frame_id
                 elapsed = time.perf_counter() - self._start_time
@@ -588,19 +619,31 @@ class VideoProcessor:
             except Exception as e:
                 logger.debug("Jersey OCR frame %d: %s", frame_id, e)
 
-        # ── Annotate tracked_players with team from roster (roster is source of truth) ──
-        if self._tracker and self._roster:
+        # ── Annotate tracked_players with team ───────────────────────────────────
+        # Priority: (1) roster lookup via confirmed jersey number, (2) last confirmed
+        # sticky, (3) jersey color classification from OCR (works without a number).
+        jersey_color_map: dict = {}
+        for jr in frame_data.get("jersey", {}).get("jersey_results", []):
+            t = jr.get("team")
+            if t and jr.get("track_id") is not None:
+                jersey_color_map[jr["track_id"]] = t
+
+        if self._tracker:
             for player in tracked_players:
                 tid = player["track_id"]
                 jersey_num = self._tracker.get_jersey_number(tid)
-                if jersey_num is not None:
+                if jersey_num is not None and self._roster:
                     entry = self._roster.get(str(jersey_num), {})
                     if isinstance(entry, dict) and entry.get("team"):
                         player["team"] = entry["team"]
                         self._last_known_team[tid] = entry["team"]
-                elif tid in self._last_known_team:
-                    # OCR not running this frame — use last confirmed team
+                        continue
+                if tid in self._last_known_team:
                     player["team"] = self._last_known_team[tid]
+                elif tid in jersey_color_map:
+                    # Color-based team: applies even when jersey number isn't read yet
+                    player["team"] = jersey_color_map[tid]
+                    self._last_known_team[tid] = jersey_color_map[tid]
 
         # ── 6. Action classification — run every ACTION_EVERY_N_FRAMES ───────────
         if self._action and tracked_players and frame_id % ACTION_EVERY_N_FRAMES == 0:
@@ -910,6 +953,7 @@ class VideoProcessor:
         return {
             "type":       "event",
             "eventType":  event_type,
+            "trackId":    track_id,
             "playerId":   jersey_num if jersey_num is not None else track_id,
             "playerName": (f"#{jersey_num}" if jersey_num is not None
                            else f"Track_{track_id}"),
@@ -980,9 +1024,11 @@ class VideoProcessor:
                 blob = json.loads(raw)
                 latest_blob = blob
                 for pdata in (blob.get("player_stats") or {}).values():
-                    jn   = pdata.get("jersey_number", 0)
+                    jn   = pdata.get("jersey_number")   # None = unidentified
                     team = pdata.get("team", "")
-                    key  = (jn, team)
+                    # Unidentified players use their unique name (contains track_id)
+                    # as key so they don't collapse into a single inflated "Player_0".
+                    key  = (jn, team) if jn is not None else (pdata.get("name", ""), team)
                     if key not in by_player:
                         import copy as _copy
                         entry = _copy.deepcopy(pdata)
@@ -1324,6 +1370,11 @@ class VideoProcessor:
                 self._stats.reset_quarter(self._current_quarter)
             except Exception as e:
                 logger.warning("stats.reset_quarter error: %s", e)
+
+        # Reset per-quarter jersey-confirmation tracking so players confirmed
+        # early in the new quarter still get a jersey_confirmed WS message.
+        self._confirmed_jersey_sent.clear()
+        self._last_known_team.clear()
 
     # ── Timing helpers ────────────────────────────────────────────────────────
 

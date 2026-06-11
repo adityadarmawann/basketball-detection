@@ -1,7 +1,7 @@
 import { Trophy } from 'lucide-react'
 
 interface PlayerRank {
-  jerseyNumber: number
+  jerseyNumber: number | null | undefined
   name: string
   eff: number
   mpi: number
@@ -45,7 +45,10 @@ export default function MvpRanking({ players }: MvpRankingProps) {
 
             <div className="flex-1">
               <div className="font-bold">
-                #{player.jerseyNumber} {player.name}
+                {player.jerseyNumber != null
+                  ? `#${player.jerseyNumber} ${player.name}`
+                  : `?? ${player.name.startsWith('Player_') ? 'Unidentified' : player.name}`
+                }
               </div>
               <div className="text-sm text-text-secondary">
                 EFF: {player.eff} | MPI: {player.mpi.toFixed(0)}

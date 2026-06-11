@@ -20,8 +20,8 @@ export interface TeamStats {
 export interface MvpEntry {
   playerId:     number
   name:         string
-  jerseyNumber: number
-  team:         'A' | 'B'
+  jerseyNumber: number | null
+  team:         'A' | 'B' | ''
   eff:          number
   mpiComposite: number
   score:        number   // 0.6×EFF + 0.4×MPI
@@ -124,8 +124,8 @@ function normalizePlayerStats(playerId: number, raw: RawPlayerStats): PlayerStat
   return {
     playerId,
     name:           raw.name          ?? `Player_${playerId}`,
-    jerseyNumber:   raw.jersey_number ?? 0,
-    team:           ((raw.team || 'A') as 'A' | 'B'),
+    jerseyNumber:   raw.jersey_number ?? null,
+    team:           ((raw.team || '') as 'A' | 'B' | ''),
     minutes:        ts.min            ?? 0,
     pts,
     twoPointMade,

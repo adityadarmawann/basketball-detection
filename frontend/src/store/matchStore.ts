@@ -45,6 +45,7 @@ export const useMatchStore = create<MatchState & {
   setRoster: (roster: RosterPlayer[]) => void
   setVideoUrl: (url: string) => void
   setMatchStep: (step: string) => void
+  patchEventsByTrackId: (trackId: number, jerseyNumber: number, playerName: string, team: string) => void
   reset: () => void
 }>()(
   persist(
@@ -93,6 +94,19 @@ export const useMatchStore = create<MatchState & {
       setRoster: (roster) => set({ roster }),
       setVideoUrl: (videoUrl) => set({ videoUrl }),
       setMatchStep: (matchStep) => set({ matchStep }),
+      patchEventsByTrackId: (trackId, jerseyNumber, playerName, team) =>
+        set((state) => ({
+          events: state.events.map((e) =>
+            e.trackId === trackId && e.playerName === `Track_${trackId}`
+              ? {
+                  ...e,
+                  playerId:   jerseyNumber,
+                  playerName,
+                  team: (team || e.team) as 'A' | 'B' | '',
+                }
+              : e
+          ),
+        })),
       reset: () => set(initialState),
     }),
     {

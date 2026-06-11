@@ -1,10 +1,12 @@
 import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { AlertTriangle } from 'lucide-react'
 import { useMatchStore } from '../../store/matchStore'
 import { GameEvent, PlayerStats } from '../../types'
+import EventCorrectionPanel from './EventCorrectionPanel'
 import clsx from 'clsx'
 
-type Tab = 'stats' | 'lineups'
+type Tab = 'stats' | 'lineups' | 'correction'
 type Quarter = 0 | 1 | 2 | 3 | 4 // 0 = All
 
 const STAT_ROWS: { label: string; key: keyof PlayerStats }[] = [
@@ -46,6 +48,14 @@ export default function TabsStatsLineup() {
   const [quarter, setQuarter] = useState<Quarter>(0)
   const navigate = useNavigate()
   const { stats, events, teamA, teamB } = useMatchStore()
+
+  // Badge count: unidentified players with scoring events
+  const unidentifiedCount = useMemo(
+    () => Object.values(stats).filter(
+      (p) => p.jerseyNumber == null && (p.pts > 0 || p.twoPointAtt > 0 || p.threePointAtt > 0)
+    ).length,
+    [stats]
+  )
 
   const { teamAStats, teamBStats } = useMemo(() => {
     if (quarter === 0) {
@@ -98,27 +108,41 @@ export default function TabsStatsLineup() {
     <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
       {/* Tab Header */}
       <div className="flex border-b border-gray-200">
-        {(['stats', 'lineups'] as Tab[]).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => {
-              if (tab === 'lineups') {
-                navigate('/match/lineups')
-              } else {
-                setActiveTab(tab)
-              }
-            }}
-            className={clsx(
-              'flex-1 py-3 text-sm font-bold uppercase tracking-wide transition-smooth',
-              activeTab === tab && tab !== 'lineups'
-                ? 'bg-primary text-white'
-                : 'text-text-secondary hover:text-text-primary hover:bg-gray-50'
-            )}
-          >
-            {tab === 'stats' ? 'Stats' : 'Lineups'}
-          </button>
-        ))}
+        <button
+          onClick={() => setActiveTab('stats')}
+          className={clsx(
+            'flex-1 py-3 text-sm font-bold uppercase tracking-wide transition-smooth',
+            activeTab === 'stats' ? 'bg-primary text-white' : 'text-text-secondary hover:text-text-primary hover:bg-gray-50'
+          )}
+        >
+          Stats
+        </button>
+        <button
+          onClick={() => navigate('/match/lineups')}
+          className="flex-1 py-3 text-sm font-bold uppercase tracking-wide transition-smooth text-text-secondary hover:text-text-primary hover:bg-gray-50"
+        >
+          Lineups
+        </button>
+        <button
+          onClick={() => setActiveTab('correction')}
+          className={clsx(
+            'flex-1 py-3 text-sm font-bold uppercase tracking-wide transition-smooth relative',
+            activeTab === 'correction' ? 'bg-amber-500 text-white' : 'text-text-secondary hover:text-text-primary hover:bg-gray-50'
+          )}
+        >
+          <span className="flex items-center justify-center gap-1">
+            <AlertTriangle size={13} />
+            Koreksi
+          </span>
+          {unidentifiedCount > 0 && activeTab !== 'correction' && (
+            <span className="absolute top-1.5 right-2 w-4 h-4 rounded-full bg-danger text-white text-[10px] font-bold flex items-center justify-center">
+              {unidentifiedCount}
+            </span>
+          )}
+        </button>
       </div>
+
+      {activeTab === 'correction' && <EventCorrectionPanel />}
 
       {activeTab === 'stats' && (
         <div className="p-6">

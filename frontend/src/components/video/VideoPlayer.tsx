@@ -10,9 +10,11 @@ interface VideoPlayerProps {
   showCourtMap?: boolean
   /** Per-frame bbox data for frame-accurate overlay. Fetched after analysis. */
   frameData?: FrameBboxEntry[]
+  /** Called on every timeupdate — lets parent sync game clock to video position. */
+  onTimeUpdate?: (currentTime: number, duration: number) => void
 }
 
-export default function VideoPlayer({ videoUrl, showCourtMap, frameData }: VideoPlayerProps) {
+export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeUpdate }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [volume, setVolume] = useState(1)
@@ -30,6 +32,7 @@ export default function VideoPlayer({ videoUrl, showCourtMap, frameData }: Video
     const handleDurationChange = () => setDuration(video.duration)
     const handleTimeUpdate = () => {
       setProgress(video.currentTime)
+      onTimeUpdate?.(video.currentTime, video.duration || 0)
       // Simulate FPS and GPU usage for demo
       setFps(Math.floor(Math.random() * 10 + 20))
       setGpuUsage(Math.floor(Math.random() * 40 + 50))

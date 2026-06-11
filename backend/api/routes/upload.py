@@ -70,7 +70,12 @@ _processors: dict = {}
 
 # ── Background pipeline helper ────────────────────────────────────────────────
 
-async def _run_pipeline(video_path: str, match_id: str, roster: dict) -> None:
+async def _run_pipeline(
+    video_path:    str,
+    match_id:      str,
+    roster:        dict,
+    start_quarter: int = 1,
+) -> None:
     """
     Async background task: wires DB/Redis, creates VideoProcessor, runs pipeline.
     Registered in _processors before process_video() starts so that the progress
@@ -96,6 +101,7 @@ async def _run_pipeline(video_path: str, match_id: str, roster: dict) -> None:
             match_id=match_id,
             roster=roster,
             ws_manager=_ws_manager,
+            start_quarter=start_quarter,
         )
     except Exception as e:
         logger.error("Pipeline error match_id=%s: %s", match_id, e, exc_info=True)
@@ -109,6 +115,7 @@ async def upload_video(
     file:     UploadFile    = File(...),
     match_id: str           = Form(...),
     roster:   Optional[str] = Form(None),   # JSON: {"7": "Bima", "12": "Arya"}
+    quarter:  Optional[int] = Form(None),   # 1–4 for quarter clips; None = full game
 ):
     """
     Upload a video file and immediately start background analytics processing.
@@ -118,6 +125,7 @@ async def upload_video(
     file       : video file (.mp4 / .mov / .avi / .mkv, max 5 GB)
     match_id   : unique match identifier (e.g. "match_20240606_001")
     roster     : optional JSON string mapping jersey_number → player_name
+    quarter    : 1–4 when uploading a single-quarter clip; omit for full-game video
     """
     # ── Validate extension ─────────────────────────────────────────────────
     ext = os.path.splitext(file.filename or "")[1].lower()
@@ -179,12 +187,15 @@ async def upload_video(
     )
 
     # ── Trigger background processing ──────────────────────────────────────
+    start_quarter = max(1, min(4, quarter)) if quarter else 1
+
     if _VP_AVAILABLE:
         background_tasks.add_task(
             _run_pipeline,
             video_path=str(saved_path),
             match_id=match_id,
             roster=roster_data,
+            start_quarter=start_quarter,
         )
         status  = "processing"
         message = "Video uploaded, pipeline started"
@@ -280,6 +291,39 @@ async def stop_processing(match_id: str):
         "match_id": match_id,
         "status":   "stopping",
         "message":  "Stop signal sent. Processing will finish the current frame then exit.",
+    }
+
+
+# ── GET /upload/quarters/{match_id} ──────────────────────────────────────────
+
+@router.get("/upload/quarters/{match_id}")
+async def get_uploaded_quarters(match_id: str):
+    """
+    Return which quarters (1–4) have been uploaded and finalised for this match.
+    Uses per-quarter Redis keys written by VideoProcessor._finalize().
+    """
+    uploaded: list[int] = []
+    active_quarter: int | None = None
+
+    # Check if pipeline is currently running — report its quarter
+    processor = _processors.get(match_id)
+    if processor:
+        active_quarter = processor.current_quarter  # property or attribute
+
+    try:
+        redis = await get_redis()
+        if redis is not None:
+            for q in range(1, 5):
+                raw = await redis.get(f"stats:{match_id}:q{q}")
+                if raw:
+                    uploaded.append(q)
+    except Exception as e:
+        logger.warning("Redis quarters check error match=%s: %s", match_id, e)
+
+    return {
+        "match_id":       match_id,
+        "uploaded":       uploaded,          # quarters with finalised stats
+        "active_quarter": active_quarter,    # quarter currently being processed (or null)
     }
 
 

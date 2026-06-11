@@ -13,18 +13,24 @@ import MvpRanking from '../components/dashboard/MvpRanking'
 import LiveEventFeed from '../components/dashboard/LiveEventFeed'
 import TabsStatsLineup from '../components/match/TabsStatsLineup'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useMatchStats } from '../hooks/useMatchStats'
 import { FrameBboxEntry } from '../types'
 
 type MatchStep = 'setup' | 'roster' | 'upload' | 'analyzing' | 'live'
 
 export default function MatchPage() {
-  const [step, setStep] = useState<MatchStep>('setup')
-  const [videoUrl, setVideoUrl] = useState<string>('')
-  const [frameData, setFrameData] = useState<FrameBboxEntry[]>([])
-  const [overlayLoading, setOverlayLoading] = useState(false)
+  const [step, setStep]                           = useState<MatchStep>('setup')
+  const [videoUrl, setVideoUrl]                   = useState<string>('')
+  const [frameData, setFrameData]                 = useState<FrameBboxEntry[]>([])
+  const [overlayLoading, setOverlayLoading]       = useState(false)
+  const [nextUploadQuarter, setNextUploadQuarter] = useState<number | undefined>(undefined)
+  const [uploadedQuarters, setUploadedQuarters]   = useState<number[]>([])
 
   const store = useMatchStore()
   const { connect, disconnect } = useWebSocket()
+  // Keep store.stats in sync with backend — polls /api/stats/live on every
+  // game event and periodically. Return value not needed here; side-effect only.
+  useMatchStats(store.matchId)
 
   // Track whether WS session has started so we only connect once per match
   // (not on every analyzing ↔ live transition).
@@ -50,8 +56,22 @@ export default function MatchPage() {
 
   const handleUploadComplete = (result: { videoId: string; videoUrl: string }) => {
     setVideoUrl(result.videoUrl)
+    setNextUploadQuarter(undefined)
     setStep('analyzing')
+    // Refresh quarter status after this upload finalises
+    if (store.matchId) fetchUploadedQuarters(store.matchId)
   }
+
+  const fetchUploadedQuarters = useCallback(async (matchId: string) => {
+    try {
+      const res = await axios.get<{ uploaded: number[] }>(
+        `${import.meta.env.VITE_API_URL}/api/upload/quarters/${matchId}`
+      )
+      setUploadedQuarters(res.data.uploaded ?? [])
+    } catch {
+      // non-fatal — quarter badges just won't show
+    }
+  }, [])
 
   const handleAnalysisComplete = useCallback(async () => {
     setStep('live')
@@ -59,17 +79,18 @@ export default function MatchPage() {
     const { matchId } = useMatchStore.getState()
     if (!matchId) { setOverlayLoading(false); return }
     try {
-      const res = await axios.get<FrameBboxEntry[]>(
-        `${import.meta.env.VITE_API_URL}/api/upload/frames/${matchId}`
-      )
-      if (Array.isArray(res.data) && res.data.length > 0) {
-        setFrameData(res.data)
+      const [framesRes] = await Promise.allSettled([
+        axios.get<FrameBboxEntry[]>(`${import.meta.env.VITE_API_URL}/api/upload/frames/${matchId}`),
+        fetchUploadedQuarters(matchId),
+      ])
+      if (framesRes.status === 'fulfilled' && Array.isArray(framesRes.value.data) && framesRes.value.data.length > 0) {
+        setFrameData(framesRes.value.data)
       }
     } catch {
-      // Expected in dev mode or when backend is unavailable — WS fallback stays active
+      // Expected in dev mode or when backend is unavailable
     }
     setOverlayLoading(false)
-  }, [])
+  }, [fetchUploadedQuarters])
 
   const goToVideo = useCallback(() => {
     setStep('analyzing')
@@ -108,7 +129,10 @@ export default function MatchPage() {
       )}
 
       {step === 'upload' && store.matchId && (
-        <VideoUpload onUploadComplete={handleUploadComplete} />
+        <VideoUpload
+          onUploadComplete={handleUploadComplete}
+          initialQuarter={nextUploadQuarter}
+        />
       )}
 
       {step === 'analyzing' && videoUrl && store.matchId && (
@@ -161,9 +185,9 @@ export default function MatchPage() {
 
       {step === 'live' && (
         <div className="space-y-6">
-          {/* Back to video nav */}
-          {videoUrl && (
-            <div className="flex justify-start">
+          {/* Nav bar: back to video | quarter badges | lanjut/replace */}
+          <div className="flex items-center gap-3 flex-wrap">
+            {videoUrl && (
               <button
                 onClick={goToVideo}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-surface border border-gray-200 text-text-secondary text-xs font-bold rounded-lg hover:border-primary hover:text-primary transition-smooth"
@@ -171,8 +195,32 @@ export default function MatchPage() {
                 <ChevronLeft size={13} />
                 Video &amp; Analisis
               </button>
+            )}
+
+            {/* Quarter status badges — shows which quarters already have data */}
+            <div className="flex items-center gap-1.5 ml-auto">
+              {([1, 2, 3, 4] as const).map((q) => {
+                const done = uploadedQuarters.includes(q)
+                const active = store.isLive && store.quarter === q
+                return (
+                  <button
+                    key={q}
+                    title={done ? `Q${q} selesai — klik untuk replace` : `Upload Q${q}`}
+                    onClick={() => { setNextUploadQuarter(q); setStep('upload') }}
+                    className={`px-2.5 py-1 rounded text-xs font-bold border transition-all ${
+                      active
+                        ? 'border-amber-400 bg-amber-50 text-amber-600 animate-pulse'
+                        : done
+                          ? 'border-success bg-success/10 text-success hover:bg-danger/10 hover:border-danger hover:text-danger'
+                          : 'border-gray-200 text-text-secondary hover:border-primary hover:text-primary'
+                    }`}
+                  >
+                    {done ? `Q${q} ✓` : active ? `Q${q} •` : `Q${q}`}
+                  </button>
+                )
+              })}
             </div>
-          )}
+          </div>
 
           {/* Match Header */}
           <MatchHeader

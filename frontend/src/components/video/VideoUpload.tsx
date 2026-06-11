@@ -3,11 +3,16 @@ import { Upload, AlertCircle } from 'lucide-react'
 import { useVideoUpload } from '../../hooks/useVideoUpload'
 
 interface VideoUploadProps {
-  onUploadComplete: (result: { videoId: string; videoUrl: string }) => void
+  onUploadComplete:  (result: { videoId: string; videoUrl: string }) => void
+  initialQuarter?:   number   // 1–4: pre-select a quarter clip (e.g. when continuing from live view)
 }
 
-export default function VideoUpload({ onUploadComplete }: VideoUploadProps) {
-  const [dragActive, setDragActive] = useState(false)
+export default function VideoUpload({ onUploadComplete, initialQuarter }: VideoUploadProps) {
+  const [dragActive, setDragActive]     = useState(false)
+  const [videoMode, setVideoMode]       = useState<'full' | 'clip'>(initialQuarter ? 'clip' : 'full')
+  const [clipQuarter, setClipQuarter]   = useState<1 | 2 | 3 | 4>(
+    (Math.min(Math.max(initialQuarter ?? 1, 1), 4)) as 1 | 2 | 3 | 4
+  )
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { uploadProgress, uploadVideo } = useVideoUpload()
 
@@ -42,7 +47,8 @@ export default function VideoUpload({ onUploadComplete }: VideoUploadProps) {
     }
 
     try {
-      const result = await uploadVideo(file)
+      const quarter = videoMode === 'clip' ? clipQuarter : undefined
+      const result  = await uploadVideo(file, quarter)
       const videoUrl = URL.createObjectURL(file)
       onUploadComplete({ videoId: result.video_id, videoUrl })
     } catch (error) {
@@ -57,6 +63,65 @@ export default function VideoUpload({ onUploadComplete }: VideoUploadProps) {
   return (
     <div className="bg-surface rounded-lg p-8 shadow-sm">
       <h2 className="font-display text-2xl font-bold mb-6">Upload Video Pertandingan</h2>
+
+      {/* Quarter / video-type selector */}
+      {!isSuccess && (
+        <div className="mb-6">
+          <p className="text-sm font-bold text-text-secondary uppercase tracking-wide mb-3">
+            Jenis Video
+          </p>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => setVideoMode('full')}
+              className={`flex-1 py-2.5 px-4 rounded-lg border-2 text-sm font-bold transition-all ${
+                videoMode === 'full'
+                  ? 'border-primary bg-primary/5 text-primary'
+                  : 'border-gray-200 text-text-secondary hover:border-gray-300'
+              }`}
+            >
+              Full Game
+              <span className="block text-xs font-normal opacity-70 mt-0.5">
+                Auto-deteksi Q1–Q4 dari durasi video
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setVideoMode('clip')}
+              className={`flex-1 py-2.5 px-4 rounded-lg border-2 text-sm font-bold transition-all ${
+                videoMode === 'clip'
+                  ? 'border-primary bg-primary/5 text-primary'
+                  : 'border-gray-200 text-text-secondary hover:border-gray-300'
+              }`}
+            >
+              Klip Per Quarter
+              <span className="block text-xs font-normal opacity-70 mt-0.5">
+                Upload satu quarter saja
+              </span>
+            </button>
+          </div>
+
+          {/* Quarter picker — shown only in clip mode */}
+          {videoMode === 'clip' && (
+            <div className="mt-3 flex gap-2">
+              {([1, 2, 3, 4] as const).map((q) => (
+                <button
+                  key={q}
+                  type="button"
+                  onClick={() => setClipQuarter(q)}
+                  className={`flex-1 py-2 rounded-lg border-2 text-sm font-bold transition-all ${
+                    clipQuarter === q
+                      ? 'border-primary bg-primary text-white'
+                      : 'border-gray-200 text-text-secondary hover:border-primary hover:text-primary'
+                  }`}
+                >
+                  Q{q}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Drag & Drop Area */}
       {!isSuccess && (

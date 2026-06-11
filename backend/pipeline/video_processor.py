@@ -284,14 +284,18 @@ class VideoProcessor:
 
     async def process_video(
         self,
-        video_path: str,
-        match_id:   str,
-        roster:     Optional[dict] = None,
-        ws_manager                 = None,
+        video_path:    str,
+        match_id:      str,
+        roster:        Optional[dict] = None,
+        ws_manager                    = None,
+        start_quarter: int            = 1,
     ) -> None:
         """
         Process video end-to-end as an async coroutine (FastAPI BackgroundTask).
         Emits WebSocket updates every STATS_UPDATE_INTERVAL frames.
+
+        start_quarter: 1–4.  Use >1 when uploading a single-quarter clip so that
+        stats, events, and the scoreboard are attributed to the correct quarter.
         """
         self._roster          = roster or {}
         self._status          = "processing"
@@ -299,6 +303,8 @@ class VideoProcessor:
         self._stop_signal.clear()
         self._video_path      = str(video_path)
         self._frame_store     = []
+        self._start_quarter   = max(1, min(4, start_quarter))   # kept for _finalize merge
+        self._current_quarter = self._start_quarter
 
         if self._stats is None:
             self._init_pipeline(self._models_path)
@@ -388,6 +394,7 @@ class VideoProcessor:
                             _fmt_wall_clock(),
                         )
                     await self._push_redis(match_id, msg)
+                    await self._set_redis_stats(match_id, stats)
                     if ws_manager:
                         try:
                             await ws_manager.broadcast(match_id, msg)
@@ -576,6 +583,28 @@ class VideoProcessor:
                 logger.debug("Action frame %d: %s", frame_id, e)
 
         # ── 7. Event engine ───────────────────────────────────────────────
+        # Ensure event engine always has hoop pixel references for scoring.
+        # When best-object-basketball.pt doesn't detect the hoop this frame
+        # (camera angle, occlusion) AND court is calibrated, synthesise hoop
+        # pixel positions from FIBA coordinates via court_to_pixel() so the
+        # pixel-space FG zone check never silently blocks scoring.
+        if (
+            self._court
+            and not frame_data.get("detections", {}).get("hoops")
+            and frame_data.get("court", {}).get("is_calibrated")
+        ):
+            FIBA_HOOPS_M = [[1.575, 7.5], [26.425, 7.5]]
+            synthetic_hoops = []
+            for court_pos in FIBA_HOOPS_M:
+                try:
+                    px = self._court.court_to_pixel(court_pos)
+                    if px:
+                        synthetic_hoops.append({"center": list(px), "confidence": 0.0})
+                except Exception:
+                    pass
+            if synthetic_hoops:
+                frame_data.setdefault("detections", {})["hoops"] = synthetic_hoops
+
         if self._events_engine:
             try:
                 events = self._events_engine.process(frame_data)
@@ -883,6 +912,97 @@ class VideoProcessor:
         except Exception as e:
             logger.debug("Redis publish error: %s", e)
 
+    async def _set_redis_stats(self, match_id: str, stats: dict, ttl: int = 3600) -> None:
+        """Write stats snapshot to Redis key stats:{match_id} for REST polling (no-op if redis absent)."""
+        if self._redis is None:
+            return
+        try:
+            payload = json.dumps(stats, default=str)
+            result = self._redis.set(f"stats:{match_id}", payload, ex=ttl)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as e:
+            logger.debug("Redis stats set error: %s", e)
+
+    async def _merge_all_quarters(self, match_id: str) -> dict:
+        """
+        Read per-quarter Redis keys stats:{match_id}:q1..q4 and merge into one
+        combined stats dict.  Player data is merged by (jersey_number, team) so
+        that track_id restarts between quarter uploads don't create duplicate rows.
+        """
+        SUMABLE = (
+            "pts", "fgm", "fga", "three_pm", "three_pa", "ftm", "fta",
+            "oreb", "dreb", "reb", "ast", "stl", "blk", "tov", "pf", "min",
+        )
+        by_player: dict = {}   # (jersey_number, team) -> merged player dict
+        latest_blob: dict = {}
+
+        for q in range(1, 5):
+            try:
+                raw = self._redis.get(f"stats:{match_id}:q{q}")
+                if asyncio.iscoroutine(raw):
+                    raw = await raw
+                if not raw:
+                    continue
+                blob = json.loads(raw)
+                latest_blob = blob
+                for pdata in (blob.get("player_stats") or {}).values():
+                    jn   = pdata.get("jersey_number", 0)
+                    team = pdata.get("team", "")
+                    key  = (jn, team)
+                    if key not in by_player:
+                        import copy as _copy
+                        entry = _copy.deepcopy(pdata)
+                        by_player[key] = entry
+                    else:
+                        entry = by_player[key]
+                        for field in SUMABLE:
+                            val = (pdata.get("total_stats") or {}).get(field, 0)
+                            if isinstance(val, (int, float)):
+                                entry.setdefault("total_stats", {})[field] = (
+                                    entry.get("total_stats", {}).get(field, 0) + val
+                                )
+            except Exception as exc:
+                logger.debug("Merge q%d error: %s", q, exc)
+
+        if not by_player:
+            return latest_blob or {}
+
+        # Recompute derived per-player fields
+        for entry in by_player.values():
+            ts  = entry.get("total_stats", {})
+            fgm = ts.get("fgm", 0);  fga = ts.get("fga", 0)
+            ts["fg_pct"] = round(fgm / fga, 3) if fga > 0 else 0.0
+            pts = ts.get("pts", 0); reb = ts.get("reb", 0)
+            ast = ts.get("ast", 0); stl = ts.get("stl", 0)
+            blk = ts.get("blk", 0); tov = ts.get("tov", 0)
+            ts["eff"] = (pts + reb + ast + stl + blk) - (fga - fgm + tov)
+
+        player_stats_out = {str(i): v for i, v in enumerate(by_player.values())}
+
+        # Re-derive team_stats from merged players
+        TEAM_FIELDS = ("pts", "reb", "ast", "stl", "blk", "tov", "fgm", "fga")
+        team_out = {
+            "A": {f: 0 for f in TEAM_FIELDS + ("fg_pct",)},
+            "B": {f: 0 for f in TEAM_FIELDS + ("fg_pct",)},
+        }
+        for pdata in by_player.values():
+            t_key = pdata.get("team", "")
+            if t_key not in ("A", "B"):
+                continue
+            ts = pdata.get("total_stats", {})
+            for f in TEAM_FIELDS:
+                team_out[t_key][f] += ts.get(f, 0)
+        for t in team_out.values():
+            t["fg_pct"] = round(t["fgm"] / t["fga"], 3) if t["fga"] > 0 else 0.0
+
+        return {
+            **{k: v for k, v in latest_blob.items()
+               if k not in ("player_stats", "team_stats")},
+            "player_stats": player_stats_out,
+            "team_stats":   team_out,
+        }
+
     async def _finalize(self, match_id: str) -> None:
         """Update MongoDB match status; push final stats; write output files."""
 
@@ -943,13 +1063,29 @@ class VideoProcessor:
             except Exception as e:
                 logger.warning("MongoDB finalize error: %s", e)
 
-        # ── 5. Redis broadcast (always runs) ───────────────────────────────────
+        # ── 5. Redis broadcast + final stats key (always runs) ────────────────
         if self._redis is not None and self._stats is not None:
             try:
+                final_stats = self._stats.get_live_stats()
+
+                # Write per-quarter key (7-day TTL) — survives subsequent uploads.
+                # This is the source of truth for "which quarters are done" and
+                # enables cross-quarter stat merging without losing Q1 when Q2 runs.
+                q_key = f"stats:{match_id}:q{self._start_quarter}"
+                result = self._redis.set(q_key, json.dumps(final_stats, default=str),
+                                         ex=86400 * 7)
+                if asyncio.iscoroutine(result):
+                    await result
+                logger.info("Quarter stats saved: key=%s", q_key)
+
+                # Merge all uploaded quarters → combined key for /api/stats/live
+                merged_stats = await self._merge_all_quarters(match_id)
+                await self._set_redis_stats(match_id, merged_stats, ttl=86400)
+
                 await self._push_redis(match_id, {
                     "type":              "processing_complete",
                     "status":            self._status,
-                    "stats":             self._stats.get_live_stats(),
+                    "stats":             merged_stats,
                     "output_video_path": self._output_video_path or None,
                     "output_csv_path":   self._output_csv_path   or None,
                 })
@@ -1141,6 +1277,7 @@ class VideoProcessor:
             (self._tracker,       "reset"),
             (self._events_engine, "reset"),
             (self._action,        "reset"),
+            (self._jersey,        "reset"),   # clears votes + team cache; IDs restart
         ]:
             if component and hasattr(component, method):
                 try:
@@ -1172,6 +1309,10 @@ class VideoProcessor:
         return f"{int(remaining_s // 60):02d}:{int(remaining_s % 60):02d}"
 
     # ── Public helpers ────────────────────────────────────────────────────────
+
+    @property
+    def current_quarter(self) -> int:
+        return self._current_quarter
 
     def get_progress(self) -> dict:
         return {

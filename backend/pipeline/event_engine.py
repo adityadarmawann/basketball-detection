@@ -327,8 +327,10 @@ class EventEngine:
 
         Scoring condition (both must be true):
           1. Zone entry: ball transitions from outside → inside the hoop zone.
-             Uses best_object_basketball.pt hoop detections; falls back to last
-             cached hoop position when hoop leaves frame.
+             Always checked in pixel space — the ball is airborne at shot time,
+             so floor-plane homography introduces perspective error at hoop height
+             (~3 m above floor).  Pixel-space is accurate: ball near hoop bbox
+             in the image = ball physically near the hoop.
           2. From above: ball's pixel-y was above the hoop's pixel-y (by at least
              FG_ABOVE_MARGIN_PX) at some point in the last FG_ABOVE_WINDOW_F frames.
              This is the broadcast-camera equivalent of "ball came down through ring"
@@ -339,33 +341,35 @@ class EventEngine:
         """
         events = []
 
-        # ── 1. Zone detection in the best available coordinate space ─────
-        ball_pos = self._ball_pos(ball, is_court)
-        if ball_pos is None:
+        # ── 1. Zone detection — always pixel space ────────────────────────
+        # court_pos from homography is unreliable for an airborne ball: the
+        # floor-plane projection displaces the ball by 0.5–2 m at hoop height
+        # depending on camera angle, making the 0.45 m FIBA threshold fail.
+        ball_px = ball.get("center") if ball else None
+        if ball_px is None:
             self._ball_in_hoop_prev = False
             return events
 
-        nearest_d, nearest_h = self._nearest_hoop(
-            ball_pos, hoops, is_court, self._last_hoops_px
-        )
-        if nearest_h is None:
+        # _nearest_hoop_px_center uses self._last_hoops_px (already updated
+        # in process() before this call, so it reflects the current frame).
+        hoop_ref_px = self._nearest_hoop_px_center(ball_px)
+        if hoop_ref_px is None:
+            # No hoop reference yet — cannot confirm zone entry
             self._ball_in_hoop_prev = False
             return events
 
-        threshold  = FG_HOOP_RADIUS_M if is_court else FG_HOOP_RADIUS_PX
-        in_zone    = nearest_d < threshold
+        in_zone    = _dist(ball_px, hoop_ref_px) < FG_HOOP_RADIUS_PX
         zone_entry = in_zone and not self._ball_in_hoop_prev
         self._ball_in_hoop_prev = in_zone
 
         if not zone_entry:
             return events
 
-        # ── 2. "From above" check — always in pixel space ────────────────
+        # ── 2. "From above" check — pixel space ──────────────────────────
         # Pixel y increases downward; "above hoop" means smaller y value.
-        # If we have no hoop pixel position at all, allow scoring (safe fallback).
-        hoop_px = self._nearest_hoop_px_center(ball.get("center") if ball else None)
-        if hoop_px is not None and self._ball_px_hist:
-            hoop_y = float(hoop_px[1])
+        # Skip check when ball history is empty (first frames) — allow scoring.
+        if self._ball_px_hist:
+            hoop_y = float(hoop_ref_px[1])
             ball_was_above = any(
                 float(pos[1]) < hoop_y - FG_ABOVE_MARGIN_PX
                 for pos in self._ball_px_hist
@@ -383,6 +387,7 @@ class EventEngine:
         # ── 3. Identify shooter ──────────────────────────────────────────
         # Prefer the last player the action model flagged as shooter;
         # fall back to whoever is closest to the ball right now.
+        ball_pos = self._ball_pos(ball, is_court)   # court or pixel — for closest() search
         shooter = None
         if self._last_shooter_id is not None:
             shooter = next(
@@ -390,7 +395,11 @@ class EventEngine:
                 None,
             )
         if shooter is None:
-            shooter = self._closest_to(ball_pos, players, is_court)
+            shooter = self._closest_to(
+                ball_pos if ball_pos is not None else ball_px,
+                players,
+                is_court and ball_pos is not None,
+            )
         if shooter is None:
             return events
 

@@ -20,7 +20,7 @@ export const useVideoUpload = () => {
     message: '',
   })
 
-  const uploadVideo = async (file: File) => {
+  const uploadVideo = async (file: File, quarter?: number) => {
     setUploadProgress({ progress: 0, status: 'uploading', message: 'Uploading...' })
 
     try {
@@ -33,6 +33,11 @@ export const useVideoUpload = () => {
         const rosterMap: Record<string, { name: string; team: string }> = {}
         roster.forEach((p) => { rosterMap[String(p.jerseyNumber)] = { name: p.name, team: p.team } })
         formData.append('roster', JSON.stringify(rosterMap))
+      }
+
+      // quarter: 1–4 for single-quarter clips; omit for full-game video
+      if (quarter && quarter >= 1 && quarter <= 4) {
+        formData.append('quarter', String(quarter))
       }
 
       const response = await axios.post(

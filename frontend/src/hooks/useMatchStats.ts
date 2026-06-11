@@ -125,7 +125,7 @@ function normalizePlayerStats(playerId: number, raw: RawPlayerStats): PlayerStat
     playerId,
     name:           raw.name          ?? `Player_${playerId}`,
     jerseyNumber:   raw.jersey_number ?? 0,
-    team:           (raw.team as 'A' | 'B') ?? 'A',
+    team:           ((raw.team || 'A') as 'A' | 'B'),
     minutes:        ts.min            ?? 0,
     pts,
     twoPointMade,
@@ -175,7 +175,8 @@ function normalizeMpiStats(raw: RawMpiPlayer): MpiMetrics {
 
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
 
-const POLL_INTERVAL_MS = 3_000
+const POLL_INTERVAL_MS      = 3_000   // when WS is not active
+const POLL_INTERVAL_LIVE_MS = 10_000  // when WS is active (safety net)
 
 function emptyTeamStats(): TeamStats {
   return { pts: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0, fgm: 0, fga: 0, fg_pct: 0 }
@@ -196,6 +197,7 @@ export function useMatchStats(
   const isLive      = useMatchStore((s) => s.isLive)
   const setMpi      = useMatchStore((s) => s.setMpi)
   const setStats    = useMatchStore((s) => s.setStats)
+  const setScore    = useMatchStore((s) => s.setScore)
 
   // ── API-fetched state (persisted / quarter-filtered data) ────────────────
   const [isLoading, setIsLoading] = useState(false)
@@ -219,13 +221,17 @@ export function useMatchStats(
     const mpiUrl = `${API_BASE}/api/mpi/team?match_id=${encodeURIComponent(matchId)}`
 
     const [statsResult, mpiResult] = await Promise.allSettled([
-      axios.get<{ player_stats?: Record<string, RawPlayerStats> }>(statsUrl),
+      axios.get<{
+        player_stats?: Record<string, RawPlayerStats>
+        team_stats?:   Record<string, { pts?: number }>
+      }>(statsUrl),
       axios.get<{ mpi?: RawMpiPlayer[] }>(mpiUrl),
     ])
 
     // ── Stats: nested backend format → flat camelCase PlayerStats ────────
     if (statsResult.status === 'fulfilled') {
-      const raw = statsResult.value.data.player_stats ?? {}
+      const data = statsResult.value.data
+      const raw  = data.player_stats ?? {}
       const normalised: Record<number, PlayerStats> = {}
       for (const [k, v] of Object.entries(raw)) {
         const id = Number(k)
@@ -233,6 +239,17 @@ export function useMatchStats(
         normalised[id] = normalizePlayerStats(id, v)
       }
       if (Object.keys(normalised).length > 0) setStats(normalised)
+
+      // Sync scoreboard: REST team_stats is authoritative — OCR may have
+      // confirmed team AFTER the last WS broadcast, leaving store.teamA.score
+      // stale at 0 while pts are already counted in the backend.
+      const ts   = data.team_stats ?? {}
+      const ptsA = ts.A?.pts ?? 0
+      const ptsB = ts.B?.pts ?? 0
+      const cur  = useMatchStore.getState()
+      if (ptsA > cur.teamA.score || ptsB > cur.teamB.score) {
+        setScore(Math.max(ptsA, cur.teamA.score), Math.max(ptsB, cur.teamB.score))
+      }
     } else {
       // Non-fatal — fall through to store data
       const msg =
@@ -289,12 +306,13 @@ export function useMatchStats(
       }
     }
 
-    if (isLive) {
-      stopPolling()  // WS active — no need to poll
-    } else {
-      stopPolling()  // clear any previous interval before starting a new one
-      pollingRef.current = window.setInterval(fetchStats, POLL_INTERVAL_MS)
-    }
+    // Poll even when WS is live (slower cadence) so the stats table stays
+    // accurate between game events — e.g. on initial load before any event fires.
+    stopPolling()
+    pollingRef.current = window.setInterval(
+      fetchStats,
+      isLive ? POLL_INTERVAL_LIVE_MS : POLL_INTERVAL_MS,
+    )
 
     return stopPolling
   }, [isLive, matchId, fetchStats])

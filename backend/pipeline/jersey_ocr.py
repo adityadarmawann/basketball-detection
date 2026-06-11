@@ -30,13 +30,13 @@ logger = logging.getLogger(__name__)
 MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "jersey_no.pt"
 
-VOTE_THRESHOLD    = 3     # frames required to confirm a jersey number (3 = faster, still reliable)
+VOTE_THRESHOLD    = 3     # frames required to confirm a jersey number
 MAX_VOTE_HISTORY  = 30   # rolling window per track_id
-CONF_THRESHOLD    = 0.40 # jersey_no.pt detection confidence
-OCR_HEIGHT_PX     = 112  # resize crop to this height for OCR
-OCR_MIN_SCORE     = 0.50 # minimum PaddleOCR confidence to accept a result
-BLUR_THRESHOLD    = 80.0 # Laplacian variance below this = too blurry for OCR (25fps tuned)
-                         # Raise if too many frames skipped; lower if blurry frames still pass
+CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
+OCR_HEIGHT_PX     = 128   # resize crop to this height for OCR (was 112; better for 2-digit far)
+OCR_MIN_SCORE     = 0.45  # minimum PaddleOCR confidence to accept (was 0.50; voting absorbs noise)
+BLUR_THRESHOLD    = 55.0  # Laplacian variance below this = too blurry for OCR (was 80; accept jog)
+                          # Raise if too many frames skipped; lower if blurry frames still pass
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +84,29 @@ def _is_too_blurry(crop: np.ndarray, threshold: float = BLUR_THRESHOLD) -> bool:
 # ---------------------------------------------------------------------------
 # Preprocessing helpers
 # ---------------------------------------------------------------------------
+
+def _otsu_variant(crop: np.ndarray) -> np.ndarray:
+    """
+    Binary (Otsu) version of the crop — effective for solid-colour jerseys where
+    CLAHE-enhanced grayscale retains too much background gradient.
+    Returns a 3-channel BGR image padded to match _preprocess_for_ocr output size.
+    """
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop.copy()
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    h, w = binary.shape[:2]
+    if h == 0 or w == 0:
+        return np.zeros((OCR_HEIGHT_PX, OCR_HEIGHT_PX, 3), dtype=np.uint8)
+
+    scale  = OCR_HEIGHT_PX / h
+    new_w  = max(48, int(w * scale))
+    binary = cv2.resize(binary, (new_w, OCR_HEIGHT_PX), interpolation=cv2.INTER_NEAREST)
+
+    pad    = max(8, new_w // 4)
+    binary = cv2.copyMakeBorder(binary, 6, 6, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
 
 def _preprocess_for_ocr(crop: np.ndarray) -> np.ndarray:
     """
@@ -284,16 +307,50 @@ class JerseyOCR:
 
         for player in tracked_players:
             track_id = player["track_id"]
-            x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
 
-            # Clamp to frame
-            x1c = max(0, x1);   y1c = max(0, y1)
+            # ── Fast path: jersey already confirmed AND team already cached ──
+            # Both are stable — skip the expensive YOLO + OCR pipeline entirely.
+            already_confirmed = (
+                tracker is not None
+                and tracker.get_jersey_number(track_id) is not None
+            )
+            if already_confirmed and track_id in self._track_team:
+                team = self._track_team[track_id]
+                results.append({
+                    "track_id":       track_id,
+                    "jersey_number":  tracker.get_jersey_number(track_id),
+                    "confidence":     self._vote_confidence(track_id),
+                    "team":           team,
+                    "team_color_hsv": self._team_colors.get(team, []),
+                    "blur_skipped":   False,
+                })
+                continue
+
+            # ── Crop extraction (needed for team classify or OCR) ─────────
+            x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
+            x1c = max(0, x1);    y1c = max(0, y1)
             x2c = min(w_frame, x2); y2c = min(h_frame, y2)
             if x2c <= x1c or y2c <= y1c:
                 results.append(self._empty_result(track_id))
                 continue
 
             player_crop = frame[y1c:y2c, x1c:x2c]
+
+            # ── Semi-fast path: jersey confirmed, only need team colour ────
+            if already_confirmed:
+                team = self._classify_team(player_crop, track_id)
+                team_hsv = self._team_colors.get(team, []) if team else []
+                results.append({
+                    "track_id":       track_id,
+                    "jersey_number":  tracker.get_jersey_number(track_id),
+                    "confidence":     self._vote_confidence(track_id),
+                    "team":           team,
+                    "team_color_hsv": team_hsv,
+                    "blur_skipped":   False,
+                })
+                continue
+
+            # ── Full OCR pipeline for unconfirmed players ─────────────────
 
             # Layer 1 — locate number bbox
             num_bbox = self._detect_number_bbox(player_crop)
@@ -307,9 +364,8 @@ class JerseyOCR:
                 results.append(self._empty_result(track_id))
                 continue
 
-            # Blur guard — skip OCR on motion-blurred crops (25fps tuned)
-            # Blurry frames: candidate stays None, vote history unchanged,
-            # confirmed from previous sharp frames is still returned.
+            # Blur guard — skip OCR on motion-blurred crops (25fps tuned).
+            # Blurry: vote history unchanged; previous confirmed still returned.
             if _is_too_blurry(number_crop):
                 logger.debug(
                     "track %d: blur score=%.1f < %.1f — OCR skipped",
@@ -407,10 +463,12 @@ class JerseyOCR:
             return None
 
         processed = _preprocess_for_ocr(number_crop)
+        otsu      = _otsu_variant(number_crop)
 
-        # Try both normal and inverted (handles dark-on-light & light-on-dark jerseys)
+        # Three variants: CLAHE-enhanced, its inverse, and Otsu binary.
+        # CLAHE handles gradients; Otsu cuts through solid-colour jersey backgrounds.
         candidates: list[tuple[int, float]] = []
-        for img in [processed, cv2.bitwise_not(processed)]:
+        for img in [processed, cv2.bitwise_not(processed), otsu]:
             try:
                 results = self._ocr.predict(img)
             except Exception as exc:
@@ -452,12 +510,18 @@ class JerseyOCR:
         logger.debug("OCR best: jersey %d (score=%.2f)", best_number, best_score)
         return best_number
 
+    # Common OCR character confusions for jersey number context.
+    # Applied before digit extraction so "O3" → "03", "S7" → "57", etc.
+    _OCR_CHAR_MAP = str.maketrans("OIlSZ", "01152")
+
     @staticmethod
     def _parse_jersey_number(text: str) -> Optional[int]:
         """Extract first integer 0-99 from OCR text. Returns None if invalid."""
         if not text:
             return None
-        digits = re.sub(r"[^0-9]", "", text.strip())
+        # Normalise: uppercase, fix common OCR confusions, then strip non-digits
+        clean  = text.strip().upper().translate(JerseyOCR._OCR_CHAR_MAP)
+        digits = re.sub(r"[^0-9]", "", clean)
         if not digits:
             return None
         try:
@@ -498,6 +562,20 @@ class JerseyOCR:
         counter = Counter(self._votes[track_id])
         top_count = counter.most_common(1)[0][1]
         return top_count / len(self._votes[track_id])
+
+    def reset(self) -> None:
+        """
+        Full reset at quarter boundaries.
+
+        Clears vote history AND per-track team cache so that newly assigned
+        track IDs (ByteTrack re-creates its ID counter on reset) do not
+        inherit stale data from the previous quarter.
+        Team colour references (_team_colors) are kept — they are calibrated
+        once per game and remain valid across quarters.
+        """
+        self._votes.clear()
+        self._track_team.clear()
+        logger.info("JerseyOCR reset (quarter boundary)")
 
     def reset_votes(self, track_id: Optional[int] = None) -> None:
         """Clear voting history for one track or all tracks."""

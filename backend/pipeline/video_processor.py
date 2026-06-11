@@ -798,7 +798,18 @@ class VideoProcessor:
                     "cp": ball_raw.get("court_pos"),
                 }
 
-        return {"ts": timestamp_ms, "p": players_out, "bl": ball_out}
+        score = (
+            self._events_engine.score
+            if self._events_engine
+            else {"team_a": 0, "team_b": 0}
+        )
+        return {
+            "ts": timestamp_ms,
+            "p":  players_out,
+            "bl": ball_out,
+            "sc": [score.get("team_a", 0), score.get("team_b", 0)],
+            "q":  self._current_quarter,
+        }
 
     # ── WebSocket message builder ─────────────────────────────────────────────
 
@@ -1272,6 +1283,66 @@ class VideoProcessor:
             C_B    = ( 22, 115, 249)   # Team B — orange #F97316
             C_UNK  = (175, 163, 156)   # unknown — gray  #9CA3AF
             C_BALL = ( 21, 204, 250)   # ball — yellow   #FACC15
+            C_TEXT = (255, 255, 255)
+            C_DARK = (  0,   0,   0)
+
+            FONT      = cv2.FONT_HERSHEY_SIMPLEX
+            FONT_BOLD = cv2.FONT_HERSHEY_DUPLEX
+
+            # Team names from match roster metadata (fall back to "TIM A / B")
+            name_a = "TIM A"
+            name_b = "TIM B"
+
+            def _draw_label_above(img, x1, y1, x2, text, color):
+                """Filled pill label above bbox top-left."""
+                scale, thick = 0.55, 1
+                (tw, th), _ = cv2.getTextSize(text, FONT, scale, thick)
+                pad = 4
+                rx1, ry1 = x1, max(0, y1 - th - pad * 2)
+                rx2, ry2 = min(x1 + tw + pad * 2, img.shape[1] - 1), y1
+                cv2.rectangle(img, (rx1, ry1), (rx2, ry2), color, -1)
+                cv2.putText(img, text, (rx1 + pad, ry2 - pad),
+                            FONT, scale, C_TEXT, thick, cv2.LINE_AA)
+
+            def _draw_label_below(img, x1, y2, x2, text, color):
+                """Filled pill label below bbox bottom-left."""
+                scale, thick = 0.45, 1
+                (tw, th), _ = cv2.getTextSize(text, FONT, scale, thick)
+                pad = 3
+                rx1, ry1 = x1, y2
+                rx2, ry2 = min(x1 + tw + pad * 2, img.shape[1] - 1), min(y2 + th + pad * 2, img.shape[0] - 1)
+                cv2.rectangle(img, (rx1, ry1), (rx2, ry2), color, -1)
+                cv2.putText(img, text, (rx1 + pad, ry2 - pad),
+                            FONT, scale, C_TEXT, thick, cv2.LINE_AA)
+
+            def _score_banner(img, score_a, score_b, quarter, w, h):
+                """Semi-transparent scoreboard bar at the top of the frame."""
+                bar_h = 36
+                overlay = img.copy()
+                cv2.rectangle(overlay, (0, 0), (w, bar_h), (20, 20, 20), -1)
+                cv2.addWeighted(overlay, 0.65, img, 0.35, 0, img)
+
+                q_text  = f"Q{quarter}"
+                sc_text = f"{score_a}  :  {score_b}"
+
+                # Quarter pill
+                (qw, qh), _ = cv2.getTextSize(q_text, FONT_BOLD, 0.65, 2)
+                cv2.putText(img, q_text, (8, bar_h - 8),
+                            FONT_BOLD, 0.65, (80, 200, 255), 2, cv2.LINE_AA)
+
+                # Score centred
+                (sw, sh), _ = cv2.getTextSize(sc_text, FONT_BOLD, 0.75, 2)
+                cx = (w - sw) // 2
+                cv2.putText(img, sc_text, (cx, bar_h - 7),
+                            FONT_BOLD, 0.75, C_TEXT, 2, cv2.LINE_AA)
+
+                # Team name labels flanking the score
+                margin = 8
+                (aw, _), _ = cv2.getTextSize(name_a, FONT, 0.45, 1)
+                cv2.putText(img, name_a, (cx - aw - margin, bar_h - 9),
+                            FONT, 0.45, C_A, 1, cv2.LINE_AA)
+                cv2.putText(img, name_b, (cx + sw + margin, bar_h - 9),
+                            FONT, 0.45, C_B, 1, cv2.LINE_AA)
 
             frame_idx = 0
             while True:
@@ -1291,6 +1362,7 @@ class VideoProcessor:
                 if abs(ts_list[idx] - ts_ms) < 2000:
                     snap = self._frame_store[idx]
 
+                    # ── Players ───────────────────────────────────────────
                     for p in snap.get("p", []):
                         b = p.get("b", [])
                         if len(b) != 4:
@@ -1301,14 +1373,35 @@ class VideoProcessor:
                             continue
                         t     = p.get("t", "")
                         color = C_A if t == "A" else C_B if t == "B" else C_UNK
-                        label = f"#{p['j']}" if p.get("j") is not None else f"ID:{p['i']}"
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
-                        cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 8, y1), color, -1)
-                        cv2.putText(frame, label, (x1 + 4, y1 - 4),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2,
-                                    cv2.LINE_AA)
 
+                        # Bbox
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+                        # Jersey + team label above bbox
+                        jersey = p.get("j")
+                        id_str = f"#{jersey}" if jersey is not None else f"T{p['i']}"
+                        team_str = f" [{t}]" if t else ""
+                        _draw_label_above(frame, x1, y1, x2, id_str + team_str, color)
+
+                        # Action label below bbox (only when non-trivial)
+                        action = (p.get("a") or "").upper()
+                        if action and action not in ("STAND", ""):
+                            action_color = (0, 200, 80) if action == "SHOOT" else (
+                                (200, 150, 0) if action in ("PASS", "CATCH") else
+                                (100, 100, 200)
+                            )
+                            _draw_label_below(frame, x1, y2, x2, action, action_color)
+
+                        # Speed below action (only >0.5 km/h to avoid static noise)
+                        spd = float(p.get("s") or 0.0)
+                        if spd > 0.5:
+                            spd_str = f"{spd:.1f} km/h"
+                            spd_y   = y2 + 18 if action and action not in ("STAND", "") else y2
+                            cv2.putText(frame, spd_str,
+                                        (x1 + 2, min(spd_y + 14, height - 4)),
+                                        FONT, 0.38, color, 1, cv2.LINE_AA)
+
+                    # ── Ball ──────────────────────────────────────────────
                     bl = snap.get("bl")
                     if bl:
                         b = bl.get("b", [])
@@ -1318,8 +1411,12 @@ class VideoProcessor:
                             if (x2 - x1) >= 4 and (y2 - y1) >= 4:
                                 cv2.rectangle(frame, (x1, y1), (x2, y2), C_BALL, 2)
                                 cv2.putText(frame, "BALL", (x1, max(y1 - 4, 12)),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, C_BALL, 1,
-                                            cv2.LINE_AA)
+                                            FONT, 0.40, C_BALL, 1, cv2.LINE_AA)
+
+                    # ── Score banner (drawn last so it's always on top) ───
+                    sc   = snap.get("sc", [0, 0])
+                    qtr  = snap.get("q", 1)
+                    _score_banner(frame, sc[0], sc[1], qtr, width, height)
 
                 writer.write(frame)
                 frame_idx += 1

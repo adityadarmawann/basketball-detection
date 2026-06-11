@@ -614,7 +614,10 @@ class VideoProcessor:
         # ── 5. Jersey OCR — run every self._ocr_interval (FPS-aware, stride-aligned) ──
         if self._jersey and tracked_players and frame_id % self._ocr_interval == 0:
             try:
-                jersey = self._jersey.process(frame, tracked_players, self._tracker)
+                jersey = self._jersey.process(
+                    frame, tracked_players, self._tracker,
+                    roster=self._roster or None,
+                )
                 frame_data["jersey"] = jersey
             except Exception as e:
                 logger.debug("Jersey OCR frame %d: %s", frame_id, e)

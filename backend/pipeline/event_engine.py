@@ -39,9 +39,14 @@ FG_HOOP_RADIUS_PX      = 70     # pixels  — ball inside hoop zone (wider → f
 FG_HOOP_RADIUS_M       = 0.45   # meters  — tighter in court space (no action gate)
 FG_COOLDOWN_F          = 45     # frames before another FG can fire
 FG_ABOVE_MARGIN_PX     = 10     # ball must be ≥ this many px above hoop_y to arm
-FG_ABOVE_WINDOW_F      = 45     # frames to look back for "was above" check (1.5 s @ 30fps eff)
+FG_ABOVE_WINDOW_F      = 20     # frames to look back for "was above" check (~1.3 s @ 15 eff fps)
 FG_ATTEMPT_WINDOW_F    = 150    # kept for MISSED_FG accounting only (not scoring gate)
 FG_MISS_TIMEOUT_F      = 100    # frames after SHOOT with no MADE → MISSED_FG
+FG_BALL_LOST_RESET_F   = 3      # consecutive ball-absent frames before resetting zone state
+FG_ZONE_DWELL_F        = 2      # ball must stay in zone N frames before MADE_FG fires
+FG_HOOP_CACHE_TTL      = 90     # reject stale hoop cache after this many frames (~6 s)
+FG_SHOOTER_TTL_F       = 120    # frames after shot attempt before shooter attribution expires
+FG_MIN_DOWNWARD_DY     = 2      # ball must be moving downward by at least this many px at entry
 
 REBOUND_HOOP_RADIUS_PX = 90
 REBOUND_HOOP_RADIUS_M  = 1.5
@@ -110,11 +115,13 @@ class EventEngine:
         self._poss_frames:    int            = 0
 
         # ── Shot / FG state ───────────────────────────────────────────────
-        self._last_shooter_id:    Optional[int]  = None
-        self._shot_attempt_frame: int             = -999
-        self._fg_cooldown:        int             = 0
-        self._ball_in_hoop_prev:  bool            = False
-        self._fg_miss_emitted:    bool            = False  # one miss per attempt
+        self._last_shooter_id:     Optional[int]  = None
+        self._shot_attempt_frame:  int             = -999
+        self._fg_cooldown:         int             = 0
+        self._ball_in_hoop_frames: int             = 0    # consecutive in-zone frames
+        self._ball_lost_frames:    int             = 0    # consecutive ball-absent frames
+        self._hoop_cache_age:      int             = 0    # frames since last hoop detection
+        self._fg_miss_emitted:     bool            = False  # one miss per attempt
 
         # ── Rebound state ─────────────────────────────────────────────────
         self._rebound_cooldown: int             = 0
@@ -177,9 +184,12 @@ class EventEngine:
         quarter  = int(frame_data.get("quarter", 1))
         ts_ms    = int(frame_data.get("timestamp_ms", 0))
 
-        # Keep pixel hoop cache fresh whenever hoops are detected
+        # Keep pixel hoop cache fresh whenever hoops are detected; track staleness.
         if hoops:
             self._last_hoops_px = hoops
+            self._hoop_cache_age = 0
+        else:
+            self._hoop_cache_age += 1
 
         # Maintain pixel-space ball history for from-above scoring check.
         # ball.center is always pixel coords regardless of court calibration.
@@ -264,6 +274,13 @@ class EventEngine:
                     trigger, tid, p.get("team", "?"), self.frame_count, _fmt_ts(ts_ms),
                 )
 
+        # Expire shooter attribution after TTL (prevents stale attribution when
+        # neither MADE_FG nor MISSED_FG fires — e.g. loose ball after a pass).
+        if (self._last_shooter_id is not None and
+                self.frame_count - self._shot_attempt_frame > FG_SHOOTER_TTL_F):
+            self._last_shooter_id = None
+            self.last_shot_pos    = None
+
         # ── Field goal (made) ─────────────────────────────────────────────
         if self._fg_cooldown == 0:
             fg_evts = self._detect_field_goal(
@@ -347,7 +364,17 @@ class EventEngine:
         # depending on camera angle, making the 0.45 m FIBA threshold fail.
         ball_px = ball.get("center") if ball else None
         if ball_px is None:
-            self._ball_in_hoop_prev = False
+            # Small grace window before resetting zone state — 1–2 missing frames
+            # are common for fast-moving balls and shouldn't cancel a detection.
+            self._ball_lost_frames += 1
+            if self._ball_lost_frames >= FG_BALL_LOST_RESET_F:
+                self._ball_in_hoop_frames = 0
+            return events
+        self._ball_lost_frames = 0
+
+        # Reject stale hoop cache — hoops from many seconds ago are unreliable.
+        if self._hoop_cache_age > FG_HOOP_CACHE_TTL:
+            self._ball_in_hoop_frames = 0
             return events
 
         # _nearest_hoop_px_center uses self._last_hoops_px (already updated
@@ -355,14 +382,22 @@ class EventEngine:
         hoop_ref_px = self._nearest_hoop_px_center(ball_px)
         if hoop_ref_px is None:
             # No hoop reference yet — cannot confirm zone entry
-            self._ball_in_hoop_prev = False
+            self._ball_in_hoop_frames = 0
             return events
 
-        in_zone    = _dist(ball_px, hoop_ref_px) < FG_HOOP_RADIUS_PX
-        zone_entry = in_zone and not self._ball_in_hoop_prev
-        self._ball_in_hoop_prev = in_zone
+        in_zone = _dist(ball_px, hoop_ref_px) < FG_HOOP_RADIUS_PX
 
-        if not zone_entry:
+        # Count consecutive in-zone frames; reset immediately on exit.
+        if in_zone:
+            self._ball_in_hoop_frames += 1
+        else:
+            self._ball_in_hoop_frames = 0
+
+        # Require ball to dwell in the zone for FG_ZONE_DWELL_F consecutive frames
+        # before scoring.  This eliminates single-frame false positives from
+        # dribbles, deflections, and ball-near-rim but not-through-rim moments.
+        # Fire exactly on the Nth frame (== not >=) so cooldown prevents re-fire.
+        if self._ball_in_hoop_frames != FG_ZONE_DWELL_F:
             return events
 
         # ── 2. "From above" check — pixel space ──────────────────────────
@@ -371,9 +406,9 @@ class EventEngine:
         if self._ball_px_hist:
             hoop_y = float(hoop_ref_px[1])
             hoop_x = float(hoop_ref_px[0])
-            # Ball must have been above hoop AND within a horizontal window —
+            # Ball must have been above hoop AND within a tighter horizontal window —
             # prevents cross-court or dribble history from satisfying this check.
-            horiz_window = FG_HOOP_RADIUS_PX * 3.0
+            horiz_window = FG_HOOP_RADIUS_PX * 1.5
             ball_was_above = any(
                 float(pos[1]) < hoop_y - FG_ABOVE_MARGIN_PX
                 and abs(float(pos[0]) - hoop_x) < horiz_window
@@ -382,23 +417,25 @@ class EventEngine:
             if not ball_was_above:
                 logger.debug(
                     "FG zone entry rejected — ball did not come from above hoop "
-                    "(hoop_y=%.0f, recent ball_y range=[%.0f–%.0f])",
+                    "(hoop_y=%.0f, recent ball_y range=[%.0f-%.0f])",
                     hoop_y,
                     min(p[1] for p in self._ball_px_hist),
                     max(p[1] for p in self._ball_px_hist),
                 )
+                self._ball_in_hoop_frames = 0
                 return events
 
-            # Ball must be moving downward (pixel y increasing) at zone entry.
-            # Clearly upward motion means a bounce or pass, not a basket.
+            # Ball must be moving clearly downward (pixel y increasing) at zone
+            # entry.  Upward or sideways motion means bounce, pass, or dribble.
             if len(self._ball_px_hist) >= 3:
                 recent_ys = [float(p[1]) for p in list(self._ball_px_hist)[-3:]]
                 dy = recent_ys[-1] - recent_ys[0]
-                if dy < -12:
+                if dy < FG_MIN_DOWNWARD_DY:
                     logger.debug(
-                        "FG zone entry rejected — ball moving upward at entry (dy=%.1f)",
+                        "FG zone entry rejected — ball not moving downward (dy=%.1f)",
                         dy,
                     )
+                    self._ball_in_hoop_frames = 0
                     return events
 
         # ── 3. Identify shooter ──────────────────────────────────────────
@@ -443,11 +480,15 @@ class EventEngine:
             "timestamp_ms": ts_ms,
         })
 
-        self._fg_cooldown     = FG_COOLDOWN_F
-        self._miss_frame      = -999
-        self._last_shooter_id = None
-        self.last_shot_pos    = None
-        self._fg_miss_emitted = True
+        self._fg_cooldown          = FG_COOLDOWN_F
+        self._miss_frame           = -999
+        self._last_shooter_id      = None
+        self.last_shot_pos         = None
+        self._fg_miss_emitted      = True
+        self._ball_in_hoop_frames  = 0
+        # Clear trajectory history so the just-scored ball position can't
+        # trigger another zone entry check during cooldown.
+        self._ball_px_hist.clear()
 
         pts = 3 if is_three else 2
         logger.info(
@@ -486,8 +527,11 @@ class EventEngine:
         hist = self._player_court_hist.get(track_id)
         if not hist:
             return None
+        # Use only the most recent ~2 seconds to avoid picking a position
+        # from many seconds before the actual shot.
+        recent = list(hist)[-30:]
         best_pos, best_d = None, -1.0
-        for pos in hist:
+        for pos in recent:
             d_l = _dist(pos, HOOP_LEFT)
             d_r = _dist(pos, HOOP_RIGHT)
             d   = min(d_l, d_r)

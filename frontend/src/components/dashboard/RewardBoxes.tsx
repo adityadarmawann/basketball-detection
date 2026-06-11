@@ -173,7 +173,7 @@ export default function RewardBoxes({ stats, mpi, roster, sponsors }: RewardBoxe
   const speedSponsors     = sponsors.filter((s) => s.category === 'speed')
   const enduranceSponsors = sponsors.filter((s) => s.category === 'endurance')
 
-  const players = Object.values(stats)
+  const players = Object.values(stats).filter(p => p.jerseyNumber != null)
 
   // MVP: best by EFF
   const mvpPlayer = players.length
@@ -185,8 +185,8 @@ export default function RewardBoxes({ stats, mpi, roster, sponsors }: RewardBoxe
     ? [...players].sort((a, b) => b.pts - a.pts)[0]
     : null
 
-  // Fastest: best by avgSpeedKmh in MPI
-  const mpiList = Object.values(mpi)
+  // Fastest: best by avgSpeedKmh in MPI — only detected players
+  const mpiList = Object.values(mpi).filter(m => stats[m.playerId]?.jerseyNumber != null)
   const fastestMpi = mpiList.length
     ? [...mpiList].sort((a, b) => b.avgSpeedKmh - a.avgSpeedKmh)[0]
     : null

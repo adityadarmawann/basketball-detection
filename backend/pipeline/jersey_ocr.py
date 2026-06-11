@@ -30,10 +30,13 @@ logger = logging.getLogger(__name__)
 MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "jersey_no.pt"
 
-VOTE_THRESHOLD    = 3     # OCR reads required to confirm a jersey number
-MAX_VOTE_HISTORY  = 20   # rolling window of OCR reads per track_id
-                         # at OCR_SAMPLE_EVERY=5 this covers ~100 video frames (~4s)
-OCR_SAMPLE_EVERY  = 5    # run OCR once every N frames per player (staggered across players)
+VOTE_THRESHOLD        = 3    # OCR reads required to confirm a jersey number
+MAX_VOTE_HISTORY      = 20   # rolling window of OCR reads per track_id
+                             # at OCR_SAMPLE_EVERY=5 this covers ~100 video frames (~4s)
+OCR_SAMPLE_EVERY      = 5    # run OCR once every N frames per player (staggered across players)
+OCR_CONFIRMED_EVERY   = 30   # re-check confirmed tracks this often (~2 s @ 15 eff fps)
+                             # keeps the vote deque fresh if camera angle reveals a contradiction
+HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
 OCR_HEIGHT_PX     = 128   # resize crop to this height for OCR (was 112; better for 2-digit far)
 OCR_MIN_SCORE     = 0.45  # minimum PaddleOCR confidence to accept (was 0.50; voting absorbs noise)
@@ -338,6 +341,7 @@ class JerseyOCR:
         frame: np.ndarray,
         tracked_players: list[dict],
         tracker=None,           # PlayerTracker instance from tracker.py
+        roster: dict | None = None,  # {jersey_str: {...}} — whitelist filter
     ) -> dict:
         """
         For each tracked player: localise number → OCR → vote → classify team.
@@ -347,6 +351,11 @@ class JerseyOCR:
             tracked_players: [{track_id, bbox, ...}] from tracker.py.
             tracker:         PlayerTracker; when provided, update_jersey() is
                              called automatically after a vote is confirmed.
+            roster:          Match roster dict keyed by jersey number string.
+                             When provided, OCR candidates not present in the
+                             roster are silently discarded before entering the
+                             vote deque — eliminates impossible readings like
+                             numbers that no player actually wears.
         """
         if frame is None or frame.size == 0 or not tracked_players:
             return {"jersey_results": [], "team_colors": self._team_colors}
@@ -367,16 +376,27 @@ class JerseyOCR:
                 track_id, self._frame_counter - OCR_SAMPLE_EVERY
             )
             run_ocr = frames_since_ocr >= OCR_SAMPLE_EVERY
-            if not run_ocr and track_id in self._track_team:
-                results.append({
-                    "track_id":       track_id,
-                    "jersey_number":  self._current_confirmed(track_id),
-                    "confidence":     self._vote_confidence(track_id),
-                    "team":           self._track_team[track_id],
-                    "team_color_hsv": self._team_colors.get(self._track_team[track_id], []),
-                    "blur_skipped":   False,
-                })
-                continue
+
+            # Fast path: team already known → check if we can skip full OCR.
+            # Confirmed tracks use a slower re-check cadence (OCR_CONFIRMED_EVERY)
+            # instead of being skipped permanently.  This lets a better camera
+            # angle override a wrong early confirmation while still saving ~90 %
+            # of OCR calls vs the unconfirmed cadence (OCR_SAMPLE_EVERY).
+            if track_id in self._track_team:
+                confirmed_num, conf = self._vote_status(track_id)
+                effective_interval = (
+                    OCR_CONFIRMED_EVERY if confirmed_num is not None else OCR_SAMPLE_EVERY
+                )
+                if frames_since_ocr < effective_interval:
+                    results.append({
+                        "track_id":       track_id,
+                        "jersey_number":  confirmed_num,
+                        "confidence":     conf,
+                        "team":           self._track_team[track_id],
+                        "team_color_hsv": self._team_colors.get(self._track_team[track_id], []),
+                        "blur_skipped":   False,
+                    })
+                    continue
 
             # ── Crop extraction (needed for team classify or OCR) ─────────
             x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
@@ -404,6 +424,8 @@ class JerseyOCR:
             # White jerseys have naturally lower Laplacian variance (large uniform
             # bright area → few edges), so we relax the threshold proportionally.
             # Mean > 160 = light jersey; use 40% of the normal threshold.
+            # Compute gray once and reuse for mean, Laplacian, and debug log —
+            # avoids 3× redundant BGR→GRAY + 2× Laplacian for the same crop.
             _crop_gray = cv2.cvtColor(number_crop, cv2.COLOR_BGR2GRAY) \
                 if number_crop.ndim == 3 else number_crop
             _effective_blur_thr = (
@@ -411,18 +433,20 @@ class JerseyOCR:
                 if float(_crop_gray.mean()) > 160
                 else BLUR_THRESHOLD
             )
-            if _is_too_blurry(number_crop, threshold=_effective_blur_thr):
+            _blur = _blur_score(_crop_gray)   # gray already computed — no re-conversion
+            if _blur < _effective_blur_thr:
                 logger.debug(
                     "track %d: blur score=%.1f < %.1f — OCR skipped",
-                    track_id, _blur_score(number_crop), BLUR_THRESHOLD,
+                    track_id, _blur, _effective_blur_thr,
                 )
                 self._last_ocr_frame[track_id] = self._frame_counter  # reset timer even on blur
                 team = self._classify_team(player_crop, track_id)
                 team_hsv = self._team_colors.get(team, []) if team else []
+                num, conf = self._vote_status(track_id)
                 results.append({
                     "track_id":       track_id,
-                    "jersey_number":  self._current_confirmed(track_id),
-                    "confidence":     self._vote_confidence(track_id),
+                    "jersey_number":  num,
+                    "confidence":     conf,
                     "team":           team,
                     "team_color_hsv": team_hsv,
                     "blur_skipped":   True,
@@ -432,7 +456,21 @@ class JerseyOCR:
             # Layer 2 — OCR
             self._last_ocr_frame[track_id] = self._frame_counter
             candidate = self._run_ocr(number_crop)
-            confirmed  = self._vote_number(track_id, candidate)
+
+            # Roster whitelist: discard any candidate not in the roster so it
+            # never pollutes the vote deque.  Numbers like "0" or "99" that
+            # no player wears are dropped here before any vote is cast.
+            if candidate is not None and roster and str(candidate) not in roster:
+                logger.debug(
+                    "track %d: OCR candidate %d rejected — not in roster",
+                    track_id, candidate,
+                )
+                candidate = None
+
+            # _vote_number appends candidate; _vote_status reads confirmed+confidence
+            # in a single Counter pass (avoids the duplicate Counter in _vote_confidence).
+            self._vote_number(track_id, candidate)
+            confirmed, conf = self._vote_status(track_id)
 
             if confirmed is not None and tracker is not None:
                 tracker.update_jersey(track_id, confirmed)
@@ -444,7 +482,7 @@ class JerseyOCR:
             results.append({
                 "track_id":       track_id,
                 "jersey_number":  confirmed,
-                "confidence":     self._vote_confidence(track_id),
+                "confidence":     conf,
                 "team":           team,
                 "team_color_hsv": team_hsv,
                 "blur_skipped":   False,
@@ -516,6 +554,8 @@ class JerseyOCR:
         # Four variants: CLAHE, inverted CLAHE, Otsu binary, adaptive binary.
         # Adaptive handles light jerseys (dark numbers on white) without needing
         # a separate bright-crop branch — THRESH_BINARY_INV normalises both cases.
+        # Early exit: once any variant produces a high-confidence result
+        # (≥ HIGH_CONF_EARLY_EXIT) there is no benefit in trying the remaining ones.
         candidates: list[tuple[int, float]] = []
         for img in [processed, cv2.bitwise_not(processed), otsu, adaptive]:
             try:
@@ -550,6 +590,10 @@ class JerseyOCR:
                         logger.debug(
                             "OCR: '%s' (score=%.2f) → jersey %d", text, score, number
                         )
+
+            # High-confidence early exit — skip remaining variants.
+            if candidates and max(c[1] for c in candidates) >= HIGH_CONF_EARLY_EXIT:
+                break
 
         if not candidates:
             return None
@@ -611,6 +655,21 @@ class JerseyOCR:
         counter = Counter(self._votes[track_id])
         top_count = counter.most_common(1)[0][1]
         return top_count / len(self._votes[track_id])
+
+    def _vote_status(self, track_id: int) -> tuple[Optional[int], float]:
+        """Return (confirmed_number, confidence) in a single Counter pass.
+
+        Use this wherever confirmed and confidence are both needed to avoid
+        building Counter twice for the same track in the same call.
+        """
+        if track_id not in self._votes or not self._votes[track_id]:
+            return None, 0.0
+        votes = self._votes[track_id]
+        counter = Counter(votes)
+        most_common, count = counter.most_common(1)[0]
+        confirmed = most_common if count >= VOTE_THRESHOLD else None
+        confidence = count / len(votes)
+        return confirmed, confidence
 
     def reset(self) -> None:
         """

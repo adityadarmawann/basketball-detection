@@ -63,14 +63,15 @@ interface RawTotalStats {
   eff?:        number
 }
 
-interface RawPlayerStats {
+export interface RawPlayerStats {
   name?:          string
   jersey_number?: number
   team?:          string
   total_stats?:   RawTotalStats
+  mpi?:           Record<string, number>
 }
 
-interface RawMpiPlayer {
+export interface RawMpiPlayer {
   track_id?:        number
   jersey_number?:   number
   name?:            string
@@ -94,7 +95,7 @@ interface RawMpiPlayer {
  * Backend:  { name, jersey_number, team, total_stats: { pts, fgm, fga, … } }
  * Frontend: { playerId, name, jerseyNumber, pts, twoPointMade, offReb, … }
  */
-function normalizePlayerStats(playerId: number, raw: RawPlayerStats): PlayerStats {
+export function normalizePlayerStats(playerId: number, raw: RawPlayerStats): PlayerStats {
   const ts = raw.total_stats ?? {}
 
   const fgm      = ts.fgm      ?? 0
@@ -155,7 +156,7 @@ function normalizePlayerStats(playerId: number, raw: RawPlayerStats): PlayerStat
  * Backend:  { track_id, distance_m, avg_speed_kmh, agility_score, … }
  * Frontend: { playerId, distanceCoveredM, avgSpeedKmh, agility, … }
  */
-function normalizeMpiStats(raw: RawMpiPlayer): MpiMetrics {
+export function normalizeMpiStats(raw: RawMpiPlayer): MpiMetrics {
   return {
     playerId:         raw.track_id        ?? 0,
     quarter:          1,    // /mpi/team aggregates across all quarters

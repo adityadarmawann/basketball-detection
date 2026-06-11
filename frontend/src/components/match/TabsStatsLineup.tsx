@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlertTriangle } from 'lucide-react'
+// import { AlertTriangle } from 'lucide-react'  // re-enable when KOREKSI tab is restored
 import { useMatchStore } from '../../store/matchStore'
 import { GameEvent, PlayerStats } from '../../types'
 import EventCorrectionPanel from './EventCorrectionPanel'
@@ -123,6 +123,7 @@ export default function TabsStatsLineup() {
         >
           Lineups
         </button>
+        {/* KOREKSI tab — hidden for now, pending K-Means jersey color attribution
         <button
           onClick={() => setActiveTab('correction')}
           className={clsx(
@@ -140,9 +141,10 @@ export default function TabsStatsLineup() {
             </span>
           )}
         </button>
+        */ }
       </div>
 
-      {activeTab === 'correction' && <EventCorrectionPanel />}
+      {/* {activeTab === 'correction' && <EventCorrectionPanel />} */}
 
       {activeTab === 'stats' && (
         <div className="p-6">

@@ -103,23 +103,45 @@ def _default_mpi_player() -> dict:
 
 async def _fetch_mpi_players(match_id: str) -> list:
     """
-    Read MPI player list from Redis key  mpi:{match_id}.
-    Accepts both list and {track_id: player_dict} storage formats.
-    Returns [] on any failure (Redis unavailable, key missing, bad JSON).
+    Read MPI player list for a match.
+    Tries dedicated  mpi:{match_id}  key first, then extracts the embedded
+    mpi dict from each player entry in  stats:{match_id}  as fallback
+    (VideoProcessor stores MPI inside player_stats, not in a separate key).
     """
     try:
         redis = await get_redis()
         if redis is None:
             return []
+
+        # Primary: dedicated key
         raw = await redis.get(f"mpi:{match_id}")
+        if raw:
+            data = json.loads(raw)
+            if isinstance(data, list) and data:
+                return data
+            if isinstance(data, dict) and data:
+                return list(data.values())
+
+        # Fallback: extract from embedded player_stats
+        raw = await redis.get(f"stats:{match_id}")
         if not raw:
             return []
-        data = json.loads(raw)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            return list(data.values())
-        return []
+        data      = json.loads(raw)
+        ps_map    = data.get("player_stats", {})
+        result    = []
+        for tid_str, pdata in ps_map.items():
+            mpi = pdata.get("mpi", {})
+            if not mpi:
+                continue
+            tid = int(tid_str) if str(tid_str).isdigit() else 0
+            result.append({
+                "track_id":        tid,
+                "name":            pdata.get("name", ""),
+                "jersey_number":   pdata.get("jersey_number"),
+                "team":            pdata.get("team", ""),
+                **mpi,
+            })
+        return result
     except Exception as e:
         logger.warning("Redis MPI read error match=%s: %s", match_id, e)
         return []
@@ -226,23 +248,29 @@ async def get_team_stats(team_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/stats/quarter/{quarter}")
-async def get_quarter_stats(quarter: int):
+async def get_quarter_stats(quarter: int, match_id: str = Query(...)):
     """
     Get stats for a specific quarter (1-4).
+    Reads from Redis key  stats:{match_id}:q{quarter}  written by VideoProcessor.
+    Returns the same shape as /stats/live so the frontend can reuse normalizers.
     """
     if quarter not in [1, 2, 3, 4]:
         raise HTTPException(status_code=400, detail="Quarter must be 1-4")
-    
-    try:
-        quarter_stats = list(db.player_stats.find(
-            {"quarter": quarter},
-            {"_id": 0}
-        ))
 
-        return {
-            "quarter": quarter,
-            "count": len(quarter_stats),
-            "stats": quarter_stats
-        }
+    try:
+        redis = await get_redis()
+        if redis is None:
+            return _default_response()
+
+        raw = await redis.get(f"stats:{match_id}:q{quarter}")
+        if not raw:
+            return _default_response()
+
+        data = json.loads(raw)
+        base = _default_response()
+        base.update(data)
+        base["quarter"] = quarter
+        return base
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("Redis quarter stats error match=%s q=%d: %s", match_id, quarter, e)
+        return _default_response()

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { ChevronLeft, LayoutDashboard } from 'lucide-react'
 import axios from 'axios'
 import { useMatchStore } from '../store/matchStore'
@@ -10,7 +10,6 @@ import VideoUpload from '../components/video/VideoUpload'
 import VideoScanningStatus from '../components/video/VideoScanningStatus'
 import VideoPlayer from '../components/video/VideoPlayer'
 import Scoreboard from '../components/dashboard/Scoreboard'
-import MvpRanking from '../components/dashboard/MvpRanking'
 import LiveEventFeed from '../components/dashboard/LiveEventFeed'
 import RewardBoxes from '../components/dashboard/RewardBoxes'
 import TabsStatsLineup from '../components/match/TabsStatsLineup'
@@ -151,17 +150,6 @@ export default function MatchPage() {
   const goToVideo = useCallback(() => {
     setStep('analyzing')
   }, [])
-
-  const mvpPlayers = useMemo(() => {
-    return Object.values(store.stats)
-      .map((player) => ({
-        jerseyNumber: player.jerseyNumber,
-        name: player.name,
-        eff: player.eff,
-        mpi: store.mpi[player.playerId]?.mpiComposite || 0,
-      }))
-      .sort((a, b) => b.eff - a.eff)
-  }, [store.stats, store.mpi, store.events])
 
   return (
     <div className="container mx-auto py-8 px-4">
@@ -335,37 +323,34 @@ export default function MatchPage() {
             </div>
           )}
 
-          {/* Dashboard Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <Scoreboard
-              teamA={store.teamA.name}
-              teamB={store.teamB.name}
-              scoreA={store.teamA.score}
-              scoreB={store.teamB.score}
-              quarter={store.quarter}
-              gameClock={store.gameClock}
-              shotClock={store.shotClock}
-              isLive={store.isLive}
-            />
+          {/* Scoreboard */}
+          <Scoreboard
+            teamA={store.teamA.name}
+            teamB={store.teamB.name}
+            scoreA={store.teamA.score}
+            scoreB={store.teamB.score}
+            quarter={store.quarter}
+            gameClock={store.gameClock}
+            shotClock={store.shotClock}
+            isLive={store.isLive}
+          />
 
-            <MvpRanking players={mvpPlayers} />
-
-            <LiveEventFeed
-              events={store.events}
-              teamA={store.teamA.name}
-              teamB={store.teamB.name}
-            />
-          </div>
-
-          {/* Stats Tabs */}
-          <TabsStatsLineup />
-
-          {/* Reward & Appreciate boxes */}
+          {/* Reward & Appreciate — di atas statistik */}
           <RewardBoxes
             stats={store.stats}
             mpi={store.mpi}
             roster={store.roster}
             sponsors={store.sponsors}
+          />
+
+          {/* Stats Tabs */}
+          <TabsStatsLineup />
+
+          {/* Live Event Log — di bawah statistik */}
+          <LiveEventFeed
+            events={store.events}
+            teamA={store.teamA.name}
+            teamB={store.teamB.name}
           />
         </div>
       )}

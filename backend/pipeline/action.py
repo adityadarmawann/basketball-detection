@@ -64,6 +64,7 @@ RULE_CONFIDENCE  = 0.6    # all rule-based outputs flagged as estimates
 SHOOT_CONFIDENCE = 0.85   # from pose.py shooting detection
 
 MODEL_BUFFER_MIN = 32  # minimum frames before model runs (was 8; must be >= T_FAST)
+MODEL_CONF_MIN   = 0.25  # minimum softmax confidence to accept model prediction; below → rule-based
 _T_FAST          = 32  # SlowFast fast-pathway temporal dim (head pool expects 32)
 _T_SLOW          = 8   # SlowFast slow-pathway temporal dim: T_FAST / lateral_stride=4
 _INPUT_SIZE      = 224 # spatial resize for model input
@@ -566,6 +567,27 @@ class ActionClassifier:
                     "action_id": -1,
                     "confidence": 0.5,
                     "source":    "rule_based",
+                })
+                continue
+
+            # Low-confidence model prediction → rule-based is more reliable
+            if conf < MODEL_CONF_MIN:
+                action_str, action_id, rb_conf = self._rule_based(
+                    track_id, player,
+                    self._get_pose_data(track_id, {}),
+                    getattr(self, "_last_ball_info", None),
+                )
+                if action_str == "jump_action":
+                    action_str = ActionClassifier.resolve_jump_action(
+                        player, getattr(self, "_last_ball_info", None),
+                        self._tracked_players, self._ball_direction_history,
+                    )
+                actions.append({
+                    "track_id":   track_id,
+                    "action":     action_str,
+                    "action_id":  action_id,
+                    "confidence": rb_conf,
+                    "source":     "rule_based",
                 })
                 continue
 

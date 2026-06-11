@@ -98,7 +98,9 @@ TARGET_FPS           = 25
 STATS_UPDATE_INTERVAL = 30    # frames between WebSocket pushes
 BALL_TRAJ_MAXLEN     = 60    # court positions kept for ball trajectory
 FRAME_QUEUE_MAXSIZE  = 8     # slightly larger buffer for GPU burst
-FRAME_BUFFER_SIZE    = 16    # temporal window for action classifier
+FRAME_BUFFER_SIZE    = 64    # temporal window for action classifier (was 16)
+                              # Model trained on 2-sec clips @ 30fps = 60 frames;
+                              # needs >= T_FAST=32 frames for SlowFast inference.
 QUARTER_DURATION_S   = 600   # FIBA 10-minute quarters
 FPS_LOG_INTERVAL     = 100   # frames between FPS log lines
 FPS_DEFAULT          = 30

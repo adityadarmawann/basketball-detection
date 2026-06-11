@@ -48,23 +48,31 @@ ACTION_IDS: dict[str, int] = {v: k for k, v in ACTION_NAMES.items()}
 STAND = "Stand"
 
 # ── Rule-based thresholds ────────────────────────────────────────────────────
-JUMP_HEIGHT_THRESHOLD     = 15.0   # pixels above baseline
-BALL_PROXIMITY_NEAR       = 80.0   # pixels — dribble / catch zone
-BALL_PROXIMITY_FAR        = 150.0  # pixels — rebound zone
-PASS_BALL_SPEED           = 5.0    # pixels/frame — minimum speed to call pass
-PLAYER_SPEED_THRESHOLD    = 1.5    # pixels/frame — "player is moving"
+# Tuned for wide-angle full-court cameras where player bbox centers are at
+# torso level — the ball is typically 100-180px from center when in hand.
+JUMP_HEIGHT_THRESHOLD     = 8.0    # pixels above baseline (was 15; far players jump small)
+BALL_PROXIMITY_NEAR       = 150.0  # pixels — dribble/catch/possession zone (was 80)
+BALL_PROXIMITY_FAR        = 250.0  # pixels — rebound zone (was 150)
+PASS_BALL_SPEED           = 3.5    # pixels/frame — minimum speed to call pass (was 5)
+PLAYER_SPEED_THRESHOLD    = 0.8    # pixels/frame — "player is moving" (was 1.5)
 BLOCK_IOU_THRESHOLD       = 0.05   # bounding-box IoU — overlap for block
 STEAL_IOU_THRESHOLD       = 0.05   # bounding-box IoU — overlap for steal
-HOOP_PROXIMITY_THRESHOLD  = 120.0  # pixels — ball near ring/backboard
-PASS_FIRED_DURATION       = 15     # frames pass remains active for catch window
+HOOP_PROXIMITY_THRESHOLD  = 200.0  # pixels — ball near ring/backboard (was 120)
+PASS_FIRED_DURATION       = 20     # frames pass remains active for catch window (was 15)
 
 RULE_CONFIDENCE  = 0.6    # all rule-based outputs flagged as estimates
 SHOOT_CONFIDENCE = 0.85   # from pose.py shooting detection
 
-MODEL_BUFFER_MIN = 8   # minimum frames required for model inference
+MODEL_BUFFER_MIN = 32  # minimum frames before model runs (was 8; must be >= T_FAST)
 _T_FAST          = 32  # SlowFast fast-pathway temporal dim (head pool expects 32)
 _T_SLOW          = 8   # SlowFast slow-pathway temporal dim: T_FAST / lateral_stride=4
 _INPUT_SIZE      = 224 # spatial resize for model input
+
+# Normalisation constants from training script (NormalizeVideo mean/std)
+# Training: T.NormalizeVideo(mean=[0.45,0.45,0.45], std=[0.225,0.225,0.225])
+# Inference MUST match — inference was previously only dividing by 255.
+_NORM_MEAN = (0.45,  0.45,  0.45)
+_NORM_STD  = (0.225, 0.225, 0.225)
 
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
@@ -431,8 +439,12 @@ class ActionClassifier:
             return "Pass", 1, RULE_CONFIDENCE
 
         # ── 5. Dribble ──────────────────────────────────────────────────────
+        # Moving dribble: ball near + player moving.
+        # Stationary dribble: ball near + this player has possession (standing).
         if ball_prox is not None and ball_prox < BALL_PROXIMITY_NEAR:
             if self._player_speeds.get(track_id, 0.0) > PLAYER_SPEED_THRESHOLD:
+                return "Dribble", 2, RULE_CONFIDENCE
+            if self._possession_id == track_id:
                 return "Dribble", 2, RULE_CONFIDENCE
 
         # ── 6. jump_action — merges Block + Jump + Rebound ──────────────────
@@ -588,11 +600,16 @@ class ActionClassifier:
     ):
         """
         Crop player bbox from every frame, resize to _INPUT_SIZE, sample/pad to T frames.
-        Returns FloatTensor [1, C, T, H, W] normalised to [0, 1].
+        Applies the same preprocessing as training:
+          BGR→RGB → /255 → NormalizeVideo(mean, std) → ClampVideo(-5, 5)
+        Returns FloatTensor [1, C, T, H, W].
         """
         import torch
         import cv2
         import numpy as np
+
+        mean = np.array(_NORM_MEAN, dtype=np.float32)
+        std  = np.array(_NORM_STD,  dtype=np.float32)
 
         crops = []
         for frame in frames:
@@ -602,8 +619,10 @@ class ActionClassifier:
                 crop = np.zeros((_INPUT_SIZE, _INPUT_SIZE, 3), dtype=np.uint8)
             else:
                 crop = cv2.resize(crop, (_INPUT_SIZE, _INPUT_SIZE), interpolation=cv2.INTER_LINEAR)
-            # BGR → RGB, normalise
-            crops.append(crop[:, :, ::-1].astype(np.float32) / 255.0)
+            # BGR → RGB → [0,1] → NormalizeVideo (match training transform)
+            rgb = crop[:, :, ::-1].astype(np.float32) / 255.0
+            rgb = (rgb - mean) / std
+            crops.append(rgb)
 
         n = len(crops)
         if n >= T:
@@ -614,6 +633,7 @@ class ActionClassifier:
 
         arr = np.stack(crops)            # [T, H, W, C]
         arr = arr.transpose(3, 0, 1, 2) # [C, T, H, W]
+        arr = np.clip(arr, -5.0, 5.0)   # ClampVideo — matches training
         return torch.tensor(arr).unsqueeze(0)  # [1, C, T, H, W]
 
     @staticmethod

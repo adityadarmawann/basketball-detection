@@ -1,6 +1,7 @@
 import { Link, useNavigate, useLocation } from 'react-router-dom'
-import { LogOut, User } from 'lucide-react'
+import { LogOut, User, PlusCircle } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
+import { useMatchStore } from '../../store/matchStore'
 
 export default function Navbar() {
   const navigate  = useNavigate()
@@ -8,6 +9,14 @@ export default function Navbar() {
   const user      = useAuthStore((s) => s.user)
   const isLoggedIn = useAuthStore((s) => s.isLoggedIn)
   const logout    = useAuthStore((s) => s.logout)
+  const reset     = useMatchStore((s) => s.reset)
+  const matchId   = useMatchStore((s) => s.matchId)
+
+  const handleNewMatch = () => {
+    if (matchId && !window.confirm('Mulai pertandingan baru? Data sesi ini akan dihapus.')) return
+    reset()
+    navigate('/match')
+  }
 
   const isLanding = location.pathname === '/'
 
@@ -62,6 +71,16 @@ export default function Navbar() {
 
           {/* Right side */}
           <div className="flex items-center gap-3">
+            {isLoggedIn && !isLanding && (
+              <button
+                onClick={handleNewMatch}
+                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-primary border border-primary rounded-lg hover:bg-primary/10 transition-colors"
+                title="Mulai pertandingan baru"
+              >
+                <PlusCircle size={13} />
+                Match Baru
+              </button>
+            )}
             {isLoggedIn ? (
               <>
                 {/* User badge */}

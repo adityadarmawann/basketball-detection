@@ -64,7 +64,8 @@ RULE_CONFIDENCE  = 0.6    # all rule-based outputs flagged as estimates
 SHOOT_CONFIDENCE = 0.85   # from pose.py shooting detection
 
 MODEL_BUFFER_MIN = 32  # minimum frames before model runs (was 8; must be >= T_FAST)
-MODEL_CONF_MIN   = 0.25  # minimum softmax confidence to accept model prediction; below → rule-based
+MODEL_CONF_MIN   = 0.15  # minimum softmax confidence to accept model prediction; below → rule-based
+                         # 6 classes → uniform baseline ≈ 0.167, so 0.15 accepts most model outputs
 _T_FAST          = 32  # SlowFast fast-pathway temporal dim (head pool expects 32)
 _T_SLOW          = 8   # SlowFast slow-pathway temporal dim: T_FAST / lateral_stride=4
 _INPUT_SIZE      = 224 # spatial resize for model input

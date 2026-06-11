@@ -135,4 +135,6 @@ export interface MatchState {
   stats: Record<number, PlayerStats>;
   mpi: Record<number, MpiMetrics>;
   roster: RosterPlayer[];
+  videoUrl: string;
+  matchStep: string;
 }

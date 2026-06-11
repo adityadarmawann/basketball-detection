@@ -19,18 +19,52 @@ import { FrameBboxEntry } from '../types'
 type MatchStep = 'setup' | 'roster' | 'upload' | 'analyzing' | 'live'
 
 export default function MatchPage() {
-  const [step, setStep]                           = useState<MatchStep>('setup')
-  const [videoUrl, setVideoUrl]                   = useState<string>('')
+  const store = useMatchStore()
+
+  // Initialise from persisted store so navigating away (MPI/LINEUP) and back
+  // restores exactly the same step and video — store is the source of truth.
+  const [step, setStepLocal]                      = useState<MatchStep>(
+    (store.matchStep as MatchStep) || 'setup'
+  )
+  const [videoUrl, setVideoUrlLocal]              = useState<string>(store.videoUrl || '')
   const [frameData, setFrameData]                 = useState<FrameBboxEntry[]>([])
   const [overlayLoading, setOverlayLoading]       = useState(false)
   const [nextUploadQuarter, setNextUploadQuarter] = useState<number | undefined>(undefined)
   const [uploadedQuarters, setUploadedQuarters]   = useState<number[]>([])
 
-  const store = useMatchStore()
+  // Wrappers that keep local state and store in sync
+  const setStep = useCallback((s: MatchStep) => {
+    setStepLocal(s)
+    store.setMatchStep(s)
+  }, [store])
+
+  const setVideoUrl = useCallback((url: string) => {
+    setVideoUrlLocal(url)
+    store.setVideoUrl(url)
+  }, [store])
+
   const { connect, disconnect } = useWebSocket()
   // Keep store.stats in sync with backend — polls /api/stats/live on every
   // game event and periodically. Return value not needed here; side-effect only.
   useMatchStats(store.matchId)
+
+  // Re-fetch frameData + uploadedQuarters when returning to live with no data
+  useEffect(() => {
+    if (step !== 'live' || !store.matchId) return
+    if (frameData.length === 0) {
+      axios
+        .get<FrameBboxEntry[]>(`${import.meta.env.VITE_API_URL}/api/upload/frames/${store.matchId}`)
+        .then((r) => { if (Array.isArray(r.data) && r.data.length > 0) setFrameData(r.data) })
+        .catch(() => {})
+    }
+    if (uploadedQuarters.length === 0) {
+      axios
+        .get<{ uploaded: number[] }>(`${import.meta.env.VITE_API_URL}/api/upload/quarters/${store.matchId}`)
+        .then((r) => setUploadedQuarters(r.data.uploaded ?? []))
+        .catch(() => {})
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, store.matchId])
 
   // Track whether WS session has started so we only connect once per match
   // (not on every analyzing ↔ live transition).
@@ -222,7 +256,25 @@ export default function MatchPage() {
             </div>
           </div>
 
-          {/* Match Header */}
+          {/* 1. Video Original — full width */}
+          {videoUrl && (
+            <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
+              <div className="px-4 py-2 border-b border-gray-100">
+                <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
+                  Video Original
+                </span>
+              </div>
+              <video
+                src={videoUrl}
+                controls
+                muted
+                className="w-full object-contain bg-black"
+                style={{ maxHeight: '480px' }}
+              />
+            </div>
+          )}
+
+          {/* 2. Box Scoring & Waktu */}
           <MatchHeader
             teamA={store.teamA.name}
             teamB={store.teamB.name}
@@ -234,40 +286,21 @@ export default function MatchPage() {
             isLive={store.isLive}
           />
 
-          {/* Video Section: original + analyzed side by side */}
+          {/* 3. Video Analisis AI — full width */}
           {videoUrl && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Original video */}
-              <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
-                <div className="px-4 py-2 border-b border-gray-100">
-                  <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
-                    Video Original
+            <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
+              <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between">
+                <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
+                  Video Analisis AI
+                </span>
+                {overlayLoading && (
+                  <span className="flex items-center gap-1.5 text-xs text-amber-500 font-medium">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    Menyiapkan overlay...
                   </span>
-                </div>
-                <video
-                  src={videoUrl}
-                  controls
-                  muted
-                  className="w-full object-contain bg-black"
-                  style={{ maxHeight: '360px' }}
-                />
+                )}
               </div>
-
-              {/* Analyzed video with bbox overlay */}
-              <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
-                <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between">
-                  <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
-                    Video Analisis AI
-                  </span>
-                  {overlayLoading && (
-                    <span className="flex items-center gap-1.5 text-xs text-amber-500 font-medium">
-                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                      Menyiapkan overlay...
-                    </span>
-                  )}
-                </div>
-                <VideoPlayer videoUrl={videoUrl} showCourtMap={true} frameData={frameData} />
-              </div>
+              <VideoPlayer videoUrl={videoUrl} showCourtMap={true} frameData={frameData} />
             </div>
           )}
 

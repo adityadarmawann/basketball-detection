@@ -19,6 +19,8 @@ const initialState: MatchState = {
   stats: {},
   mpi: {},
   roster: [],
+  videoUrl: '',
+  matchStep: 'setup',
 }
 
 export const useMatchStore = create<MatchState & {
@@ -41,6 +43,8 @@ export const useMatchStore = create<MatchState & {
   updatePlayerStats: (playerId: number, updates: Partial<PlayerStats>) => void
   setMpi: (mpi: Record<number, MpiMetrics>) => void
   setRoster: (roster: RosterPlayer[]) => void
+  setVideoUrl: (url: string) => void
+  setMatchStep: (step: string) => void
   reset: () => void
 }>()(
   persist(
@@ -87,17 +91,21 @@ export const useMatchStore = create<MatchState & {
         })),
       setMpi: (mpi) => set({ mpi }),
       setRoster: (roster) => set({ roster }),
+      setVideoUrl: (videoUrl) => set({ videoUrl }),
+      setMatchStep: (matchStep) => set({ matchStep }),
       reset: () => set(initialState),
     }),
     {
       name: 'sv-match',
       // Only persist setup data and roster — live game state always starts fresh
       partialize: (state) => ({
-        matchId: state.matchId,
-        region:  state.region,
-        teamA:   state.teamA,
-        teamB:   state.teamB,
-        roster:  state.roster,
+        matchId:   state.matchId,
+        region:    state.region,
+        teamA:     state.teamA,
+        teamB:     state.teamB,
+        roster:    state.roster,
+        videoUrl:  state.videoUrl,
+        matchStep: state.matchStep,
       }),
     },
   ),

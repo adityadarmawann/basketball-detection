@@ -4,11 +4,12 @@ Roster endpoints:
 - GET /roster/{match_id} — Get match roster
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from datetime import datetime
-import os
+from pathlib import Path
+import os, uuid
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
@@ -19,6 +20,9 @@ router = APIRouter()
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
 client = MongoClient(MONGO_URL)
 db = client["smart_vision_basketball"]
+
+PHOTOS_DIR = Path(__file__).parent.parent.parent / "uploads" / "photos"
+PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 
 class PlayerInput(BaseModel):
     jersey_number: int
@@ -84,6 +88,31 @@ async def add_roster(roster: RosterInput):
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/roster/{match_id}/player/{jersey_number}/photo")
+async def upload_player_photo(
+    match_id: str,
+    jersey_number: int,
+    team: str = Query(..., description="'A' or 'B'"),
+    file: UploadFile = File(...),
+):
+    """Upload / replace photo for a specific player."""
+    ext = Path(file.filename).suffix.lower() if file.filename else ".jpg"
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        raise HTTPException(status_code=400, detail="Only jpg/png/webp allowed")
+
+    filename = f"{match_id}_{team}_{jersey_number}_{uuid.uuid4().hex[:8]}{ext}"
+    dest = PHOTOS_DIR / filename
+    content = await file.read()
+    dest.write_bytes(content)
+
+    photo_url = f"/api/media/photos/{filename}"
+    db.players.update_one(
+        {"match_id": match_id, "jersey_number": jersey_number, "team": team},
+        {"$set": {"photo_url": photo_url, "updated_at": datetime.now()}},
+    )
+    return {"photo_url": photo_url}
+
 
 @router.get("/roster/{match_id}")
 async def get_roster(match_id: str):

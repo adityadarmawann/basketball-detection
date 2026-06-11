@@ -30,8 +30,10 @@ logger = logging.getLogger(__name__)
 MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "jersey_no.pt"
 
-VOTE_THRESHOLD    = 2     # frames required to confirm a jersey number
-MAX_VOTE_HISTORY  = 30   # rolling window per track_id
+VOTE_THRESHOLD    = 3     # OCR reads required to confirm a jersey number
+MAX_VOTE_HISTORY  = 20   # rolling window of OCR reads per track_id
+                         # at OCR_SAMPLE_EVERY=5 this covers ~100 video frames (~4s)
+OCR_SAMPLE_EVERY  = 5    # run OCR once every N frames per player (staggered across players)
 CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
 OCR_HEIGHT_PX     = 128   # resize crop to this height for OCR (was 112; better for 2-digit far)
 OCR_MIN_SCORE     = 0.45  # minimum PaddleOCR confidence to accept (was 0.50; voting absorbs noise)
@@ -222,6 +224,11 @@ class JerseyOCR:
         self._team_colors: dict[str, list[float]] = {}   # "A"/"B" → [H, S, V]
         self._track_team:  dict[int, str]         = {}   # track_id → "A"/"B"
 
+        # Per-track OCR scheduling: frame number of last OCR run per track_id.
+        # Default -OCR_SAMPLE_EVERY so the first appearance always triggers OCR.
+        self._frame_counter: int = 0
+        self._last_ocr_frame: dict[int, int] = {}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -344,26 +351,29 @@ class JerseyOCR:
         if frame is None or frame.size == 0 or not tracked_players:
             return {"jersey_results": [], "team_colors": self._team_colors}
 
+        self._frame_counter += 1
         h_frame, w_frame = frame.shape[:2]
         results: list[dict] = []
 
         for player in tracked_players:
             track_id = player["track_id"]
 
-            # ── Fast path: jersey already confirmed AND team already cached ──
-            # Both are stable — skip the expensive YOLO + OCR pipeline entirely.
-            already_confirmed = (
-                tracker is not None
-                and tracker.get_jersey_number(track_id) is not None
+            # ── Per-track OCR timer ───────────────────────────────────────
+            # Each track has its own independent timer based on when it last
+            # ran OCR. New tracks default to -OCR_SAMPLE_EVERY so first
+            # appearance always triggers OCR. Tracks that appear at different
+            # times naturally stagger without needing a modulo offset.
+            frames_since_ocr = self._frame_counter - self._last_ocr_frame.get(
+                track_id, self._frame_counter - OCR_SAMPLE_EVERY
             )
-            if already_confirmed and track_id in self._track_team:
-                team = self._track_team[track_id]
+            run_ocr = frames_since_ocr >= OCR_SAMPLE_EVERY
+            if not run_ocr and track_id in self._track_team:
                 results.append({
                     "track_id":       track_id,
-                    "jersey_number":  tracker.get_jersey_number(track_id),
+                    "jersey_number":  self._current_confirmed(track_id),
                     "confidence":     self._vote_confidence(track_id),
-                    "team":           team,
-                    "team_color_hsv": self._team_colors.get(team, []),
+                    "team":           self._track_team[track_id],
+                    "team_color_hsv": self._team_colors.get(self._track_team[track_id], []),
                     "blur_skipped":   False,
                 })
                 continue
@@ -377,22 +387,6 @@ class JerseyOCR:
                 continue
 
             player_crop = frame[y1c:y2c, x1c:x2c]
-
-            # ── Semi-fast path: jersey confirmed, only need team colour ────
-            if already_confirmed:
-                team = self._classify_team(player_crop, track_id)
-                team_hsv = self._team_colors.get(team, []) if team else []
-                results.append({
-                    "track_id":       track_id,
-                    "jersey_number":  tracker.get_jersey_number(track_id),
-                    "confidence":     self._vote_confidence(track_id),
-                    "team":           team,
-                    "team_color_hsv": team_hsv,
-                    "blur_skipped":   False,
-                })
-                continue
-
-            # ── Full OCR pipeline for unconfirmed players ─────────────────
 
             # Layer 1 — locate number bbox
             num_bbox = self._detect_number_bbox(player_crop)
@@ -422,6 +416,7 @@ class JerseyOCR:
                     "track %d: blur score=%.1f < %.1f — OCR skipped",
                     track_id, _blur_score(number_crop), BLUR_THRESHOLD,
                 )
+                self._last_ocr_frame[track_id] = self._frame_counter  # reset timer even on blur
                 team = self._classify_team(player_crop, track_id)
                 team_hsv = self._team_colors.get(team, []) if team else []
                 results.append({
@@ -435,6 +430,7 @@ class JerseyOCR:
                 continue
 
             # Layer 2 — OCR
+            self._last_ocr_frame[track_id] = self._frame_counter
             candidate = self._run_ocr(number_crop)
             confirmed  = self._vote_number(track_id, candidate)
 
@@ -628,6 +624,8 @@ class JerseyOCR:
         """
         self._votes.clear()
         self._track_team.clear()
+        self._frame_counter = 0
+        self._last_ocr_frame.clear()
         logger.info("JerseyOCR reset (quarter boundary)")
 
     def reset_votes(self, track_id: Optional[int] = None) -> None:

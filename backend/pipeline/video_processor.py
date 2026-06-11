@@ -950,6 +950,12 @@ class VideoProcessor:
         if event_type == "FGM":
             points = 3 if event.get("is_three") else 2
 
+        # Use the event's own video timestamp so the log time matches
+        # the video player position (elapsed MM:SS), not a game-clock countdown.
+        ts_ms     = event.get("timestamp_ms", 0)
+        elapsed_s = ts_ms / 1000.0
+        evt_clock = f"{int(elapsed_s // 60):02d}:{int(elapsed_s % 60):02d}"
+
         return {
             "type":       "event",
             "eventType":  event_type,
@@ -960,7 +966,7 @@ class VideoProcessor:
             "team":       event.get("team", ""),
             "points":     points,
             "quarter":    event.get("quarter", self._current_quarter),
-            "gameClock":  self._format_game_clock(),
+            "gameClock":  evt_clock,
             "courtPos":   event.get("court_pos"),
         }
 

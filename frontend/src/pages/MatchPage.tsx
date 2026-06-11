@@ -4,6 +4,7 @@ import axios from 'axios'
 import { useMatchStore } from '../store/matchStore'
 import FormSetupMatch from '../components/match/FormSetupMatch'
 import RosterManager from '../components/match/RosterManager'
+import SponsorSetup from '../components/match/SponsorSetup'
 import MatchHeader from '../components/match/MatchHeader'
 import VideoUpload from '../components/video/VideoUpload'
 import VideoScanningStatus from '../components/video/VideoScanningStatus'
@@ -11,12 +12,13 @@ import VideoPlayer from '../components/video/VideoPlayer'
 import Scoreboard from '../components/dashboard/Scoreboard'
 import MvpRanking from '../components/dashboard/MvpRanking'
 import LiveEventFeed from '../components/dashboard/LiveEventFeed'
+import RewardBoxes from '../components/dashboard/RewardBoxes'
 import TabsStatsLineup from '../components/match/TabsStatsLineup'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useMatchStats } from '../hooks/useMatchStats'
 import { FrameBboxEntry } from '../types'
 
-type MatchStep = 'setup' | 'roster' | 'upload' | 'analyzing' | 'live'
+type MatchStep = 'setup' | 'roster' | 'sponsor' | 'upload' | 'analyzing' | 'live'
 
 export default function MatchPage() {
   const store = useMatchStore()
@@ -178,8 +180,12 @@ export default function MatchPage() {
           matchId={store.matchId}
           teamA={store.teamA.name}
           teamB={store.teamB.name}
-          onComplete={() => setStep('upload')}
+          onComplete={() => setStep('sponsor')}
         />
+      )}
+
+      {step === 'sponsor' && store.matchId && (
+        <SponsorSetup onComplete={() => setStep('upload')} />
       )}
 
       {step === 'upload' && store.matchId && (
@@ -353,6 +359,14 @@ export default function MatchPage() {
 
           {/* Stats Tabs */}
           <TabsStatsLineup />
+
+          {/* Reward & Appreciate boxes */}
+          <RewardBoxes
+            stats={store.stats}
+            mpi={store.mpi}
+            roster={store.roster}
+            sponsors={store.sponsors}
+          />
         </div>
       )}
     </div>

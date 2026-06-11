@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { MatchState, Player, GameEvent, PlayerStats, MpiMetrics, BallState, RosterPlayer } from '../types'
+import { MatchState, Player, GameEvent, PlayerStats, MpiMetrics, BallState, RosterPlayer, Sponsor } from '../types'
 
 const initialState: MatchState = {
   matchId: '',
@@ -19,6 +19,7 @@ const initialState: MatchState = {
   stats: {},
   mpi: {},
   roster: [],
+  sponsors: [],
   videoUrl: '',
   matchStep: 'setup',
 }
@@ -43,6 +44,7 @@ export const useMatchStore = create<MatchState & {
   updatePlayerStats: (playerId: number, updates: Partial<PlayerStats>) => void
   setMpi: (mpi: Record<number, MpiMetrics>) => void
   setRoster: (roster: RosterPlayer[]) => void
+  setSponsors: (sponsors: Sponsor[]) => void
   setVideoUrl: (url: string) => void
   setMatchStep: (step: string) => void
   patchEventsByTrackId: (trackId: number, jerseyNumber: number, playerName: string, team: string) => void
@@ -92,6 +94,7 @@ export const useMatchStore = create<MatchState & {
         })),
       setMpi: (mpi) => set({ mpi }),
       setRoster: (roster) => set({ roster }),
+      setSponsors: (sponsors) => set({ sponsors }),
       setVideoUrl: (videoUrl) => set({ videoUrl }),
       setMatchStep: (matchStep) => set({ matchStep }),
       patchEventsByTrackId: (trackId, jerseyNumber, playerName, team) =>
@@ -118,6 +121,7 @@ export const useMatchStore = create<MatchState & {
         teamA:     state.teamA,
         teamB:     state.teamB,
         roster:    state.roster,
+        sponsors:  state.sponsors,
         videoUrl:  state.videoUrl,
         matchStep: state.matchStep,
       }),

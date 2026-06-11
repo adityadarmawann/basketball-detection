@@ -52,6 +52,16 @@ export interface RosterPlayer {
   jerseyNumber: number;
   name: string;
   team: 'A' | 'B';
+  photoUrl?: string;
+}
+
+export type SponsorCategory = 'mvp' | 'score' | 'speed' | 'endurance'
+
+export interface Sponsor {
+  id: string
+  category: SponsorCategory
+  companyName: string
+  logoUrl: string | null
 }
 
 export interface PlayerStats {
@@ -144,6 +154,7 @@ export interface MatchState {
   stats: Record<number, PlayerStats>;
   mpi: Record<number, MpiMetrics>;
   roster: RosterPlayer[];
+  sponsors: Sponsor[];
   videoUrl: string;
   matchStep: string;
 }

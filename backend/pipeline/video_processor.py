@@ -555,6 +555,28 @@ class VideoProcessor:
             try:
                 pose = self._pose.estimate(frame, tracked_players)
                 frame_data["pose"] = pose
+
+                # Refine court_pos using ankle keypoints (indices 15/16 = COCO).
+                # Ankles are at floor level → homography projection is accurate.
+                # Bbox center is at mid-body height → 0.3–0.8 m displacement in
+                # court coords, which can flip 2PT/3PT near the arc.
+                if self._court and frame_data["court"].get("is_calibrated"):
+                    for pe in pose.get("poses", []):
+                        kps = pe.get("keypoints", [])
+                        foot_px = []
+                        for idx in (15, 16):   # left_ankle, right_ankle
+                            if idx < len(kps) and kps[idx].get("confidence", 0.0) > 0.35:
+                                foot_px.append([kps[idx]["x"], kps[idx]["y"]])
+                        if not foot_px:
+                            continue
+                        fx = sum(p[0] for p in foot_px) / len(foot_px)
+                        fy = sum(p[1] for p in foot_px) / len(foot_px)
+                        cp = self._court.pixel_to_court([fx, fy])
+                        if cp is not None:
+                            for pl in tracked_players:
+                                if pl["track_id"] == pe["track_id"]:
+                                    pl["court_pos"] = cp
+                                    break
             except Exception as e:
                 logger.debug("Pose frame %d: %s", frame_id, e)
 

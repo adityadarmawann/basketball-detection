@@ -221,10 +221,7 @@ export function useMatchStats(
     const mpiUrl = `${API_BASE}/api/mpi/team?match_id=${encodeURIComponent(matchId)}`
 
     const [statsResult, mpiResult] = await Promise.allSettled([
-      axios.get<{
-        player_stats?: Record<string, RawPlayerStats>
-        team_stats?:   Record<string, { pts?: number }>
-      }>(statsUrl),
+      axios.get<{ player_stats?: Record<string, RawPlayerStats> }>(statsUrl),
       axios.get<{ mpi?: RawMpiPlayer[] }>(mpiUrl),
     ])
 
@@ -240,13 +237,20 @@ export function useMatchStats(
       }
       if (Object.keys(normalised).length > 0) setStats(normalised)
 
-      // Sync scoreboard: REST team_stats is authoritative — OCR may have
-      // confirmed team AFTER the last WS broadcast, leaving store.teamA.score
-      // stale at 0 while pts are already counted in the backend.
-      const ts   = data.team_stats ?? {}
-      const ptsA = ts.A?.pts ?? 0
-      const ptsB = ts.B?.pts ?? 0
-      const cur  = useMatchStore.getState()
+      // Sync scoreboard from normalised player pts — NOT from backend team_stats.
+      //
+      // Why: backend team_stats.A.pts = 0 when OCR hasn't confirmed team yet
+      // (player.team = "").  normalisePlayerStats() defaults empty team → 'A',
+      // so the stats table already shows the correct 4 pts while the scoreboard
+      // is stuck at 0.  Summing normalised player pts gives the same number the
+      // stats table shows, ensuring both displays are always in sync.
+      const ptsA = Object.values(normalised)
+        .filter((p) => p.team === 'A')
+        .reduce((s, p) => s + p.pts, 0)
+      const ptsB = Object.values(normalised)
+        .filter((p) => p.team === 'B')
+        .reduce((s, p) => s + p.pts, 0)
+      const cur = useMatchStore.getState()
       if (ptsA > cur.teamA.score || ptsB > cur.teamB.score) {
         setScore(Math.max(ptsA, cur.teamA.score), Math.max(ptsB, cur.teamB.score))
       }

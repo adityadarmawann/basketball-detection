@@ -75,7 +75,8 @@ async def _run_pipeline(
     video_path:    str,
     match_id:      str,
     roster:        dict,
-    start_quarter: int = 1,
+    start_quarter: int  = 1,
+    lock_quarter:  bool = False,
 ) -> None:
     """
     Async background task: wires DB/Redis, creates VideoProcessor, runs pipeline.
@@ -103,6 +104,7 @@ async def _run_pipeline(
             roster=roster,
             ws_manager=_ws_manager,
             start_quarter=start_quarter,
+            lock_quarter=lock_quarter,
         )
     except Exception as e:
         logger.error("Pipeline error match_id=%s: %s", match_id, e, exc_info=True)
@@ -207,7 +209,10 @@ async def upload_video(
             os.remove(stripped_path)
 
     # ── Trigger background processing ──────────────────────────────────────
+    # quarter=None means full-game upload (auto-advance every 10 min).
+    # quarter=N means single-quarter clip — lock to that quarter regardless of duration.
     start_quarter = max(1, min(4, quarter)) if quarter else 1
+    lock_quarter  = quarter is not None
 
     if _VP_AVAILABLE:
         background_tasks.add_task(
@@ -216,6 +221,7 @@ async def upload_video(
             match_id=match_id,
             roster=roster_data,
             start_quarter=start_quarter,
+            lock_quarter=lock_quarter,
         )
         status  = "processing"
         message = "Video uploaded, pipeline started"

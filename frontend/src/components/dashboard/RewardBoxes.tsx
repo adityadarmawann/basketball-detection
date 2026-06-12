@@ -115,12 +115,12 @@ function RewardBox({ category, label, Icon, topPlayer, sponsors, mvpSponsors }: 
             </div>
             {/* Sponsor badge */}
             {activeSponsor && (
-              <div className="mt-3 flex items-center gap-1.5 px-2.5 py-1 bg-gray-50 rounded-full border border-gray-200">
+              <div className="mt-3 flex items-center gap-2 px-3 py-1.5 bg-gray-50 rounded-full border border-gray-200">
                 {activeSponsor.logoUrl
-                  ? <img src={activeSponsor.logoUrl} alt="logo" className="h-4 w-auto object-contain" />
-                  : <Building2 size={11} className="text-gray-400" />
+                  ? <img src={activeSponsor.logoUrl} alt="logo" className="h-5 w-auto object-contain flex-shrink-0" />
+                  : <Building2 size={14} className="text-gray-400 flex-shrink-0" />
                 }
-                <span className="text-[10px] text-text-secondary font-medium truncate max-w-[100px]">
+                <span className="text-xs text-text-secondary font-semibold truncate max-w-[110px]">
                   {activeSponsor.companyName}
                 </span>
               </div>

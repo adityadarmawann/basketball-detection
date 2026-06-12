@@ -300,6 +300,7 @@ class VideoProcessor:
         roster:        Optional[dict] = None,
         ws_manager                    = None,
         start_quarter: int            = 1,
+        lock_quarter:  bool           = False,
     ) -> None:
         """
         Process video end-to-end as an async coroutine (FastAPI BackgroundTask).
@@ -307,8 +308,11 @@ class VideoProcessor:
 
         start_quarter: 1–4.  Use >1 when uploading a single-quarter clip so that
         stats, events, and the scoreboard are attributed to the correct quarter.
+        lock_quarter: True when the user explicitly selected a quarter at upload —
+        disables time-based auto-advance so the whole video stays in that quarter.
         """
         self._roster          = roster or {}
+        self._lock_quarter    = lock_quarter
         self._status          = "processing"
         self._start_time      = time.perf_counter()
         self._stop_signal.clear()
@@ -1470,10 +1474,15 @@ class VideoProcessor:
         Override point: plug in scoreboard-OCR result via frame_data["quarter"]
         when that pipeline step is implemented.
         """
-        # If frame_data carries an authoritative quarter from OCR scoreboard
+        # If frame_data carries an authoritative quarter from OCR scoreboard,
+        # always respect it — even in lock_quarter mode.
         ocr_q = frame_data.get("quarter_ocr")
         if ocr_q and ocr_q != self._current_quarter:
             return True
+
+        # Single-quarter upload: never time-advance (the whole video is one quarter)
+        if getattr(self, "_lock_quarter", False):
+            return False
 
         if self._current_quarter >= 4:
             return False

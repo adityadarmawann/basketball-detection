@@ -34,8 +34,6 @@ VOTE_THRESHOLD        = 3    # OCR reads required to confirm a jersey number
 MAX_VOTE_HISTORY      = 20   # rolling window of OCR reads per track_id
                              # at OCR_SAMPLE_EVERY=5 this covers ~100 video frames (~4s)
 OCR_SAMPLE_EVERY      = 5    # run OCR once every N frames per player (staggered across players)
-OCR_CONFIRMED_EVERY   = 30   # re-check confirmed tracks this often (~2 s @ 15 eff fps)
-                             # keeps the vote deque fresh if camera angle reveals a contradiction
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
 OCR_HEIGHT_PX     = 128   # resize crop to this height for OCR (was 112; better for 2-digit far)
@@ -377,26 +375,20 @@ class JerseyOCR:
             )
             run_ocr = frames_since_ocr >= OCR_SAMPLE_EVERY
 
-            # Fast path: team already known → check if we can skip full OCR.
-            # Confirmed tracks use a slower re-check cadence (OCR_CONFIRMED_EVERY)
-            # instead of being skipped permanently.  This lets a better camera
-            # angle override a wrong early confirmation while still saving ~90 %
-            # of OCR calls vs the unconfirmed cadence (OCR_SAMPLE_EVERY).
-            if track_id in self._track_team:
+            # Fast path: timer hasn't fired yet AND team already known.
+            # Use _vote_status() for a single Counter pass instead of calling
+            # _current_confirmed() + _vote_confidence() separately.
+            if not run_ocr and track_id in self._track_team:
                 confirmed_num, conf = self._vote_status(track_id)
-                effective_interval = (
-                    OCR_CONFIRMED_EVERY if confirmed_num is not None else OCR_SAMPLE_EVERY
-                )
-                if frames_since_ocr < effective_interval:
-                    results.append({
-                        "track_id":       track_id,
-                        "jersey_number":  confirmed_num,
-                        "confidence":     conf,
-                        "team":           self._track_team[track_id],
-                        "team_color_hsv": self._team_colors.get(self._track_team[track_id], []),
-                        "blur_skipped":   False,
-                    })
-                    continue
+                results.append({
+                    "track_id":       track_id,
+                    "jersey_number":  confirmed_num,
+                    "confidence":     conf,
+                    "team":           self._track_team[track_id],
+                    "team_color_hsv": self._team_colors.get(self._track_team[track_id], []),
+                    "blur_skipped":   False,
+                })
+                continue
 
             # ── Crop extraction (needed for team classify or OCR) ─────────
             x1, y1, x2, y2 = [int(v) for v in player["bbox"]]

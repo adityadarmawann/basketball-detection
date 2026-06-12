@@ -135,6 +135,8 @@ export interface FrameBboxEntry {
     cp: [number, number] | null  // court position [x_m, y_m] for 2D overlay
   }>
   bl: { b: [number, number, number, number]; cp?: [number, number] | null } | null
+  sc?: [number, number]   // [scoreA, scoreB] at this frame
+  q?: number              // quarter at this frame
 }
 
 export interface MatchState {

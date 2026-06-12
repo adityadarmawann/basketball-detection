@@ -187,6 +187,10 @@ class VideoProcessor:
         self._last_court_pos:     dict = {}
         # Sticky team cache: {track_id → "A"|"B"} — persists even when OCR not running
         self._last_known_team:    dict = {}
+        # Roster-anchored team color calibration: accumulate torso HSV samples from
+        # roster-confirmed players, then call set_team_reference once we have enough.
+        self._team_color_samples: dict = {"A": [], "B": []}
+        self._team_color_ready:   set  = set()   # tracks which teams are calibrated
 
         # Per-frame bbox store — written to JSON at finalize for frontend time-lookup
         self._frame_store:        list = []   # [{ts, p:[{i,j,t,b}], bl}]
@@ -638,13 +642,39 @@ class VideoProcessor:
                 if jersey_num is not None and self._roster:
                     entry = self._roster.get(str(jersey_num), {})
                     if isinstance(entry, dict) and entry.get("team"):
-                        player["team"] = entry["team"]
-                        self._last_known_team[tid] = entry["team"]
+                        confirmed_team = entry["team"]
+                        player["team"] = confirmed_team
+                        self._last_known_team[tid] = confirmed_team
+                        # Accumulate torso HSV for roster-anchored color calibration
+                        if self._jersey and confirmed_team not in self._team_color_ready:
+                            try:
+                                x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
+                                crop = frame[max(0,y1):min(frame.shape[0],y2),
+                                             max(0,x1):min(frame.shape[1],x2)]
+                                if crop.size > 0:
+                                    th, tw = crop.shape[:2]
+                                    torso = crop[int(th*0.15):int(th*0.65),
+                                                 int(tw*0.1):int(tw*0.9)]
+                                    if torso.size > 0:
+                                        hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
+                                        mean_hsv = hsv.reshape(-1,3).mean(axis=0).tolist()
+                                        self._team_color_samples[confirmed_team].append(mean_hsv)
+                            except Exception:
+                                pass
+                            # Once ≥8 samples per team, set reference and activate classifier
+                            if (len(self._team_color_samples.get("A", [])) >= 8 and
+                                    len(self._team_color_samples.get("B", [])) >= 8):
+                                for _t in ("A", "B"):
+                                    if _t not in self._team_color_ready:
+                                        mean = np.mean(self._team_color_samples[_t], axis=0).tolist()
+                                        self._jersey.set_team_reference(_t, mean)
+                                        self._team_color_ready.add(_t)
+                                        logger.info("Team color calibrated from roster: %s → HSV %s", _t, [round(v,1) for v in mean])
                         continue
                 if tid in self._last_known_team:
                     player["team"] = self._last_known_team[tid]
                 elif tid in jersey_color_map:
-                    # Color-based team: applies even when jersey number isn't read yet
+                    # Color-based team: applies once color classifier is calibrated
                     player["team"] = jersey_color_map[tid]
                     self._last_known_team[tid] = jersey_color_map[tid]
 

@@ -67,7 +67,23 @@ export default function MatchPage() {
     const mm = String(Math.floor(currentTime / 60)).padStart(2, '0')
     const ss = String(Math.floor(currentTime % 60)).padStart(2, '0')
     store.setGameClock(`${mm}:${ss}`)
-  }, [store])
+
+    // Sync score & quarter from nearest frame snapshot (video replay mode)
+    if (frameData.length > 0) {
+      const videoMs = currentTime * 1000
+      let lo = 0, hi = frameData.length - 1
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (frameData[mid].ts < videoMs) lo = mid + 1
+        else hi = mid
+      }
+      const a = frameData[lo]
+      const b = lo > 0 ? frameData[lo - 1] : null
+      const snap = b && Math.abs(b.ts - videoMs) < Math.abs(a.ts - videoMs) ? b : a
+      if (snap.sc) store.setScore(snap.sc[0], snap.sc[1])
+      if (snap.q != null) store.setQuarter(snap.q)
+    }
+  }, [store, frameData])
 
   // Re-fetch frameData + uploadedQuarters when returning to live with no data
   useEffect(() => {

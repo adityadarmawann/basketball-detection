@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from 'react'
-import { Play, Pause, Volume2, VolumeX } from 'lucide-react'
+import { Play, Pause } from 'lucide-react'
 import CourtMap2D from './CourtMap2D'
 import CourtOverlay from './CourtOverlay'
 import { FrameBboxEntry } from '../../types'
@@ -17,7 +17,6 @@ interface VideoPlayerProps {
 export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeUpdate }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [volume, setVolume] = useState(1)
   const [progress, setProgress] = useState(0)
   const [duration, setDuration] = useState(0)
   const [fps, setFps] = useState(0)
@@ -112,20 +111,14 @@ export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeU
 
       {/* Controls Bar */}
       <div className="bg-gray-900 text-white p-4 space-y-3">
-        {/* Progress Bar */}
+        {/* Progress Bar — read-only, no seeking */}
         <div className="space-y-1">
-          <input
-            type="range"
-            min="0"
-            max={duration || 0}
-            value={progress}
-            onChange={(e) => {
-              if (videoRef.current) {
-                videoRef.current.currentTime = parseFloat(e.target.value)
-              }
-            }}
-            className="w-full cursor-pointer"
-          />
+          <div className="w-full h-1.5 bg-gray-700 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-primary rounded-full transition-none"
+              style={{ width: duration > 0 ? `${(progress / duration) * 100}%` : '0%' }}
+            />
+          </div>
           <div className="flex justify-between text-xs text-gray-400">
             <span>{formatTime(progress)}</span>
             <span>{formatTime(duration)}</span>
@@ -144,30 +137,6 @@ export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeU
               <Play size={20} className="fill-white" />
             )}
           </button>
-
-          {/* Volume Control */}
-          <div className="flex items-center gap-2 flex-1 max-w-xs">
-            {volume === 0 ? (
-              <VolumeX size={20} />
-            ) : (
-              <Volume2 size={20} />
-            )}
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.1"
-              value={volume}
-              onChange={(e) => {
-                const val = parseFloat(e.target.value)
-                setVolume(val)
-                if (videoRef.current) {
-                  videoRef.current.volume = val
-                }
-              }}
-              className="flex-1 cursor-pointer"
-            />
-          </div>
 
           <div className="text-xs text-gray-400">
             {formatTime(duration)}

@@ -10,6 +10,7 @@ Additional endpoints:
 import json
 import logging
 import os
+import subprocess
 from datetime import datetime
 from typing import Optional
 
@@ -185,6 +186,25 @@ async def upload_video(
         "Upload complete: match_id=%s  file=%s  size=%.1f MB",
         match_id, unique_filename, total_bytes / 1_048_576,
     )
+
+    # ── Strip audio track (fast remux, no re-encode) ───────────────────────
+    stripped_path = saved_path + ".noaudio.mp4"
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", saved_path, "-an", "-c:v", "copy", stripped_path],
+            capture_output=True, timeout=120,
+        )
+        if result.returncode == 0 and os.path.getsize(stripped_path) > 0:
+            os.replace(stripped_path, saved_path)
+            logger.info("Audio stripped from %s", unique_filename)
+        else:
+            logger.warning("ffmpeg audio strip failed (rc=%d) — using original", result.returncode)
+            if os.path.exists(stripped_path):
+                os.remove(stripped_path)
+    except Exception as e:
+        logger.warning("ffmpeg not available or timed out (%s) — skipping audio strip", e)
+        if os.path.exists(stripped_path):
+            os.remove(stripped_path)
 
     # ── Trigger background processing ──────────────────────────────────────
     start_quarter = max(1, min(4, quarter)) if quarter else 1

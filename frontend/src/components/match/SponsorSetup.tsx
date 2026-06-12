@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, Trash2, X, Building2, Zap, HeartPulse, Star, Trophy } from 'lucide-react'
+import { Plus, Trash2, X, Building2, Zap, HeartPulse, Star, Trophy, Library } from 'lucide-react'
 import axios from 'axios'
 import { useMatchStore } from '../../store/matchStore'
 import { Sponsor, SponsorCategory } from '../../types'
@@ -13,35 +13,47 @@ const CATEGORIES: { key: SponsorCategory; label: string; desc: string; Icon: Rea
   { key: 'endurance', label: 'Endurance', desc: 'Sponsor untuk pemain dengan endurance tertinggi', Icon: HeartPulse },
 ]
 
-interface AddForm {
+interface LibraryEntry {
+  id:          string
   companyName: string
-  logoFile: File | null
-  logoPreview: string | null
-  saving: boolean
-  error: string
+  logoUrl:     string | null
+}
+
+interface AddForm {
+  companyName:  string
+  logoFile:     File | null
+  logoPreview:  string | null
+  saving:       boolean
+  error:        string
+  saveToLib:    boolean
 }
 
 const emptyForm = (): AddForm => ({
-  companyName: '', logoFile: null, logoPreview: null, saving: false, error: '',
+  companyName: '', logoFile: null, logoPreview: null, saving: false, error: '', saveToLib: false,
 })
 
 export default function SponsorSetup({ onComplete }: { onComplete: () => void }) {
-  const matchId     = useMatchStore((s) => s.matchId)
-  const setSponsors = useMatchStore((s) => s.setSponsors)
+  const matchId       = useMatchStore((s) => s.matchId)
+  const setSponsors   = useMatchStore((s) => s.setSponsors)
   const storeSponsors = useMatchStore((s) => s.sponsors)
 
-  const [sponsors, setLocal] = useState<Sponsor[]>(storeSponsors)
+  const [sponsors, setLocal]     = useState<Sponsor[]>(storeSponsors)
   const [addingFor, setAddingFor] = useState<SponsorCategory | null>(null)
-  const [form, setForm] = useState<AddForm>(emptyForm())
-  const [loading, setLoading] = useState(true)
+  const [form, setForm]           = useState<AddForm>(emptyForm())
+  const [loading, setLoading]     = useState(true)
+  const [library, setLibrary]     = useState<LibraryEntry[]>([])
+  const [showLib, setShowLib]     = useState(true)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  // Fetch sponsors from backend on mount
+  // Fetch sponsors + library on mount
   useEffect(() => {
     if (!matchId) { setLoading(false); return }
-    axios.get(`${API}/api/sponsors/${matchId}`)
-      .then((r) => {
-        const list: Sponsor[] = (r.data.sponsors ?? []).map((s: any) => ({
+    Promise.allSettled([
+      axios.get(`${API}/api/sponsors/${matchId}`),
+      axios.get(`${API}/api/sponsors/library`),
+    ]).then(([sponsorsRes, libRes]) => {
+      if (sponsorsRes.status === 'fulfilled') {
+        const list: Sponsor[] = (sponsorsRes.value.data.sponsors ?? []).map((s: any) => ({
           id:          s.id,
           category:    s.category as SponsorCategory,
           companyName: s.company_name,
@@ -49,9 +61,15 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
         }))
         setLocal(list)
         setSponsors(list)
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false))
+      }
+      if (libRes.status === 'fulfilled') {
+        setLibrary((libRes.value.data.library ?? []).map((e: any) => ({
+          id:          e.id,
+          companyName: e.company_name,
+          logoUrl:     e.logo_url ? `${API}${e.logo_url}` : null,
+        })))
+      }
+    }).finally(() => setLoading(false))
   }, [matchId])
 
   const sponsorsByCategory = (cat: SponsorCategory) =>
@@ -62,6 +80,29 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
     if (!file) return
     setForm((f) => ({ ...f, logoFile: file, logoPreview: URL.createObjectURL(file) }))
     e.target.value = ''
+  }
+
+  // Pick from library — pre-fills form (logo fetched as blob for upload)
+  const handlePickLibrary = async (entry: LibraryEntry) => {
+    let file: File | null = null
+    let preview: string | null = null
+    if (entry.logoUrl) {
+      try {
+        const res  = await fetch(entry.logoUrl)
+        const blob = await res.blob()
+        const ext  = entry.logoUrl.split('.').pop() ?? 'png'
+        file       = new File([blob], `logo.${ext}`, { type: blob.type })
+        preview    = URL.createObjectURL(blob)
+      } catch { /* logo stays null */ }
+    }
+    setForm((f) => ({
+      ...f,
+      companyName: entry.companyName,
+      logoFile:    file,
+      logoPreview: preview,
+      saveToLib:   false,
+    }))
+    setShowLib(false)
   }
 
   const handleAdd = async () => {
@@ -85,8 +126,27 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
       const updated = [...sponsors, created]
       setLocal(updated)
       setSponsors(updated)
+
+      // Optionally save to global library
+      if (form.saveToLib) {
+        const lfd = new FormData()
+        lfd.append('company_name', form.companyName.trim())
+        if (form.logoFile) lfd.append('logo', form.logoFile)
+        await axios.post(`${API}/api/sponsors/library`, lfd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        }).then((r) => {
+          const newEntry: LibraryEntry = {
+            id:          r.data.id,
+            companyName: r.data.company_name,
+            logoUrl:     r.data.logo_url ? `${API}${r.data.logo_url}` : null,
+          }
+          setLibrary((prev) => [...prev, newEntry].sort((a, b) => a.companyName.localeCompare(b.companyName)))
+        }).catch(() => { /* 409 = already exists, ignore */ })
+      }
+
       setAddingFor(null)
       setForm(emptyForm())
+      setShowLib(true)
     } catch {
       setForm((f) => ({ ...f, saving: false, error: 'Gagal menyimpan sponsor' }))
     }
@@ -98,9 +158,14 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
       const updated = sponsors.filter((s) => s.id !== id)
       setLocal(updated)
       setSponsors(updated)
-    } catch {
-      // silent
-    }
+    } catch { /* silent */ }
+  }
+
+  const handleDeleteLibrary = async (id: string) => {
+    try {
+      await axios.delete(`${API}/api/sponsors/library/${id}`)
+      setLibrary((prev) => prev.filter((e) => e.id !== id))
+    } catch { /* silent */ }
   }
 
   return (
@@ -118,7 +183,7 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
       ) : (
         <div className="space-y-6">
           {CATEGORIES.map(({ key, label, desc, Icon }) => {
-            const list = sponsorsByCategory(key)
+            const list     = sponsorsByCategory(key)
             const isAdding = addingFor === key
             return (
               <div key={key} className="border border-gray-200 rounded-lg overflow-hidden">
@@ -131,7 +196,7 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
                   </div>
                   {!isAdding && (
                     <button
-                      onClick={() => { setAddingFor(key); setForm(emptyForm()) }}
+                      onClick={() => { setAddingFor(key); setForm(emptyForm()); setShowLib(true) }}
                       className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-primary border border-primary rounded-lg hover:bg-primary/10 transition-smooth"
                     >
                       <Plus size={12} /> Tambah
@@ -163,7 +228,6 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
                   </div>
                 )}
 
-                {/* No sponsors placeholder */}
                 {list.length === 0 && !isAdding && (
                   <div className="px-4 py-4 text-xs text-text-secondary text-center">
                     Belum ada sponsor untuk kategori ini
@@ -175,11 +239,54 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
                   <div className="p-4 bg-primary/5 border-t border-primary/20 space-y-3">
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-bold text-primary uppercase tracking-wide">Tambah {label} Sponsor</span>
-                      <button onClick={() => setAddingFor(null)} className="text-text-secondary hover:text-text-primary">
+                      <button onClick={() => { setAddingFor(null); setShowLib(true) }} className="text-text-secondary hover:text-text-primary">
                         <X size={14} />
                       </button>
                     </div>
 
+                    {/* Library picker */}
+                    {library.length > 0 && (
+                      <div>
+                        <button
+                          onClick={() => setShowLib((v) => !v)}
+                          className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-primary mb-2"
+                        >
+                          <Library size={12} />
+                          {showLib ? 'Sembunyikan library' : 'Pilih dari library'}
+                        </button>
+                        {showLib && (
+                          <div className="flex flex-wrap gap-2 mb-3">
+                            {library.map((entry) => (
+                              <button
+                                key={entry.id}
+                                onClick={() => handlePickLibrary(entry)}
+                                className="flex items-center gap-2 px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg hover:border-primary hover:bg-primary/5 transition-smooth group"
+                              >
+                                <div className="w-6 h-6 rounded flex-shrink-0 overflow-hidden bg-gray-50 flex items-center justify-center border border-gray-100">
+                                  {entry.logoUrl
+                                    ? <img src={entry.logoUrl} alt="" className="w-full h-full object-contain" />
+                                    : <Building2 size={10} className="text-gray-300" />
+                                  }
+                                </div>
+                                <span className="text-xs font-medium text-text-secondary group-hover:text-primary">
+                                  {entry.companyName}
+                                </span>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleDeleteLibrary(entry.id) }}
+                                  className="hidden group-hover:flex ml-0.5 text-gray-300 hover:text-danger"
+                                  title="Hapus dari library"
+                                >
+                                  <X size={10} />
+                                </button>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <div className="border-t border-gray-200 mb-3" />
+                      </div>
+                    )}
+
+                    {/* Manual entry */}
                     <div>
                       <label className="block text-xs font-medium text-text-secondary mb-1">Nama Perusahaan / Sponsor *</label>
                       <input
@@ -230,6 +337,17 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
                       </div>
                     </div>
 
+                    {/* Save to library checkbox */}
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={form.saveToLib}
+                        onChange={(e) => setForm((f) => ({ ...f, saveToLib: e.target.checked }))}
+                        className="accent-primary"
+                      />
+                      <span className="text-xs text-text-secondary">Simpan ke library untuk pertandingan berikutnya</span>
+                    </label>
+
                     {form.error && <p className="text-xs text-danger">{form.error}</p>}
 
                     <div className="flex gap-2">
@@ -241,7 +359,7 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
                         {form.saving ? 'Menyimpan...' : 'Simpan Sponsor'}
                       </button>
                       <button
-                        onClick={() => setAddingFor(null)}
+                        onClick={() => { setAddingFor(null); setShowLib(true) }}
                         className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-smooth"
                       >
                         Batal

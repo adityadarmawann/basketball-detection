@@ -14,7 +14,7 @@ import subprocess
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 logger = logging.getLogger(__name__)
@@ -412,12 +412,15 @@ async def get_output_video(match_id: str, quarter: int = Query(None)):
                 path,
                 media_type="video/mp4",
                 headers={
-                    "Content-Disposition": f'attachment; filename="{fname}"',
+                    "Content-Disposition": f'inline; filename="{fname}"',
+                    "Accept-Ranges": "bytes",
                     "Cache-Control": "public, max-age=86400",
                 },
             )
+        # Only block with 202 while actively processing — if done, fall through
+        # to filesystem scan which will find the quarter-suffixed file.
         status = getattr(processor, "_status", "unknown")
-        if status in ("processing", "done"):
+        if status == "processing":
             raise HTTPException(
                 status_code=202,
                 detail="Analyzed video is still being rendered. Try again shortly.",
@@ -431,7 +434,8 @@ async def get_output_video(match_id: str, quarter: int = Query(None)):
         if os.path.exists(candidate):
             fname = os.path.basename(candidate)
             return FileResponse(candidate, media_type="video/mp4",
-                                headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                                headers={"Content-Disposition": f'inline; filename="{fname}"',
+                                         "Accept-Ranges": "bytes",
                                          "Cache-Control": "public, max-age=86400"})
         raise HTTPException(status_code=404, detail=f"Analyzed video for Q{quarter} not found.")
 
@@ -445,10 +449,35 @@ async def get_output_video(match_id: str, quarter: int = Query(None)):
         path = candidates[0]
         fname = os.path.basename(path)
         return FileResponse(path, media_type="video/mp4",
-                            headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                            headers={"Content-Disposition": f'inline; filename="{fname}"',
+                                     "Accept-Ranges": "bytes",
                                      "Cache-Control": "public, max-age=86400"})
 
     raise HTTPException(status_code=404, detail="Output video not found. Processing may still be running.")
+
+
+# ── GET /upload/raw/{match_id} — serve original uploaded video ───────────────
+
+@router.get("/upload/raw/{match_id}")
+async def get_raw_video(match_id: str):
+    """Serve the original uploaded video (before analysis overlay)."""
+    import glob
+    upload_dir = os.path.join(UPLOAD_PATH, match_id)
+    if not os.path.isdir(upload_dir):
+        raise HTTPException(status_code=404, detail="Upload not found")
+    # Find any .mp4 that is NOT the analyzed output
+    candidates = [
+        p for p in glob.glob(os.path.join(upload_dir, "*.mp4"))
+        if "_analyzed" not in os.path.basename(p)
+    ]
+    if not candidates:
+        raise HTTPException(status_code=404, detail="Raw video not found")
+    path  = sorted(candidates)[-1]
+    fname = os.path.basename(path)
+    return FileResponse(path, media_type="video/mp4",
+                        headers={"Content-Disposition": f'inline; filename="{fname}"',
+                                 "Accept-Ranges": "bytes",
+                                 "Cache-Control": "public, max-age=3600"})
 
 
 # ── GET /output/{match_id}/stats ──────────────────────────────────────────────

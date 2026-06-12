@@ -1484,7 +1484,32 @@ class VideoProcessor:
 
             cap.release()
             writer.release()
-            logger.info("Output video: %s  (frames=%d)", out_path, frame_idx)
+            logger.info("Output video (mp4v): %s  (frames=%d)", out_path, frame_idx)
+
+            # Re-encode to H.264 so browsers can play the output video.
+            # mp4v (MPEG-4 Part 2) is not supported by Chrome/Firefox/Safari.
+            h264_path = out_path + ".h264.mp4"
+            try:
+                import subprocess as _sp
+                result = _sp.run(
+                    ["ffmpeg", "-y", "-i", out_path,
+                     "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                     "-an", "-movflags", "+faststart",
+                     h264_path],
+                    capture_output=True, timeout=600,
+                )
+                if result.returncode == 0 and os.path.getsize(h264_path) > 0:
+                    os.replace(h264_path, out_path)
+                    logger.info("Output video re-encoded to H.264: %s", out_path)
+                else:
+                    if os.path.exists(h264_path):
+                        os.remove(h264_path)
+                    logger.warning("ffmpeg H.264 re-encode failed (rc=%d) — keeping mp4v", result.returncode)
+            except Exception as fe:
+                if os.path.exists(h264_path):
+                    os.remove(h264_path)
+                logger.warning("ffmpeg re-encode error: %s — keeping mp4v", fe)
+
             return out_path
 
         except Exception as exc:

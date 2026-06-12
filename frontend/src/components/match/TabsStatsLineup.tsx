@@ -1,10 +1,13 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 // import { AlertTriangle } from 'lucide-react'  // re-enable when KOREKSI tab is restored
+import axios from 'axios'
 import { useMatchStore } from '../../store/matchStore'
-import { GameEvent, PlayerStats } from '../../types'
+import { PlayerStats } from '../../types'
 import EventCorrectionPanel from './EventCorrectionPanel'
 import clsx from 'clsx'
+
+const API_BASE = import.meta.env.VITE_API_URL ?? ''
 
 type Tab = 'stats' | 'lineups' | 'correction'
 type Quarter = 0 | 1 | 2 | 3 | 4 // 0 = All
@@ -47,7 +50,35 @@ export default function TabsStatsLineup() {
   const [activeTab, setActiveTab] = useState<Tab>('stats')
   const [quarter, setQuarter] = useState<Quarter>(0)
   const navigate = useNavigate()
-  const { stats, events, teamA, teamB } = useMatchStore()
+  const { stats, teamA, teamB, matchId } = useMatchStore()
+
+  // Per-quarter stats fetched directly from backend Redis key stats:{matchId}:q{n}
+  // — same source as "All" (useMatchStats), so numbers are always consistent.
+  type TeamStatsSummary = ReturnType<typeof emptyTeamStats>
+  const [quarterFetched, setQuarterFetched] = useState<{ A: TeamStatsSummary; B: TeamStatsSummary } | null>(null)
+
+  useEffect(() => {
+    if (quarter === 0 || !matchId) { setQuarterFetched(null); return }
+    axios
+      .get(`${API_BASE}/api/stats/quarter/${quarter}?match_id=${encodeURIComponent(matchId)}`)
+      .then((res) => {
+        const ps: Record<string, any> = res.data.player_stats ?? {}
+        const aggA = emptyTeamStats(), aggB = emptyTeamStats()
+        for (const p of Object.values(ps)) {
+          const ts = p.total_stats ?? {}
+          const agg = p.team === 'A' ? aggA : p.team === 'B' ? aggB : null
+          if (!agg) continue
+          agg.pts     += ts.pts  ?? 0
+          agg.totReb  += ts.reb  ?? (ts.oreb ?? 0) + (ts.dreb ?? 0)
+          agg.ast     += ts.ast  ?? 0
+          agg.stl     += ts.stl  ?? 0
+          agg.blocks  += ts.blk  ?? 0
+          agg.tov     += ts.tov  ?? 0
+        }
+        setQuarterFetched({ A: aggA, B: aggB })
+      })
+      .catch(() => setQuarterFetched(null))
+  }, [quarter, matchId])
 
   // Badge count: unidentified players with scoring events
   const unidentifiedCount = useMemo(
@@ -59,7 +90,7 @@ export default function TabsStatsLineup() {
 
   const { teamAStats, teamBStats } = useMemo(() => {
     if (quarter === 0) {
-      // All quarters — sum from cumulative store stats
+      // All quarters — sum from cumulative store stats (populated by useMatchStats → Redis live key)
       const players = Object.values(stats)
       const teamAPlayers = players.filter((p) => p.team === 'A')
       const teamBPlayers = players.filter((p) => p.team === 'B')
@@ -85,24 +116,12 @@ export default function TabsStatsLineup() {
       }
     }
 
-    // Specific quarter — aggregate directly from events
-    const aggA = emptyTeamStats()
-    const aggB = emptyTeamStats()
-    events
-      .filter((e: GameEvent) => e.quarter === quarter)
-      .forEach((e: GameEvent) => {
-        const agg = e.team === 'A' ? aggA : aggB
-        switch (e.eventType) {
-          case 'FGM': agg.pts += e.points ?? 2; break
-          case 'REB': agg.totReb++;              break
-          case 'AST': agg.ast++;                 break
-          case 'STL': agg.stl++;                 break
-          case 'BLK': agg.blocks++;              break
-          case 'TOV': agg.tov++;                 break
-        }
-      })
-    return { teamAStats: aggA, teamBStats: aggB }
-  }, [stats, events, quarter])
+    // Specific quarter — from backend Redis key stats:{matchId}:q{n}, same source as All
+    if (quarterFetched) {
+      return { teamAStats: quarterFetched.A, teamBStats: quarterFetched.B }
+    }
+    return { teamAStats: emptyTeamStats(), teamBStats: emptyTeamStats() }
+  }, [stats, quarter, quarterFetched])
 
   return (
     <div className="bg-surface rounded-lg shadow-sm overflow-hidden">

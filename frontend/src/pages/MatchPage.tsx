@@ -39,6 +39,18 @@ export default function MatchPage() {
     store.setMatchStep(s)
   }, [store])
 
+  // When "Match Baru" resets the store from outside (matchId cleared),
+  // sync all local state back to initial without needing a page refresh.
+  useEffect(() => {
+    if (!store.matchId) {
+      setStepLocal('setup')
+      setVideoUrlLocal('')
+      setFrameData([])
+      setNextUploadQuarter(undefined)
+      setUploadedQuarters([])
+    }
+  }, [store.matchId])
+
   const setVideoUrl = useCallback((url: string) => {
     setVideoUrlLocal(url)
     store.setVideoUrl(url)
@@ -85,7 +97,7 @@ export default function MatchPage() {
     }
   }, [store, frameData])
 
-  // Re-fetch frameData + uploadedQuarters when returning to live with no data
+  // Re-fetch frameData + uploadedQuarters when returning to live with no data.
   useEffect(() => {
     if (step !== 'live' || !store.matchId) return
     if (frameData.length === 0) {
@@ -145,10 +157,14 @@ export default function MatchPage() {
   }, [])
 
   const handleAnalysisComplete = useCallback(async () => {
+    disconnect()              // stop WS & mock — analysis is done, no more live frames
+    store.setScore(0, 0)      // reset so video playback drives score from 0
+    store.setQuarter(1)
     setStep('live')
     setOverlayLoading(true)
     const { matchId } = useMatchStore.getState()
     if (!matchId) { setOverlayLoading(false); return }
+    // videoUrl stays as-is (blob URL from upload — still valid in same session)
     try {
       const [framesRes] = await Promise.allSettled([
         axios.get<FrameBboxEntry[]>(`${import.meta.env.VITE_API_URL}/api/upload/frames/${matchId}`),
@@ -161,7 +177,7 @@ export default function MatchPage() {
       // Expected in dev mode or when backend is unavailable
     }
     setOverlayLoading(false)
-  }, [fetchUploadedQuarters])
+  }, [fetchUploadedQuarters, disconnect, store])
 
   const goToVideo = useCallback(() => {
     setStep('analyzing')
@@ -245,8 +261,8 @@ export default function MatchPage() {
                 controls
                 muted
                 className="w-full max-h-80 object-contain bg-black"
+                onError={(e) => { (e.currentTarget as HTMLVideoElement).style.display = 'none' }}
               />
-              {/* Info banner — bbox overlay belum tersedia selama analisis berjalan */}
               <div className="absolute bottom-10 inset-x-0 flex justify-center pointer-events-none">
                 <div className="bg-black/75 text-white text-xs px-3 py-1.5 rounded-full flex items-center gap-2">
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -260,6 +276,7 @@ export default function MatchPage() {
           <VideoScanningStatus
             matchId={store.matchId}
             onComplete={handleAnalysisComplete}
+            onReupload={() => setStep('upload')}
           />
         </div>
       )}
@@ -317,6 +334,12 @@ export default function MatchPage() {
                 muted
                 className="w-full object-contain bg-black"
                 style={{ maxHeight: '480px' }}
+                onError={(e) => {
+                  // Blob URL died (page refresh) — fall back to server raw endpoint
+                  if (store.matchId && (e.currentTarget.src || '').startsWith('blob:')) {
+                    setVideoUrl(`${import.meta.env.VITE_API_URL}/api/upload/raw/${store.matchId}`)
+                  }
+                }}
               />
             </div>
           )}

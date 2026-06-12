@@ -252,7 +252,9 @@ export function useMatchStats(
         .filter((p) => p.team === 'B')
         .reduce((s, p) => s + p.pts, 0)
       const cur = useMatchStore.getState()
-      if (ptsA > cur.teamA.score || ptsB > cur.teamB.score) {
+      // In replay mode (isLive=false) score is driven by video position via
+      // handleVideoTimeUpdate — don't let the stats poll override it.
+      if (cur.isLive && (ptsA > cur.teamA.score || ptsB > cur.teamB.score)) {
         setScore(Math.max(ptsA, cur.teamA.score), Math.max(ptsB, cur.teamB.score))
       }
     } else {

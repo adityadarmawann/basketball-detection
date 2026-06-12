@@ -30,16 +30,15 @@ logger = logging.getLogger(__name__)
 MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "jersey_no.pt"
 
-VOTE_THRESHOLD        = 3    # OCR reads required to confirm a jersey number
+VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number (was 3)
 MAX_VOTE_HISTORY      = 20   # rolling window of OCR reads per track_id
                              # at OCR_SAMPLE_EVERY=5 this covers ~100 video frames (~4s)
 OCR_SAMPLE_EVERY      = 5    # run OCR once every N frames per player (staggered across players)
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
 OCR_HEIGHT_PX     = 128   # resize crop to this height for OCR (was 112; better for 2-digit far)
-OCR_MIN_SCORE     = 0.45  # minimum PaddleOCR confidence to accept (was 0.50; voting absorbs noise)
-BLUR_THRESHOLD    = 55.0  # Laplacian variance below this = too blurry for OCR (was 80; accept jog)
-                          # Raise if too many frames skipped; lower if blurry frames still pass
+OCR_MIN_SCORE     = 0.40  # minimum PaddleOCR confidence to accept
+BLUR_THRESHOLD    = 20.0  # Laplacian variance below this = too blurry for OCR (was 55; accept motion)
 
 
 # ---------------------------------------------------------------------------
@@ -49,12 +48,13 @@ BLUR_THRESHOLD    = 55.0  # Laplacian variance below this = too blurry for OCR (
 def _back_crop_heuristic(player_h: int, player_w: int) -> tuple[int, int, int, int]:
     """
     Return (y1, y2, x1, x2) of the jersey number area within the player crop.
-    Targets the upper torso: skip head (top 15%), take 50% height, center 60%.
+    Targets the chest/number region: skip head (top 20%), end at waist (~55%),
+    wider width (10%-90%) to catch numbers near jersey edges.
     """
-    y1 = int(player_h * 0.15)
-    y2 = int(player_h * 0.65)
-    x1 = int(player_w * 0.20)
-    x2 = int(player_w * 0.80)
+    y1 = int(player_h * 0.20)
+    y2 = int(player_h * 0.55)
+    x1 = int(player_w * 0.10)
+    x2 = int(player_w * 0.90)
     return y1, y2, x1, x2
 
 
@@ -492,35 +492,13 @@ class JerseyOCR:
         """
         Returns (y1, y2, x1, x2) of the number region inside player_crop.
 
-        Runs YOLO jersey_no.pt and picks the highest-confidence "number" detection.
-        Falls back to heuristic torso-center crop if no detection passes conf threshold.
+        Uses heuristic torso crop directly — jersey_no.pt is bypassed because
+        in practice the two-stage approach (detect then OCR) is less reliable
+        than sending a consistent torso region straight to PaddleOCR.
         """
         h, w = player_crop.shape[:2]
-        if h < 20 or w < 10:   # too small to read any number (raised from 8×4)
+        if h < 20 or w < 10:
             return None
-
-        if self.model is not None and self._number_class_idx is not None:
-            # Fine-tuned model path
-            try:
-                results = self.model.predict(
-                    player_crop, verbose=False, conf=self.conf_threshold
-                )
-                if results and results[0].boxes is not None:
-                    boxes = results[0].boxes
-                    cls_mask = boxes.cls.cpu().numpy().astype(int) == self._number_class_idx
-                    if cls_mask.any():
-                        xyxy = boxes.xyxy.cpu().numpy()[cls_mask]
-                        confs = boxes.conf.cpu().numpy()[cls_mask]
-                        best  = int(confs.argmax())
-                        bx1, by1, bx2, by2 = [int(v) for v in xyxy[best]]
-                        return (
-                            max(0, by1), min(h, by2),
-                            max(0, bx1), min(w, bx2),
-                        )
-            except Exception as exc:
-                logger.warning("jersey_no.pt inference failed: %s", exc)
-
-        # Fallback: heuristic torso crop
         y1, y2, x1, x2 = _back_crop_heuristic(h, w)
         return y1, y2, x1, x2
 

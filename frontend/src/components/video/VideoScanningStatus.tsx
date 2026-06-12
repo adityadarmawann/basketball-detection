@@ -3,13 +3,14 @@ import { CheckCircle, Loader2, AlertTriangle, RefreshCw } from 'lucide-react'
 import axios, { AxiosError } from 'axios'
 
 interface Props {
-  matchId: string
-  onComplete: () => void
+  matchId:      string
+  onComplete:   () => void
+  onReupload?:  () => void
 }
 
 type Phase = 'connecting' | 'scanning' | 'done' | 'dev_mode' | 'error'
 
-export default function VideoScanningStatus({ matchId, onComplete }: Props) {
+export default function VideoScanningStatus({ matchId, onComplete, onReupload }: Props) {
   const [phase, setPhase] = useState<Phase>('connecting')
   const [progress, setProgress] = useState(0)
   const [framesProcessed, setFramesProcessed] = useState(0)
@@ -64,8 +65,8 @@ export default function VideoScanningStatus({ matchId, onComplete }: Props) {
         const axiosErr = err as AxiosError
         const httpStatus = axiosErr.response?.status
 
-        if (httpStatus === 503 || httpStatus === 404) {
-          // Backend pipeline not available — dev mode simulation
+        if (httpStatus === 503) {
+          // Backend up but pipeline not available → dev mode simulation (frontend testing)
           setPhase('dev_mode')
           let p = 0
           devTimer = window.setInterval(() => {
@@ -79,8 +80,11 @@ export default function VideoScanningStatus({ matchId, onComplete }: Props) {
               setProgress(Math.round(p))
             }
           }, 500)
+        } else if (httpStatus === 404) {
+          // Match not found — backend was restarted or analysis never ran
+          setPhase('error')
+          setErrorMsg('Sesi analisis tidak ditemukan. Backend mungkin di-restart saat proses berjalan. Silakan upload ulang video.')
         } else {
-          // Real error: network down, server crash, timeout, dll
           setPhase('error')
           if (!axiosErr.response) {
             setErrorMsg('Tidak bisa terhubung ke server. Pastikan backend berjalan.')
@@ -98,6 +102,16 @@ export default function VideoScanningStatus({ matchId, onComplete }: Props) {
       if (devTimer !== null) clearInterval(devTimer)
     }
   }, [matchId])
+
+  // Auto-advance to dashboard 3 s after analysis completes (handles reconnect too)
+  const [countdown, setCountdown] = useState(3)
+  useEffect(() => {
+    if (phase !== 'done') return
+    setCountdown(3)
+    const tick = setInterval(() => setCountdown((c) => c - 1), 1000)
+    const go   = setTimeout(() => onComplete(), 3000)
+    return () => { clearInterval(tick); clearTimeout(go) }
+  }, [phase, onComplete])
 
   const isDone = phase === 'done'
   const isError = phase === 'error'
@@ -123,13 +137,23 @@ export default function VideoScanningStatus({ matchId, onComplete }: Props) {
             <p className="text-sm font-bold text-red-400">Analisis Gagal</p>
             <p className="text-xs text-gray-400 mt-1 break-words">{errorMsg}</p>
           </div>
-          <button
-            onClick={() => window.location.reload()}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs font-bold rounded-lg transition-smooth shrink-0"
-          >
-            <RefreshCw size={12} />
-            Coba Lagi
-          </button>
+          <div className="flex flex-col gap-2 shrink-0">
+            {onReupload && (
+              <button
+                onClick={onReupload}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-primary hover:bg-primary-dark text-white text-xs font-bold rounded-lg transition-smooth"
+              >
+                Upload Ulang
+              </button>
+            )}
+            <button
+              onClick={() => window.location.reload()}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs font-bold rounded-lg transition-smooth"
+            >
+              <RefreshCw size={12} />
+              Refresh
+            </button>
+          </div>
         </div>
       </div>
     )
@@ -161,7 +185,7 @@ export default function VideoScanningStatus({ matchId, onComplete }: Props) {
             onClick={onComplete}
             className="px-4 py-1.5 bg-primary text-white text-sm font-bold rounded-lg hover:bg-primary-dark transition-smooth"
           >
-            Lihat Dashboard →
+            Lihat Dashboard ({countdown > 0 ? countdown : '→'})
           </button>
         )}
       </div>

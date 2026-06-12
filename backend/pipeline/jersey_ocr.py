@@ -30,15 +30,16 @@ logger = logging.getLogger(__name__)
 MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "jersey_no.pt"
 
-VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number (was 3)
-MAX_VOTE_HISTORY      = 20   # rolling window of OCR reads per track_id
-                             # at OCR_SAMPLE_EVERY=5 this covers ~100 video frames (~4s)
-OCR_SAMPLE_EVERY      = 5    # run OCR once every N frames per player (staggered across players)
+VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
+MAX_VOTE_HISTORY      = 40   # wider window — fast players may only give readable frames
+                             # occasionally; OCR_SAMPLE_EVERY=5 × 40 = 200 frames (~7s)
+OCR_SAMPLE_EVERY      = 4    # run OCR once every N frames per player
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
-OCR_HEIGHT_PX     = 128   # resize crop to this height for OCR (was 112; better for 2-digit far)
-OCR_MIN_SCORE     = 0.40  # minimum PaddleOCR confidence to accept
-BLUR_THRESHOLD    = 20.0  # Laplacian variance below this = too blurry for OCR (was 55; accept motion)
+OCR_HEIGHT_PX     = 160   # larger resize → OCR reads small/distant jersey numbers better
+OCR_MIN_SCORE     = 0.35  # slightly more permissive — voting absorbs noise
+BLUR_THRESHOLD    = 0.0   # disabled — blur filter skips too many fast-player frames;
+                          # voting window (VOTE_THRESHOLD=2, MAX=40) handles noise instead
 
 
 # ---------------------------------------------------------------------------
@@ -48,13 +49,14 @@ BLUR_THRESHOLD    = 20.0  # Laplacian variance below this = too blurry for OCR (
 def _back_crop_heuristic(player_h: int, player_w: int) -> tuple[int, int, int, int]:
     """
     Return (y1, y2, x1, x2) of the jersey number area within the player crop.
-    Targets the chest/number region: skip head (top 20%), end at waist (~55%),
-    wider width (10%-90%) to catch numbers near jersey edges.
+    Covers head-to-thigh (10%-75%) to catch numbers when player is bent,
+    jumping, or leaning — jersey number position varies greatly in motion.
+    Full width (5%-95%) avoids clipping numbers near edges.
     """
-    y1 = int(player_h * 0.20)
-    y2 = int(player_h * 0.55)
-    x1 = int(player_w * 0.10)
-    x2 = int(player_w * 0.90)
+    y1 = int(player_h * 0.10)
+    y2 = int(player_h * 0.75)
+    x1 = int(player_w * 0.05)
+    x2 = int(player_w * 0.95)
     return y1, y2, x1, x2
 
 

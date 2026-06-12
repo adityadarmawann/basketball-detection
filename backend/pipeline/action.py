@@ -63,7 +63,7 @@ PASS_FIRED_DURATION       = 20     # frames pass remains active for catch window
 RULE_CONFIDENCE  = 0.6    # all rule-based outputs flagged as estimates
 SHOOT_CONFIDENCE = 0.85   # from pose.py shooting detection
 
-MODEL_BUFFER_MIN = 32  # minimum frames before model runs (was 8; must be >= T_FAST)
+MODEL_BUFFER_MIN = 16  # minimum frames before model runs
 MODEL_CONF_MIN   = 0.15  # minimum softmax confidence to accept model prediction; below → rule-based
                          # 6 classes → uniform baseline ≈ 0.167, so 0.15 accepts most model outputs
 _T_FAST          = 32  # SlowFast fast-pathway temporal dim (head pool expects 32)

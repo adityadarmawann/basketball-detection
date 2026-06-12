@@ -193,10 +193,27 @@ export default function MatchPage() {
       )}
 
       {step === 'upload' && store.matchId && (
-        <VideoUpload
-          onUploadComplete={handleUploadComplete}
-          initialQuarter={nextUploadQuarter}
-        />
+        <div className="space-y-4">
+          {/* Back to dashboard — only when a previous quarter already has data */}
+          {uploadedQuarters.length > 0 && (
+            <div className="flex items-center justify-between">
+              <button
+                onClick={() => setStep('live')}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-surface border border-gray-200 text-text-secondary text-xs font-bold rounded-lg hover:border-primary hover:text-primary transition-smooth"
+              >
+                <ChevronLeft size={13} />
+                Kembali ke Dashboard
+              </button>
+              <span className="text-xs text-text-secondary">
+                Quarter sudah ada: {uploadedQuarters.map(q => `Q${q}`).join(', ')}
+              </span>
+            </div>
+          )}
+          <VideoUpload
+            onUploadComplete={handleUploadComplete}
+            initialQuarter={nextUploadQuarter}
+          />
+        </div>
       )}
 
       {step === 'analyzing' && videoUrl && store.matchId && (

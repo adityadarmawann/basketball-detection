@@ -395,15 +395,14 @@ async def get_frame_data(match_id: str):
 # ── GET /output/{match_id}/video ──────────────────────────────────────────────
 
 @router.get("/output/{match_id}/video")
-async def get_output_video(match_id: str):
+async def get_output_video(match_id: str, quarter: int = Query(None)):
     """
-    Download the analyzed video (original frames + bbox overlay) written to
-    backend/output/{match_id}/{match_id}_analyzed.mp4 after processing finishes.
+    Download the analyzed video for a match (or specific quarter).
 
-    Returns 202 while rendering is still in progress.
-    Returns 404 if the match hasn't been processed yet.
+    ?quarter=1  → {match_id}_q1_analyzed.mp4
+    (no param)  → most recent processor path, then filesystem scan newest-first
     """
-    # Check live processor first
+    # Check live processor first (most recent upload)
     processor = _processors.get(match_id)
     if processor:
         path = getattr(processor, "_output_video_path", "")
@@ -417,7 +416,6 @@ async def get_output_video(match_id: str):
                     "Cache-Control": "public, max-age=86400",
                 },
             )
-        # Processor exists but video not written yet
         status = getattr(processor, "_status", "unknown")
         if status in ("processing", "done"):
             raise HTTPException(
@@ -425,34 +423,30 @@ async def get_output_video(match_id: str):
                 detail="Analyzed video is still being rendered. Try again shortly.",
             )
 
-    # Fall back to MongoDB
-    db = get_db()
-    if db:
-        try:
-            match = db["matches"].find_one({"match_id": match_id}, {"output_video_path": 1})
-            if match:
-                path = match.get("output_video_path", "")
-                if path and os.path.exists(path):
-                    fname = os.path.basename(path)
-                    return FileResponse(
-                        path,
-                        media_type="video/mp4",
-                        headers={
-                            "Content-Disposition": f'attachment; filename="{fname}"',
-                            "Cache-Control": "public, max-age=86400",
-                        },
-                    )
-        except Exception as e:
-            logger.warning("MongoDB output video lookup: %s", e)
+    out_dir = os.path.join(OUTPUT_PATH, match_id)
 
-    # Try filesystem fallback
-    candidate = os.path.join(OUTPUT_PATH, match_id, f"{match_id}_analyzed.mp4")
-    if os.path.exists(candidate):
-        return FileResponse(
-            candidate,
-            media_type="video/mp4",
-            headers={"Content-Disposition": f'attachment; filename="{match_id}_analyzed.mp4"'},
-        )
+    # Specific quarter requested
+    if quarter is not None:
+        candidate = os.path.join(out_dir, f"{match_id}_q{quarter}_analyzed.mp4")
+        if os.path.exists(candidate):
+            fname = os.path.basename(candidate)
+            return FileResponse(candidate, media_type="video/mp4",
+                                headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                                         "Cache-Control": "public, max-age=86400"})
+        raise HTTPException(status_code=404, detail=f"Analyzed video for Q{quarter} not found.")
+
+    # No quarter specified — return newest per-quarter file found
+    import glob
+    candidates = sorted(
+        glob.glob(os.path.join(out_dir, f"{match_id}_q*_analyzed.mp4")),
+        reverse=True,
+    )
+    if candidates:
+        path = candidates[0]
+        fname = os.path.basename(path)
+        return FileResponse(path, media_type="video/mp4",
+                            headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                                     "Cache-Control": "public, max-age=86400"})
 
     raise HTTPException(status_code=404, detail="Output video not found. Processing may still be running.")
 
@@ -497,13 +491,16 @@ async def get_output_stats_csv(match_id: str):
         except Exception as e:
             logger.warning("MongoDB output stats lookup: %s", e)
 
-    # Try filesystem fallback
-    candidate = os.path.join(OUTPUT_PATH, match_id, f"{match_id}_stats.csv")
-    if os.path.exists(candidate):
-        return FileResponse(
-            candidate,
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{match_id}_stats.csv"'},
-        )
+    # Try filesystem fallback — scan for newest per-quarter CSV
+    import glob as _glob
+    csv_candidates = sorted(
+        _glob.glob(os.path.join(OUTPUT_PATH, match_id, f"{match_id}_q*_stats.csv")),
+        reverse=True,
+    )
+    if csv_candidates:
+        path = csv_candidates[0]
+        fname = os.path.basename(path)
+        return FileResponse(path, media_type="text/csv",
+                            headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
     raise HTTPException(status_code=404, detail="Stats CSV not found. Processing may still be running.")

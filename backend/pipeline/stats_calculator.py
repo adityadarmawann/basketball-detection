@@ -22,6 +22,8 @@ FPS_DEFAULT     = 30
 SMOOTH_WINDOW   = 5          # frames for speed low-pass
 JUMP_PX_TO_CM   = 0.08       # approx pixel→cm (camera/court specific)
 MIN_SPEED_KMH   = 0.1        # noise floor — speeds below this are ignored
+MAX_SPEED_KMH   = 36.0       # hard cap — above this is a tracking glitch (human sprint max ~30 km/h)
+MAX_GAP_MS      = 500        # skip speed sample if gap since last position > this (occlusion/re-id)
 DIR_CHANGE_DEG  = 45.0       # degrees threshold for direction-change count
 MAX_POS_HISTORY = 2000       # position samples kept per player
 
@@ -171,6 +173,10 @@ class StatsCalculator:
     def reset_quarter(self, quarter: int) -> None:
         """Advance the current quarter (per-quarter state is lazy-initialised)."""
         self.current_quarter = quarter
+        # Clear position history so re-used track IDs from ByteTracker reset
+        # don't produce a spurious large distance/speed on the first new frame.
+        self._prev_pos.clear()
+        self._smooth_buf.clear()
         logger.info("Quarter %d started", quarter)
 
     def reset_match(self) -> None:
@@ -306,11 +312,17 @@ class StatsCalculator:
             if tid in self._prev_pos:
                 px, py, pts_ms = self._prev_pos[tid]
                 dt_ms = ts - pts_ms
-                if dt_ms > 0:
+                # Skip if gap is too large (occlusion, re-id, or quarter reset artefact)
+                if 0 < dt_ms <= MAX_GAP_MS:
                     dist_m    = math.hypot(x - px, y - py)
                     dt_s      = dt_ms / 1000.0
                     speed_ms  = dist_m / dt_s
                     speed_kmh = speed_ms * 3.6
+
+                    # Discard physically impossible values (tracking glitch / bad homography)
+                    if speed_kmh > MAX_SPEED_KMH:
+                        self._prev_pos[tid] = (x, y, ts)
+                        continue
 
                     # Low-pass smooth
                     self._smooth_buf[tid].append(speed_kmh)

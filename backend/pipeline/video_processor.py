@@ -98,9 +98,7 @@ TARGET_FPS           = 25
 STATS_UPDATE_INTERVAL = 30    # frames between WebSocket pushes
 BALL_TRAJ_MAXLEN     = 60    # court positions kept for ball trajectory
 FRAME_QUEUE_MAXSIZE  = 8     # slightly larger buffer for GPU burst
-FRAME_BUFFER_SIZE    = 64    # temporal window for action classifier (was 16)
-                              # Model trained on 2-sec clips @ 30fps = 60 frames;
-                              # needs >= T_FAST=32 frames for SlowFast inference.
+FRAME_BUFFER_SIZE    = 16    # temporal window for action classifier
 QUARTER_DURATION_S   = 600   # FIBA 10-minute quarters
 FPS_LOG_INTERVAL     = 100   # frames between FPS log lines
 FPS_DEFAULT          = 30
@@ -212,6 +210,10 @@ class VideoProcessor:
         # Speed cache: track_id → avg_speed_kmh, updated every WS cycle (~5 frames)
         # Used by _snapshot_frame so the per-frame JSON has speed without calling get_live_stats() every frame.
         self._speed_cache:     dict  = {}   # {track_id: float}
+
+        # Sticky action cache: last non-empty action per player so that the
+        # 19 frames between ACTION_EVERY_N_FRAMES snapshots still show a label.
+        self._last_action_cache: dict = {}  # {track_id: str}
 
         # Tracks which track_ids have already had a jersey_confirmed WS message sent.
         # Reset per quarter so late-confirming players always get a notification.
@@ -734,14 +736,9 @@ class VideoProcessor:
                     tracking_snapshot[player["track_id"]] = (
                         cp[0], cp[1], timestamp_ms
                     )
-                elif self._frame_width > 0 and self._frame_height > 0:
-                    # Fallback: normalize pixel center to approximate court meters.
-                    # court is 28m × 15m; pixel origin top-left → y is inverted.
-                    center = player.get("center")
-                    if center:
-                        x_m = center[0] / self._frame_width  * 28.0
-                        y_m = center[1] / self._frame_height * 15.0
-                        tracking_snapshot[player["track_id"]] = (x_m, y_m, timestamp_ms)
+                # No fallback pixel-to-meter when court is uncalibrated — the linear
+                # approximation assumes the full 28×15 m court fills the entire frame,
+                # which is rarely true and produces systematically wrong speeds.
 
             # Build stats-compatible roster: {track_id: {name, jersey_number, team}}
             # using tracker jersey map + raw upload roster (jersey_str → name)
@@ -795,6 +792,11 @@ class VideoProcessor:
             for a in actions_data.get("actions", [])
         }
 
+        # Update sticky cache whenever a fresh classification is available
+        for _tid, _label in action_map.items():
+            if _label:
+                self._last_action_cache[_tid] = _label
+
         players_out = []
         for player in tracking.get("tracked_players", []):
             tid    = player["track_id"]
@@ -809,7 +811,9 @@ class VideoProcessor:
                 ]
             else:
                 norm = list(raw)
-            action_label = action_map.get(tid, "")
+            # Prefer fresh action; fall back to last known so labels persist
+            # across the 19 non-action frames between each classification cycle
+            action_label = action_map.get(tid) or self._last_action_cache.get(tid, "")
             court_pos = player.get("court_pos")
             players_out.append({
                 "i": tid, "j": jersey, "t": team, "b": norm,
@@ -907,6 +911,12 @@ class VideoProcessor:
             else:
                 cur_court_pos = self._last_court_pos.get(tid)
 
+            # Sticky action: prefer current frame result, fall back to last known
+            raw_action = act_entry.get("action", "")
+            if raw_action:
+                self._last_action_cache[tid] = _norm_action(raw_action)
+            ws_action = self._last_action_cache.get(tid, "Stand")
+
             players.append({
                 "trackId":      tid,
                 "jerseyNumber": jersey_number,
@@ -914,7 +924,7 @@ class VideoProcessor:
                 "team":         player.get("team", "") or pstat.get("team", ""),
                 "bbox":         norm_bbox,
                 "courtPos":     cur_court_pos,
-                "action":       _norm_action(act_entry.get("action", "Stand")),
+                "action":       ws_action,
                 "speedKmh":     mpi.get("avg_speed_kmh", 0.0),
                 "keypoints":    keypoints,
             })
@@ -1048,7 +1058,15 @@ class VideoProcessor:
         if self._redis is None:
             return
         try:
-            payload = json.dumps(stats, default=str)
+            # Inject score derived from team_stats so the REST endpoint and
+            # per-quarter blobs both carry an accurate score field.
+            enriched = dict(stats)
+            ts = stats.get("team_stats", {})
+            enriched["score"] = {
+                "team_a": ts.get("A", {}).get("pts", 0),
+                "team_b": ts.get("B", {}).get("pts", 0),
+            }
+            payload = json.dumps(enriched, default=str)
             result = self._redis.set(f"stats:{match_id}", payload, ex=ttl)
             if asyncio.iscoroutine(result):
                 await result
@@ -1129,9 +1147,17 @@ class VideoProcessor:
         for t in team_out.values():
             t["fg_pct"] = round(t["fgm"] / t["fga"], 3) if t["fga"] > 0 else 0.0
 
+        # Derive score from the already-summed team_stats (correct for both
+        # full-game uploads and separate per-quarter uploads).
+        merged_score = {
+            "team_a": int(team_out.get("A", {}).get("pts", 0)),
+            "team_b": int(team_out.get("B", {}).get("pts", 0)),
+        }
+
         return {
             **{k: v for k, v in latest_blob.items()
-               if k not in ("player_stats", "team_stats")},
+               if k not in ("player_stats", "team_stats", "score")},
+            "score":        merged_score,
             "player_stats": player_stats_out,
             "team_stats":   team_out,
         }
@@ -1140,8 +1166,9 @@ class VideoProcessor:
         """Update MongoDB match status; push final stats; write output files."""
 
         # ── 1. Write per-frame bbox JSON (frontend time-lookup) ───────────────
+        # Use quarter-suffixed filename so Q1 and Q2 files don't overwrite each other.
         if self._frame_store and self._video_path:
-            frames_path = os.path.splitext(self._video_path)[0] + "_frames.json"
+            frames_path = os.path.splitext(self._video_path)[0] + f"_q{self._start_quarter}_frames.json"
             try:
                 with open(frames_path, "w") as fp:
                     fp.write(json.dumps(self._frame_store, separators=(',', ':')))
@@ -1167,7 +1194,7 @@ class VideoProcessor:
             if RENDER_OUTPUT_VIDEO and self._frame_store:
                 loop = asyncio.get_event_loop()
                 video_out = await loop.run_in_executor(
-                    None, self._render_output_video, out_dir, match_id
+                    None, self._render_output_video, out_dir, match_id, self._start_quarter
                 )
                 if video_out:
                     self._output_video_path = video_out
@@ -1240,7 +1267,7 @@ class VideoProcessor:
                 return None
 
             os.makedirs(out_dir, exist_ok=True)
-            csv_path = os.path.join(out_dir, f"{match_id}_stats.csv")
+            csv_path = os.path.join(out_dir, f"{match_id}_q{self._start_quarter}_stats.csv")
 
             headers = [
                 "#", "Name", "Team", "MIN", "PTS",
@@ -1281,10 +1308,10 @@ class VideoProcessor:
             logger.warning("_save_stats_csv failed: %s", exc)
             return None
 
-    def _render_output_video(self, out_dir: str, match_id: str) -> Optional[str]:
+    def _render_output_video(self, out_dir: str, match_id: str, quarter: int = 1) -> Optional[str]:
         """
         Re-read the original video and draw bbox overlays from stored frame data.
-        Writes to out_dir/{match_id}_analyzed.mp4.  Returns path or None on error.
+        Writes to out_dir/{match_id}_q{quarter}_analyzed.mp4.  Returns path or None on error.
         Runs synchronously — call via run_in_executor to avoid blocking the loop.
         """
         if not self._frame_store or not self._video_path:
@@ -1301,7 +1328,7 @@ class VideoProcessor:
             width   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            out_path = os.path.join(out_dir, f"{match_id}_analyzed.mp4")
+            out_path = os.path.join(out_dir, f"{match_id}_q{quarter}_analyzed.mp4")
             fourcc   = cv2.VideoWriter_fourcc(*"mp4v")
             writer   = cv2.VideoWriter(out_path, fourcc, src_fps, (width, height))
             if not writer.isOpened():
@@ -1497,6 +1524,9 @@ class VideoProcessor:
         logger.info("Quarter %d started (frame=%d)",
                     self._current_quarter, self._frame_count)
 
+        # Preserve cumulative score before event_engine.reset() clears it
+        carried_score = dict(self._events_engine.score) if self._events_engine else {}
+
         for component, method in [
             (self._tracker,       "reset"),
             (self._events_engine, "reset"),
@@ -1510,6 +1540,10 @@ class VideoProcessor:
                     logger.warning("%s.reset() error: %s",
                                    type(component).__name__, e)
 
+        # Restore cumulative score so event_engine keeps the running game total
+        if self._events_engine and carried_score:
+            self._events_engine.score.update(carried_score)
+
         if self._stats:
             try:
                 self._stats.reset_quarter(self._current_quarter)
@@ -1520,6 +1554,7 @@ class VideoProcessor:
         # early in the new quarter still get a jersey_confirmed WS message.
         self._confirmed_jersey_sent.clear()
         self._last_known_team.clear()
+        self._last_action_cache.clear()
 
     # ── Timing helpers ────────────────────────────────────────────────────────
 

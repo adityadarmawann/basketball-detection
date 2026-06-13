@@ -4,6 +4,7 @@ import LandingPage from './pages/LandingPage'
 import MatchPage from './pages/MatchPage'
 import LineupPage from './pages/LineupPage'
 import MpiPage from './pages/MpiPage'
+import ViewMatchPage from './pages/ViewMatchPage'
 import { useAuthStore } from './store/authStore'
 import { ErrorBoundary } from './components/ErrorBoundary'
 
@@ -36,6 +37,11 @@ export default function App() {
             <Route
               path="/match/mpi"
               element={<ProtectedRoute><ErrorBoundary><MpiPage /></ErrorBoundary></ProtectedRoute>}
+            />
+            {/* Public shareable link — no login required */}
+            <Route
+              path="/view/:matchId"
+              element={<ErrorBoundary><ViewMatchPage /></ErrorBoundary>}
             />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

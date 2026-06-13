@@ -462,14 +462,33 @@ async def get_output_video(match_id: str, quarter: int = Query(None)):
 async def get_raw_video(match_id: str):
     """Serve the original uploaded video (before analysis overlay)."""
     import glob
-    upload_dir = os.path.join(UPLOAD_PATH, match_id)
-    if not os.path.isdir(upload_dir):
-        raise HTTPException(status_code=404, detail="Upload not found")
-    # Find any .mp4 that is NOT the analyzed output
+
+    # Files are stored as: {UPLOAD_PATH}/{timestamp}_{match_id}_{filename}
+    # Scan for any video matching *{match_id}* that is not an analyzed output
     candidates = [
-        p for p in glob.glob(os.path.join(upload_dir, "*.mp4"))
-        if "_analyzed" not in os.path.basename(p)
+        p for p in glob.glob(os.path.join(UPLOAD_PATH, f"*{match_id}*"))
+        if os.path.splitext(p)[1].lower() in {".mp4", ".mov", ".avi", ".mkv"}
+        and "_analyzed" not in os.path.basename(p)
+        and not p.endswith(".noaudio.mp4.tmp")
     ]
+    if not candidates:
+        # Also check MongoDB for frames_json_path — derive video path from it
+        db = get_db()
+        if db:
+            try:
+                match = db["matches"].find_one({"match_id": match_id}, {"frames_json_path": 1})
+                if match:
+                    fjp = match.get("frames_json_path", "")
+                    # frames.json is next to the video — strip _frames.json suffix
+                    if fjp:
+                        video_guess = fjp.replace("_frames.json", "")
+                        for ext in (".mp4", ".mov", ".avi", ".mkv"):
+                            if os.path.exists(video_guess + ext):
+                                candidates.append(video_guess + ext)
+                                break
+            except Exception as e:
+                logger.warning("MongoDB raw video lookup: %s", e)
+
     if not candidates:
         raise HTTPException(status_code=404, detail="Raw video not found")
     path  = sorted(candidates)[-1]

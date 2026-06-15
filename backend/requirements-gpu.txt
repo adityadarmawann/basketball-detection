@@ -1,0 +1,57 @@
+# ── INSTALASI GPU — jalankan BERURUTAN ────────────────────────────────────────
+#
+# Step 1: Install torch GPU dulu (sebelum file ini)
+#   pip install torch==2.2.2 torchvision==0.17.2 \
+#     --index-url https://download.pytorch.org/whl/cu121
+#
+# Step 2: Install paddlepaddle-gpu dulu (sebelum file ini)
+#   pip install paddlepaddle-gpu==3.0.0 \
+#     -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+#
+# Step 3: Install file ini
+#   pip install -r requirements-gpu.txt
+#
+# Step 4: Install boxmot terpisah (konflik metadata numpy)
+#   pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi==0.135.2
+uvicorn[standard]==0.42.0
+websockets==16.0
+python-multipart==0.0.22
+aiofiles==25.1.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+pymongo==4.16.0
+redis>=5.0.0
+
+# ── PyTorch (GPU) — install via Step 1 di atas, baris ini hanya version marker ──
+# Jangan uncomment — pip akan install CPU-only dari PyPI
+# torch==2.2.2
+# torchvision==0.17.2
+
+# ── Computer Vision / ML ──────────────────────────────────────────────────────
+opencv-python==4.9.0.80
+ultralytics==8.4.33
+pytorchvideo==0.1.5
+
+# ── Tracking — install via Step 4 di atas ────────────────────────────────────
+# boxmot==10.0.43   → pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
+# lapx==0.9.4
+
+# ── OCR (GPU) — paddlepaddle-gpu sudah diinstall via Step 2 ──────────────────
+# paddlepaddle-gpu==3.0.0  → sudah via Step 2
+paddleocr==3.5.0
+
+# ── Numerics ──────────────────────────────────────────────────────────────────
+numpy==1.26.4
+scipy==1.17.1
+filterpy==1.4.5
+scikit-learn==1.8.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+Pillow==12.2.0
+pydantic==2.11.7
+python-dotenv==1.2.2

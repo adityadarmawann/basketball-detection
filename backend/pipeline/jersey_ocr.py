@@ -287,8 +287,11 @@ class JerseyOCR:
             from paddleocr import PaddleOCR
 
             # PaddleOCR 3.5.0 requires explicit disable of heavyweight pipelines
+            import paddle
+            _use_gpu = paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
             self._ocr = PaddleOCR(
                 lang="en",
+                device="gpu" if _use_gpu else "cpu",
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,
@@ -298,6 +301,7 @@ class JerseyOCR:
                 text_det_unclip_ratio=2.0,    # wider bbox — prevents digit clipping
                 text_rec_score_thresh=0.4,    # pre-filter low-conf results
             )
+            logger.info("PaddleOCR device: %s", "GPU" if _use_gpu else "CPU")
             logger.info("PaddleOCR 3.5.0 initialised (lang=en, tuned for jersey numbers)")
         except ImportError as exc:
             raise ImportError(

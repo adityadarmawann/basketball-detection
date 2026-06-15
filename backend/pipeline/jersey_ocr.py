@@ -378,6 +378,13 @@ class JerseyOCR:
         h_frame, w_frame = frame.shape[:2]
         results: list[dict] = []
 
+        # ── jersey_no.pt: one full-frame inference shared by all players ─────
+        # Runs on the complete frame (trained context) — gives 0.4-0.9 conf vs
+        # near-zero when the same model is fed a small 60-160px player crop.
+        # Each player loop then finds which detected number bbox (if any) falls
+        # inside that player's bbox and uses it as the primary OCR crop.
+        _frame_num_boxes = self._detect_numbers_fullframe(frame)
+
         for player in tracked_players:
             track_id = player["track_id"]
 
@@ -416,17 +423,50 @@ class JerseyOCR:
 
             player_crop = frame[y1c:y2c, x1c:x2c]
 
-            # Layer 1 — locate number bbox
-            num_bbox = self._detect_number_bbox(player_crop)
-            if num_bbox is None:
-                results.append(self._empty_result(track_id))
-                continue
+            # Layer 1 — locate number crop
+            # Priority 1: jersey_no.pt full-frame bbox that overlaps this player
+            # Priority 2: heuristic chest strip on player crop (fallback)
+            number_crop = None
 
-            ny1, ny2, nx1, nx2 = num_bbox
-            number_crop = player_crop[ny1:ny2, nx1:nx2]
-            if number_crop.size == 0:
-                results.append(self._empty_result(track_id))
-                continue
+            if _frame_num_boxes:
+                best_match, best_ratio = None, 0.0
+                for (nx1f, ny1f, nx2f, ny2f, _nconf) in _frame_num_boxes:
+                    # Overlap between number bbox and player bbox (frame coords)
+                    ix1 = max(x1c, nx1f); iy1 = max(y1c, ny1f)
+                    ix2 = min(x2c, nx2f); iy2 = min(y2c, ny2f)
+                    if ix2 > ix1 and iy2 > iy1:
+                        overlap   = (ix2 - ix1) * (iy2 - iy1)
+                        num_area  = max(1, (nx2f - nx1f) * (ny2f - ny1f))
+                        ratio     = overlap / num_area
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_match = (nx1f, ny1f, nx2f, ny2f)
+
+                if best_match and best_ratio >= 0.50:
+                    nx1f, ny1f, nx2f, ny2f = best_match
+                    pad = 4
+                    nc  = frame[
+                        max(0, ny1f - pad):min(h_frame, ny2f + pad),
+                        max(0, nx1f - pad):min(w_frame, nx2f + pad),
+                    ]
+                    if nc.size > 0:
+                        number_crop = nc
+                        logger.debug(
+                            "track %d: jersey_no.pt full-frame match (overlap=%.2f)",
+                            track_id, best_ratio,
+                        )
+
+            # Fallback: heuristic chest strip
+            if number_crop is None:
+                num_bbox = self._detect_number_bbox(player_crop)
+                if num_bbox is None:
+                    results.append(self._empty_result(track_id))
+                    continue
+                ny1h, ny2h, nx1h, nx2h = num_bbox
+                number_crop = player_crop[ny1h:ny2h, nx1h:nx2h]
+                if number_crop.size == 0:
+                    results.append(self._empty_result(track_id))
+                    continue
 
             # Blur guard — skip OCR on motion-blurred crops.
             # White jerseys have naturally lower Laplacian variance (large uniform
@@ -516,21 +556,56 @@ class JerseyOCR:
     # Layer 1 — number localisation
     # ------------------------------------------------------------------
 
+    def _detect_numbers_fullframe(
+        self, frame: np.ndarray
+    ) -> list[tuple[int, int, int, int, float]]:
+        """
+        Run jersey_no.pt on the FULL FRAME and return all detected number bboxes.
+
+        Returns list of (x1, y1, x2, y2, conf) in frame coordinates.
+
+        Full-frame inference is far more reliable than per-player crop inference:
+        the model was trained on full-frame context and gives confident detections
+        (0.4-0.9) on complete frames vs near-zero on 60-160px player crops.
+        Called once per process() call and shared across all players.
+        """
+        if self.model is None or frame is None or frame.size == 0:
+            return []
+        try:
+            det = self.model(frame, conf=0.20, verbose=False)
+            boxes = []
+            for r in det:
+                for box in r.boxes:
+                    cls = int(box.cls[0])
+                    if (
+                        self._number_class_idx is not None
+                        and cls != self._number_class_idx
+                    ):
+                        continue
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                    conf = float(box.conf[0])
+                    boxes.append((x1, y1, x2, y2, conf))
+            if boxes:
+                logger.debug("jersey_no.pt full-frame: %d number boxes", len(boxes))
+            return boxes
+        except Exception as exc:
+            logger.debug("jersey_no.pt full-frame inference error: %s", exc)
+            return []
+
     def _detect_number_bbox(
         self, player_crop: np.ndarray
     ) -> Optional[tuple[int, int, int, int]]:
         """
-        Returns (y1, y2, x1, x2) of the number region inside player_crop.
+        Heuristic fallback: returns (y1, y2, x1, x2) of the chest strip region
+        within player_crop (15%-55% height, 10%-90% width).
 
-        Uses heuristic torso crop directly — jersey_no.pt is bypassed because
-        in practice the two-stage approach (detect then OCR) is less reliable
-        than sending a consistent torso region straight to PaddleOCR.
+        Used when jersey_no.pt full-frame detection finds no number box that
+        overlaps with this player's bbox. See process() for the full cascade.
         """
         h, w = player_crop.shape[:2]
         if h < 20 or w < 10:
             return None
-        y1, y2, x1, x2 = _back_crop_heuristic(h, w)
-        return y1, y2, x1, x2
+        return _back_crop_heuristic(h, w)
 
     # ------------------------------------------------------------------
     # Layer 2 — OCR

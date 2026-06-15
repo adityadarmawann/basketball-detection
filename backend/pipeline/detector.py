@@ -35,9 +35,11 @@ class BasketballDetector:
         conf_threshold: float = 0.5,
         iou_threshold: float = 0.45,
         device: Optional[str] = None,
+        max_det: int = 30,
     ):
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
+        self.max_det = max_det
         self.model_path = model_path or os.path.join(MODELS_DIR, MODEL_FILENAME)
         self.device = device  # None → ultralytics auto-selects
         self.model = None
@@ -117,6 +119,7 @@ class BasketballDetector:
             source=frame,
             conf=self.conf_threshold,
             iou=self.iou_threshold,
+            max_det=self.max_det,
             verbose=False,
             half=getattr(self, "_use_half", False),
         )

@@ -32,8 +32,9 @@ pytorchvideo==0.1.5        # SlowFast-R50 action recognition (action_best_v1.pt)
 #   pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
 
 # ── OCR (jersey number reading) ───────────────────────────────────────────────
-paddlepaddle==3.0.0     # paddleocr 3.x requires paddlepaddle 3.x
-paddleocr==3.5.0
+easyocr==1.7.2          # digit-only allowlist → lebih akurat dari PaddleOCR untuk jersey
+# paddlepaddle==3.0.0   # diganti EasyOCR — kept for rollback reference
+# paddleocr==3.5.0
 
 # ── Numerics / Signal processing ──────────────────────────────────────────────
 # WAJIB numpy==1.26.4 — torch 2.2.2 dikompil dengan numpy 1.x ABI.

@@ -6,10 +6,12 @@ Layer 1 — jersey_no.pt:
   Locates the jersey number bbox within the player crop.
   Falls back to heuristic torso-center crop if model confidence is too low.
 
-Layer 2 — PaddleOCR 3.5.0:
-  Reads the digit(s) from the localized crop, filters to 0-99.
-  Voting (>= 3 frames) stabilises the assignment before it is registered
-  with the tracker.
+Layer 2 — EasyOCR (GPU):
+  Reads the digit(s) from the localized crop using allowlist='0123456789',
+  filters to 0-99. Voting (>= VOTE_THRESHOLD frames) stabilises the
+  assignment before it is registered with the tracker.
+  Replaced PaddleOCR 3.5.0 — EasyOCR's digit-only allowlist is more
+  accurate for jersey numbers on coloured backgrounds.
 
 Team classification: K-Means (K=2) on HSV pixel samples from each player's
 torso. Run once at calibration; user can override via set_team_reference().
@@ -167,7 +169,7 @@ def _preprocess_for_ocr(crop: np.ndarray) -> np.ndarray:
     """
     Grayscale → denoise → CLAHE contrast enhancement → sharpen →
     resize to OCR_HEIGHT_PX height with padding.
-    Returns a 3-channel BGR image (PaddleOCR expects BGR).
+    Returns a 3-channel BGR image (converted to RGB before EasyOCR call).
     """
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
@@ -225,7 +227,7 @@ class JerseyOCR:
         self.conf_threshold = conf_threshold
 
         self.model = None           # jersey_no.pt (YOLO)
-        self._ocr  = None           # PaddleOCR instance
+        self._ocr  = None           # EasyOCR Reader instance
         self._number_class_idx: Optional[int] = None   # None → use heuristic
 
         # Voting state: track_id → deque of int candidates
@@ -290,31 +292,46 @@ class JerseyOCR:
             self.model.to("cpu")
 
     def load_ocr(self) -> None:
-        """Initialise PaddleOCR 3.5.0. Raises ImportError if not installed."""
+        """Initialise EasyOCR (GPU if available). Raises ImportError if not installed."""
         try:
-            from paddleocr import PaddleOCR
-
-            # PaddleOCR 3.5.0 requires explicit disable of heavyweight pipelines
-            import paddle
-            _use_gpu = paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
-            self._ocr = PaddleOCR(
-                lang="en",
-                device="gpu" if _use_gpu else "cpu",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=False,
-                text_det_limit_side_len=32,   # allow small crops (jersey from distance)
-                text_det_limit_type="min",
-                text_det_box_thresh=0.3,      # relaxed: catch faint digits
-                text_det_unclip_ratio=2.0,    # wider bbox — prevents digit clipping
-                text_rec_score_thresh=0.4,    # pre-filter low-conf results
+            import torch
+            import easyocr
+            _use_gpu = torch.cuda.is_available()
+            self._ocr = easyocr.Reader(
+                ['en'],
+                gpu=_use_gpu,
+                verbose=False,
             )
-            logger.info("PaddleOCR device: %s", "GPU" if _use_gpu else "CPU")
-            logger.info("PaddleOCR 3.5.0 initialised (lang=en, tuned for jersey numbers)")
+            logger.info("EasyOCR device: %s", "GPU" if _use_gpu else "CPU")
+            logger.info("EasyOCR initialised (lang=en, digit-only via allowlist)")
         except ImportError as exc:
             raise ImportError(
-                "paddleocr required. pip install paddleocr paddlepaddle"
+                "easyocr required. pip install easyocr"
             ) from exc
+
+        # ── PaddleOCR 3.5.0 (replaced by EasyOCR — kept for rollback) ─────────
+        # try:
+        #     from paddleocr import PaddleOCR
+        #     import paddle
+        #     _use_gpu = paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+        #     self._ocr = PaddleOCR(
+        #         lang="en",
+        #         device="gpu" if _use_gpu else "cpu",
+        #         use_doc_orientation_classify=False,
+        #         use_doc_unwarping=False,
+        #         use_textline_orientation=False,
+        #         text_det_limit_side_len=32,
+        #         text_det_limit_type="min",
+        #         text_det_box_thresh=0.3,
+        #         text_det_unclip_ratio=2.0,
+        #         text_rec_score_thresh=0.4,
+        #     )
+        #     logger.info("PaddleOCR device: %s", "GPU" if _use_gpu else "CPU")
+        #     logger.info("PaddleOCR 3.5.0 initialised (lang=en, tuned for jersey numbers)")
+        # except ImportError as exc:
+        #     raise ImportError(
+        #         "paddleocr required. pip install paddleocr paddlepaddle"
+        #     ) from exc
 
     def is_model_loaded(self) -> bool:
         return self.model is not None
@@ -345,7 +362,7 @@ class JerseyOCR:
         }
 
     def warmup(self, height: int = 720, width: int = 1280) -> None:
-        """One dummy inference on jersey_no.pt + PaddleOCR to trigger CUDA JIT before real frames."""
+        """One dummy inference on jersey_no.pt + EasyOCR to trigger CUDA JIT before real frames."""
         dummy_frame = np.zeros((height, width, 3), dtype=np.uint8)
         if self.model is not None:
             try:
@@ -356,10 +373,10 @@ class JerseyOCR:
         if self._ocr is not None:
             try:
                 dummy_crop = np.zeros((OCR_HEIGHT_PX, OCR_HEIGHT_PX, 3), dtype=np.uint8)
-                self._ocr.predict(dummy_crop)
-                logger.info("PaddleOCR warmup done")
+                self._ocr.readtext(dummy_crop, allowlist='0123456789', detail=1)
+                logger.info("EasyOCR warmup done")
             except Exception as e:
-                logger.debug("PaddleOCR warmup error (non-fatal): %s", e)
+                logger.debug("EasyOCR warmup error (non-fatal): %s", e)
 
     # ------------------------------------------------------------------
     # Core pipeline
@@ -628,8 +645,8 @@ class JerseyOCR:
 
     def _run_ocr(self, number_crop: np.ndarray) -> Optional[int]:
         """
-        Preprocess crop → PaddleOCR → parse first numeric result in [0-99].
-        Tries normal and inverted image (light number on dark jersey and vice versa).
+        Preprocess crop → EasyOCR (allowlist digits only) → parse result in [0-99].
+        Tries four variants: CLAHE, inverted CLAHE, Otsu binary, adaptive binary.
         Returns None if no valid number found or confidence below OCR_MIN_SCORE.
         """
         if self._ocr is None:
@@ -642,44 +659,36 @@ class JerseyOCR:
         adaptive  = _adaptive_variant(number_crop)
 
         # Four variants: CLAHE, inverted CLAHE, Otsu binary, adaptive binary.
-        # Adaptive handles light jerseys (dark numbers on white) without needing
-        # a separate bright-crop branch — THRESH_BINARY_INV normalises both cases.
-        # Early exit: once any variant produces a high-confidence result
-        # (≥ HIGH_CONF_EARLY_EXIT) there is no benefit in trying the remaining ones.
+        # Early exit: once any variant produces high-confidence (≥ HIGH_CONF_EARLY_EXIT).
         candidates: list[tuple[int, float]] = []
         for img in [processed, cv2.bitwise_not(processed), otsu, adaptive]:
+            # EasyOCR expects RGB — convert from BGR
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img.ndim == 3 else img
             try:
-                results = self._ocr.predict(img)
+                results = self._ocr.readtext(
+                    img_rgb,
+                    allowlist='0123456789',
+                    detail=1,
+                    paragraph=False,
+                )
             except Exception as exc:
-                logger.debug("PaddleOCR predict error: %s", exc)
+                logger.debug("EasyOCR readtext error: %s", exc)
                 continue
 
-            if not results:
-                continue
-
-            # PaddleOCR 3.5.0: predict() returns list[OCRResult]
-            # Each OCRResult is dict-like: res['rec_texts'], res['rec_scores']
-            for res in results:
-                try:
-                    texts  = res["rec_texts"]
-                    scores = res["rec_scores"]
-                except (TypeError, KeyError):
+            # EasyOCR returns: [([[x1,y1],[x2,y1],[x2,y2],[x1,y2]], text, score), ...]
+            for (_bbox, text, score) in (results or []):
+                if score < OCR_MIN_SCORE:
+                    logger.debug(
+                        "OCR: '%s' rejected (score=%.2f < %.2f)",
+                        text, score, OCR_MIN_SCORE,
+                    )
                     continue
-
-                for text, score in zip(texts or [], scores or []):
-                    # Filter low-confidence results
-                    if score < OCR_MIN_SCORE:
-                        logger.debug(
-                            "OCR: '%s' rejected (score=%.2f < %.2f)",
-                            text, score, OCR_MIN_SCORE,
-                        )
-                        continue
-                    number = self._parse_jersey_number(text)
-                    if number is not None:
-                        candidates.append((number, score))
-                        logger.debug(
-                            "OCR: '%s' (score=%.2f) → jersey %d", text, score, number
-                        )
+                number = self._parse_jersey_number(text)
+                if number is not None:
+                    candidates.append((number, score))
+                    logger.debug(
+                        "OCR: '%s' (score=%.2f) → jersey %d", text, score, number
+                    )
 
             # High-confidence early exit — skip remaining variants.
             if candidates and max(c[1] for c in candidates) >= HIGH_CONF_EARLY_EXIT:
@@ -688,10 +697,35 @@ class JerseyOCR:
         if not candidates:
             return None
 
-        # Return highest-confidence candidate
         best_number, best_score = max(candidates, key=lambda x: x[1])
         logger.debug("OCR best: jersey %d (score=%.2f)", best_number, best_score)
         return best_number
+
+        # ── PaddleOCR 3.5.0 implementation (replaced by EasyOCR — kept for rollback) ──
+        # for img in [processed, cv2.bitwise_not(processed), otsu, adaptive]:
+        #     try:
+        #         results = self._ocr.predict(img)
+        #     except Exception as exc:
+        #         logger.debug("PaddleOCR predict error: %s", exc)
+        #         continue
+        #     if not results:
+        #         continue
+        #     # PaddleOCR 3.5.0: predict() returns list[OCRResult]
+        #     # Each OCRResult is dict-like: res['rec_texts'], res['rec_scores']
+        #     for res in results:
+        #         try:
+        #             texts  = res["rec_texts"]
+        #             scores = res["rec_scores"]
+        #         except (TypeError, KeyError):
+        #             continue
+        #         for text, score in zip(texts or [], scores or []):
+        #             if score < OCR_MIN_SCORE:
+        #                 continue
+        #             number = self._parse_jersey_number(text)
+        #             if number is not None:
+        #                 candidates.append((number, score))
+        #     if candidates and max(c[1] for c in candidates) >= HIGH_CONF_EARLY_EXIT:
+        #         break
 
     # Common OCR character confusions for jersey number context.
     # Applied before digit extraction so "O3" → "03", "S7" → "57", etc.
@@ -1198,11 +1232,11 @@ if __name__ == "__main__":
     except (FileNotFoundError, ImportError) as e:
         print(f"  [SKIP] {e}")
 
-    print("\n--- 10. PaddleOCR load ---")
+    print("\n--- 10. EasyOCR load ---")
     try:
         jerseyocr3 = JerseyOCR()
         jerseyocr3.load_ocr()
-        print("  PaddleOCR loaded ✓")
+        print("  EasyOCR loaded ✓")
     except ImportError as e:
         print(f"  [SKIP] {e}")
 

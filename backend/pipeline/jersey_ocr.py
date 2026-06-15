@@ -344,6 +344,23 @@ class JerseyOCR:
             "description": "Laplacian variance cutoff. Crops below this are skipped.",
         }
 
+    def warmup(self, height: int = 720, width: int = 1280) -> None:
+        """One dummy inference on jersey_no.pt + PaddleOCR to trigger CUDA JIT before real frames."""
+        dummy_frame = np.zeros((height, width, 3), dtype=np.uint8)
+        if self.model is not None:
+            try:
+                self._detect_numbers_fullframe(dummy_frame)
+                logger.info("jersey_no.pt warmup done (%dx%d dummy frame)", width, height)
+            except Exception as e:
+                logger.debug("jersey_no.pt warmup error (non-fatal): %s", e)
+        if self._ocr is not None:
+            try:
+                dummy_crop = np.zeros((OCR_HEIGHT_PX, OCR_HEIGHT_PX, 3), dtype=np.uint8)
+                self._ocr.predict(dummy_crop)
+                logger.info("PaddleOCR warmup done")
+            except Exception as e:
+                logger.debug("PaddleOCR warmup error (non-fatal): %s", e)
+
     # ------------------------------------------------------------------
     # Core pipeline
     # ------------------------------------------------------------------

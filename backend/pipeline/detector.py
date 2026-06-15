@@ -99,6 +99,17 @@ class BasketballDetector:
     def is_model_loaded(self) -> bool:
         return self.model is not None
 
+    def warmup(self, height: int = 720, width: int = 1280) -> None:
+        """One dummy inference to trigger CUDA JIT compilation before real frames arrive."""
+        if not self.is_model_loaded():
+            return
+        dummy = np.zeros((height, width, 3), dtype=np.uint8)
+        try:
+            self.detect(dummy)
+            logger.info("Detector warmup done (%dx%d dummy frame)", width, height)
+        except Exception as e:
+            logger.debug("Detector warmup error (non-fatal): %s", e)
+
     def detect(self, frame: np.ndarray) -> dict:
         """
         Run inference on one BGR frame (from OpenCV cap.read()).

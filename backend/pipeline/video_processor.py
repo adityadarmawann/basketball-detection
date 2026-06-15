@@ -373,6 +373,15 @@ class VideoProcessor:
                 except ImportError:
                     logger.warning("StatsCalculator unavailable")
 
+        # Warmup: one dummy inference per model to trigger CUDA JIT compilation
+        # before the first real video frame arrives. Adds ~2-5 s at startup
+        # (background task — invisible to the user) but eliminates the JIT lag
+        # spike on frames 1-3 that would otherwise delay K-Means calibration.
+        if self._detector:
+            self._detector.warmup()
+        if self._jersey:
+            self._jersey.warmup()
+
         logger.info("Pipeline ready (device=%s)", dev)
 
     # ── Public async entry point ──────────────────────────────────────────────

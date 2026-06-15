@@ -94,6 +94,12 @@ export const useWebSocket = () => {
     s.setPlayers(frame.players, frame.timestamp)
     s.setBall(frame.ball)
     s.setPossession(frame.possession)
+    if (frame.fps != null || frame.gpuMetrics != null) {
+      s.setPipelineMetrics(
+        frame.fps ?? 0,
+        frame.gpuMetrics ?? { gpu: 0, vramUsed: 0, vramTotal: 0 },
+      )
+    }
 
     // Tick minutes: each frame ≈ 0.1 s = 1/600 min
     const updatedStats = { ...s.stats }

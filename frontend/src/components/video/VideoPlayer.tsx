@@ -3,6 +3,7 @@ import { Play, Pause } from 'lucide-react'
 import CourtMap2D from './CourtMap2D'
 import CourtOverlay from './CourtOverlay'
 import { FrameBboxEntry } from '../../types'
+import { useMatchStore } from '../../store/matchStore'
 
 interface VideoPlayerProps {
   videoUrl: string
@@ -19,8 +20,9 @@ export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeU
   const [isPlaying, setIsPlaying] = useState(false)
   const [progress, setProgress] = useState(0)
   const [duration, setDuration] = useState(0)
-  const [fps, setFps] = useState(0)
-  const [gpuUsage, setGpuUsage] = useState(0)
+  const pipelineFps = useMatchStore((s) => s.pipelineFps)
+  const gpuMetrics  = useMatchStore((s) => s.gpuMetrics)
+  const isLive      = useMatchStore((s) => s.isLive)
 
   useEffect(() => {
     const video = videoRef.current
@@ -32,9 +34,6 @@ export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeU
     const handleTimeUpdate = () => {
       setProgress(video.currentTime)
       onTimeUpdate?.(video.currentTime, video.duration || 0)
-      // Simulate FPS and GPU usage for demo
-      setFps(Math.floor(Math.random() * 10 + 20))
-      setGpuUsage(Math.floor(Math.random() * 40 + 50))
     }
 
     video.addEventListener('play', handlePlay)
@@ -94,9 +93,23 @@ export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeU
 
         {/* Status Badges */}
         <div className="absolute top-4 left-4 flex gap-2 text-white text-xs font-bold z-10">
-          <div className="badge-live">● LIVE</div>
-          <div className="px-2 py-1 bg-black/50 rounded">{fps} fps</div>
-          <div className="px-2 py-1 bg-black/50 rounded">GPU {gpuUsage}%</div>
+          {isLive
+            ? <div className="badge-live">● LIVE</div>
+            : <div className="px-2 py-1 bg-gray-700/80 rounded">● REPLAY</div>
+          }
+          {pipelineFps > 0 && (
+            <div className="px-2 py-1 bg-black/50 rounded">{pipelineFps} fps</div>
+          )}
+          {gpuMetrics.gpu > 0 && (
+            <div className="px-2 py-1 bg-black/50 rounded">
+              GPU {gpuMetrics.gpu}%
+              {gpuMetrics.vramTotal > 0 && (
+                <span className="ml-1 opacity-75">
+                  {(gpuMetrics.vramUsed / 1024).toFixed(1)}/{(gpuMetrics.vramTotal / 1024).toFixed(1)}GB
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Canvas Overlay Layer - Renders player bounding boxes */}

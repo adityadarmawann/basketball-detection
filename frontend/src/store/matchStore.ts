@@ -22,6 +22,8 @@ const initialState: MatchState = {
   sponsors: [],
   videoUrl: '',
   matchStep: 'setup',
+  pipelineFps: 0,
+  gpuMetrics: { gpu: 0, vramUsed: 0, vramTotal: 0 },
 }
 
 export const useMatchStore = create<MatchState & {
@@ -47,6 +49,7 @@ export const useMatchStore = create<MatchState & {
   setSponsors: (sponsors: Sponsor[]) => void
   setVideoUrl: (url: string) => void
   setMatchStep: (step: string) => void
+  setPipelineMetrics: (fps: number, gpuMetrics: { gpu: number; vramUsed: number; vramTotal: number }) => void
   patchEventsByTrackId: (trackId: number, jerseyNumber: number, playerName: string, team: string) => void
   reset: () => void
 }>()(
@@ -97,6 +100,7 @@ export const useMatchStore = create<MatchState & {
       setSponsors: (sponsors) => set({ sponsors }),
       setVideoUrl: (videoUrl) => set({ videoUrl }),
       setMatchStep: (matchStep) => set({ matchStep }),
+      setPipelineMetrics: (fps, gpuMetrics) => set({ pipelineFps: fps, gpuMetrics }),
       patchEventsByTrackId: (trackId, jerseyNumber, playerName, team) =>
         set((state) => ({
           events: state.events.map((e) =>

@@ -50,3 +50,4 @@ scikit-learn==1.8.0     # K-Means untuk kalibrasi warna tim
 Pillow==12.2.0
 pydantic==2.11.7
 python-dotenv==1.2.2
+psutil==6.1.1           # CPU % + RAM usage for system metrics logging

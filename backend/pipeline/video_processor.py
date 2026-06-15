@@ -81,6 +81,73 @@ def _fmt_video_ts(ts_ms: int) -> str:
     return f"{m:02d}:{s:02d}.{ms:03d}"
 
 
+def _query_gpu_metrics() -> dict:
+    """
+    Return GPU utilisation % and VRAM usage from nvidia-smi.
+    Cached at module level; refreshed every ~2 s to keep subprocess overhead low.
+    Returns {"gpu": 0, "vramUsed": 0, "vramTotal": 0} on failure (CPU-only server).
+    """
+    now = time.monotonic()
+    if now - _query_gpu_metrics._last_t < 2.0:
+        return _query_gpu_metrics._cached
+
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-gpu=utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            timeout=1, stderr=subprocess.DEVNULL,
+        ).decode().strip().splitlines()
+        parts = [p.strip() for p in out[0].split(",")] if out else []
+        result = {
+            "gpu":       int(parts[0]) if len(parts) > 0 else 0,
+            "vramUsed":  int(parts[1]) if len(parts) > 1 else 0,
+            "vramTotal": int(parts[2]) if len(parts) > 2 else 0,
+        }
+    except Exception:
+        result = {"gpu": 0, "vramUsed": 0, "vramTotal": 0}
+
+    _query_gpu_metrics._cached = result
+    _query_gpu_metrics._last_t = now
+    return result
+
+_query_gpu_metrics._cached = {"gpu": 0, "vramUsed": 0, "vramTotal": 0}
+_query_gpu_metrics._last_t  = 0.0
+
+
+def _log_system_metrics() -> None:
+    """Log GPU util, VRAM, and CPU usage in one line. Called every FPS_LOG_INTERVAL frames."""
+    gm = _query_gpu_metrics()
+
+    cpu_pct: float = 0.0
+    ram_used_gb: float = 0.0
+    ram_total_gb: float = 0.0
+    try:
+        import psutil
+        cpu_pct      = psutil.cpu_percent(interval=None)
+        vm           = psutil.virtual_memory()
+        ram_used_gb  = vm.used  / 1024 ** 3
+        ram_total_gb = vm.total / 1024 ** 3
+    except Exception:
+        pass
+
+    parts = []
+    if gm["gpu"] > 0 or gm["vramTotal"] > 0:
+        vram_str = (
+            f"VRAM {gm['vramUsed']/1024:.1f}/{gm['vramTotal']/1024:.1f}GB"
+            if gm["vramTotal"] > 0 else ""
+        )
+        parts.append(f"GPU {gm['gpu']}%  {vram_str}".strip())
+    if cpu_pct > 0:
+        parts.append(f"CPU {cpu_pct:.1f}%")
+    if ram_total_gb > 0:
+        parts.append(f"RAM {ram_used_gb:.1f}/{ram_total_gb:.1f}GB")
+
+    if parts:
+        logger.info("[SYSTEM] %s", "  |  ".join(parts))
+
+
 def _fmt_wall_clock() -> str:
     """Current wall-clock time as HH:MM:SS — used in scoring logs for live context."""
     import datetime
@@ -211,6 +278,12 @@ class VideoProcessor:
         # Used by _snapshot_frame so the per-frame JSON has speed without calling get_live_stats() every frame.
         self._speed_cache:     dict  = {}   # {track_id: float}
 
+        # Score cache: [pts_A, pts_B] from StatsCalculator, updated every WS cycle.
+        # _snapshot_frame uses this so "sc" in replay frameData matches the STATS panel.
+        # EventEngine.score can diverge (skips events with team="") — StatsCalculator
+        # has roster fallback so it always matches the displayed pts.
+        self._pts_cache:       list  = [0, 0]
+
         # Sticky action cache: last non-empty action per player so that the
         # 19 frames between ACTION_EVERY_N_FRAMES snapshots still show a label.
         self._last_action_cache: dict = {}  # {track_id: str}
@@ -320,6 +393,7 @@ class VideoProcessor:
         self._stop_signal.clear()
         self._video_path      = str(video_path)
         self._frame_store     = []
+        self._pts_cache       = [0, 0]
         self._start_quarter   = max(1, min(4, start_quarter))   # kept for _finalize merge
         self._current_quarter = self._start_quarter
 
@@ -403,11 +477,16 @@ class VideoProcessor:
                 do_broadcast = (proc_id % 5 == 0) or has_score_event
                 if do_broadcast and self._stats:
                     stats = self._stats.get_live_stats()
-                    # Refresh speed cache so _snapshot_frame can embed speed in JSON
+                    # Refresh speed + score caches so _snapshot_frame embeds correct values
                     for tid, pstat in stats.get("player_stats", {}).items():
                         spd = pstat.get("mpi", {}).get("avg_speed_kmh", 0.0)
                         if spd > 0:
                             self._speed_cache[tid] = round(spd, 1)
+                    ts_now = stats.get("team_stats", {})
+                    self._pts_cache = [
+                        ts_now.get("A", {}).get("pts", 0),
+                        ts_now.get("B", {}).get("pts", 0),
+                    ]
                     msg = self._build_ws_message(frame_data, stats)
                     if has_score_event:
                         score_a = stats.get("team_stats", {}).get("A", {}).get("pts", 0)
@@ -465,6 +544,7 @@ class VideoProcessor:
                         self._fps_actual, self._frames_dropped,
                         self._current_quarter, PROCESS_STRIDE,
                     )
+                    _log_system_metrics()
 
                 if self._detect_quarter_change(frame_data):
                     self._handle_quarter_change()
@@ -836,16 +916,11 @@ class VideoProcessor:
                     "cp": ball_raw.get("court_pos"),
                 }
 
-        score = (
-            self._events_engine.score
-            if self._events_engine
-            else {"team_a": 0, "team_b": 0}
-        )
         return {
             "ts": timestamp_ms,
             "p":  players_out,
             "bl": ball_out,
-            "sc": [score.get("team_a", 0), score.get("team_b", 0)],
+            "sc": list(self._pts_cache),
             "q":  self._current_quarter,
         }
 
@@ -975,7 +1050,9 @@ class VideoProcessor:
                 "courtPos":   ball_court_pos,
                 "trajectory": list(self._ball_trajectory),
             },
-            "event": latest_event,
+            "event":        latest_event,
+            "fps":          round(self._fps_actual, 1),
+            "gpuMetrics":   _query_gpu_metrics(),
         }
 
     # ── Event format mapper ───────────────────────────────────────────────────

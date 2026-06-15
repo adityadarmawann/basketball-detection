@@ -25,6 +25,8 @@ export interface FrameUpdate {
   players: Player[];
   ball: { bbox: number[]; courtPos: [number, number]; trajectory: Array<[number, number]> };
   event: GameEvent | null;
+  fps?: number;
+  gpuMetrics?: { gpu: number; vramUsed: number; vramTotal: number };
 }
 
 export interface GameEvent {
@@ -159,4 +161,6 @@ export interface MatchState {
   sponsors: Sponsor[];
   videoUrl: string;
   matchStep: string;
+  pipelineFps: number;
+  gpuMetrics: { gpu: number; vramUsed: number; vramTotal: number };
 }

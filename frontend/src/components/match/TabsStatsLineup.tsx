@@ -50,7 +50,7 @@ export default function TabsStatsLineup() {
   const [activeTab, setActiveTab] = useState<Tab>('stats')
   const [quarter, setQuarter] = useState<Quarter>(0)
   const navigate = useNavigate()
-  const { stats, teamA, teamB, matchId } = useMatchStore()
+  const { stats, teamA, teamB, matchId, quarter: videoQuarter, quarterScoreA, quarterScoreB } = useMatchStore()
 
   // Per-quarter stats fetched directly from backend Redis key stats:{matchId}:q{n}
   // — same source as "All" (useMatchStats), so numbers are always consistent.
@@ -89,16 +89,18 @@ export default function TabsStatsLineup() {
   // )
 
   const { teamAStats, teamBStats } = useMemo(() => {
+    const players = Object.values(stats)
+    const teamAPlayers = players.filter((p) => p.team === 'A')
+    const teamBPlayers = players.filter((p) => p.team === 'B')
+    const sum = (arr: PlayerStats[], key: keyof PlayerStats) =>
+      arr.reduce((acc, p) => acc + ((p[key] as number) || 0), 0)
+
     if (quarter === 0) {
-      // All quarters — sum from cumulative store stats (populated by useMatchStats → Redis live key)
-      const players = Object.values(stats)
-      const teamAPlayers = players.filter((p) => p.team === 'A')
-      const teamBPlayers = players.filter((p) => p.team === 'B')
-      const sum = (arr: PlayerStats[], key: keyof PlayerStats) =>
-        arr.reduce((acc, p) => acc + ((p[key] as number) || 0), 0)
+      // "All" view: PTS follows video position (store.teamA.score = cumulative sc from frameData)
+      // Other stats from cumulative playerStats (API-polled)
       return {
         teamAStats: {
-          pts: sum(teamAPlayers, 'pts'),
+          pts: teamA.score,
           totReb: sum(teamAPlayers, 'totReb'),
           ast: sum(teamAPlayers, 'ast'),
           stl: sum(teamAPlayers, 'stl'),
@@ -106,7 +108,7 @@ export default function TabsStatsLineup() {
           tov: sum(teamAPlayers, 'tov'),
         },
         teamBStats: {
-          pts: sum(teamBPlayers, 'pts'),
+          pts: teamB.score,
           totReb: sum(teamBPlayers, 'totReb'),
           ast: sum(teamBPlayers, 'ast'),
           stl: sum(teamBPlayers, 'stl'),
@@ -116,12 +118,23 @@ export default function TabsStatsLineup() {
       }
     }
 
-    // Specific quarter — from backend Redis key stats:{matchId}:q{n}, same source as All
+    // Per-quarter view: PTS follows video position when video is in that quarter (q_sc),
+    // otherwise uses API final data for past quarters.
+    const isCurrentQuarter = videoQuarter === quarter
+    const ptsA = isCurrentQuarter ? quarterScoreA : (quarterFetched?.A.pts ?? 0)
+    const ptsB = isCurrentQuarter ? quarterScoreB : (quarterFetched?.B.pts ?? 0)
+
     if (quarterFetched) {
-      return { teamAStats: quarterFetched.A, teamBStats: quarterFetched.B }
+      return {
+        teamAStats: { ...quarterFetched.A, pts: ptsA },
+        teamBStats: { ...quarterFetched.B, pts: ptsB },
+      }
     }
-    return { teamAStats: emptyTeamStats(), teamBStats: emptyTeamStats() }
-  }, [stats, quarter, quarterFetched])
+    return {
+      teamAStats: { ...emptyTeamStats(), pts: ptsA },
+      teamBStats: { ...emptyTeamStats(), pts: ptsB },
+    }
+  }, [stats, quarter, quarterFetched, teamA.score, teamB.score, videoQuarter, quarterScoreA, quarterScoreB])
 
   return (
     <div className="bg-surface rounded-lg shadow-sm overflow-hidden">

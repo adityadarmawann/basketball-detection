@@ -93,6 +93,7 @@ export default function MatchPage() {
       const b = lo > 0 ? frameData[lo - 1] : null
       const snap = b && Math.abs(b.ts - videoMs) < Math.abs(a.ts - videoMs) ? b : a
       if (snap.sc) store.setScore(snap.sc[0], snap.sc[1])
+      if (snap.q_sc) store.setQuarterScore(snap.q_sc[0], snap.q_sc[1])
       if (snap.q != null) store.setQuarter(snap.q)
     }
   }, [store, frameData])

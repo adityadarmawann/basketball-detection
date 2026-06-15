@@ -137,8 +137,9 @@ export interface FrameBboxEntry {
     cp: [number, number] | null  // court position [x_m, y_m] for 2D overlay
   }>
   bl: { b: [number, number, number, number]; cp?: [number, number] | null } | null
-  sc?: [number, number]   // [scoreA, scoreB] at this frame
-  q?: number              // quarter at this frame
+  sc?: [number, number]    // [scoreA, scoreB] cumulative at this frame
+  q_sc?: [number, number]  // [scoreA, scoreB] within current quarter only
+  q?: number               // quarter at this frame
 }
 
 export interface MatchState {
@@ -163,4 +164,6 @@ export interface MatchState {
   matchStep: string;
   pipelineFps: number;
   gpuMetrics: { gpu: number; vramUsed: number; vramTotal: number };
+  quarterScoreA: number;
+  quarterScoreB: number;
 }

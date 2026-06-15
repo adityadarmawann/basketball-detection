@@ -31,13 +31,11 @@ MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), 
 MODEL_FILENAME = "jersey_no.pt"
 
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
-MAX_VOTE_HISTORY      = 40   # wider window — fast players may only give readable frames
-                             # occasionally; OCR_SAMPLE_EVERY=5 × 40 = 200 frames (~7s)
-TRANSFER_MIN_LONG_VOTES = 3  # 2-digit candidate needs this many independent reads before
-                             # 1-digit votes are reinterpreted as partial reads of it.
-                             # Value 3 resists a stray background misread (player #3 briefly
-                             # appearing in crop of player #13) while still correcting the
-                             # common "10→1" OCR clipping artifact within ~0.5s at 25fps.
+MAX_VOTE_HISTORY      = 20   # rolling window — 20 × OCR_SAMPLE_EVERY=4 = 80 frames (~3s)
+                             # smaller window lets wrong reads be forgotten faster
+TRANSFER_MIN_LONG_VOTES = 2  # 2-digit candidate needs this many reads before 1-digit votes
+                             # are reinterpreted as partial reads; 2 is enough to resist
+                             # a single stray misread while correcting "72→7" faster
 OCR_SAMPLE_EVERY      = 4    # run OCR once every N frames per player
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
@@ -444,7 +442,7 @@ class JerseyOCR:
 
                 if best_match and best_ratio >= 0.50:
                     nx1f, ny1f, nx2f, ny2f = best_match
-                    pad = 4
+                    pad = 10
                     nc  = frame[
                         max(0, ny1f - pad):min(h_frame, ny2f + pad),
                         max(0, nx1f - pad):min(w_frame, nx2f + pad),

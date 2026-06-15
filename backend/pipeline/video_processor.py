@@ -256,6 +256,8 @@ class VideoProcessor:
         # roster-confirmed players, then call set_team_reference once we have enough.
         self._team_color_samples: dict = {"A": [], "B": []}
         self._team_color_ready:   set  = set()   # tracks which teams are calibrated
+        self._kmeans_calibrated:  bool = False   # True after first calibrate_teams() call
+        self._kmeans_disambiguated: bool = False # True after first roster-confirmed jersey
 
         # Per-frame bbox store — written to JSON at finalize for frontend time-lookup
         self._frame_store:        list = []   # [{ts, p:[{i,j,t,b}], bl}]
@@ -283,6 +285,13 @@ class VideoProcessor:
         # EventEngine.score can diverge (skips events with team="") — StatsCalculator
         # has roster fallback so it always matches the displayed pts.
         self._pts_cache:       list  = [0, 0]
+        # Score at the START of the current quarter — used to derive per-quarter
+        # running score: q_sc = _pts_cache - _q_pts_start.
+        self._q_pts_start:     list  = [0, 0]
+        # Scoring events log: (ts_ms, track_id, pts, quarter) — collected during
+        # processing, used at _finalize() to retroactively patch sc/q_sc using
+        # final team assignments (team may be unknown at event time due to OCR lag).
+        self._scoring_events:  list  = []
 
         # Sticky action cache: last non-empty action per player so that the
         # 19 frames between ACTION_EVERY_N_FRAMES snapshots still show a label.
@@ -393,7 +402,11 @@ class VideoProcessor:
         self._stop_signal.clear()
         self._video_path      = str(video_path)
         self._frame_store     = []
-        self._pts_cache       = [0, 0]
+        self._pts_cache           = [0, 0]
+        self._q_pts_start         = [0, 0]
+        self._scoring_events      = []
+        self._kmeans_calibrated   = False
+        self._kmeans_disambiguated = False
         self._start_quarter   = max(1, min(4, start_quarter))   # kept for _finalize merge
         self._current_quarter = self._start_quarter
 
@@ -411,11 +424,13 @@ class VideoProcessor:
         self._frame_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1920
         self._frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
 
-        # FPS-aware OCR interval: target ~4 OCR attempts/second per unconfirmed player.
+        # FPS-aware OCR interval: target per-player OCR every ≤16 raw frames (~0.5–1s).
+        # jersey.process() is called every _ocr_interval frames; inside, each player
+        # fires OCR every OCR_SAMPLE_EVERY=4 calls → per-player = 4 × _ocr_interval.
+        # Divisor 6 gives _ocr_interval=4 at 25fps → per-player = 16 frames = 0.64s.
         # Aligning to PROCESS_STRIDE prevents the lcm-doubling bug where an odd
-        # OCR_EVERY_N_FRAMES (e.g. 15) combined with PROCESS_STRIDE=2 means the
-        # modulo never fires on a processed frame — effectively halving frequency.
-        _raw = max(PROCESS_STRIDE, int(self._source_fps / 4))
+        # interval combined with PROCESS_STRIDE=2 makes the modulo never fire.
+        _raw = max(PROCESS_STRIDE, int(self._source_fps / 6))
         self._ocr_interval = (_raw // PROCESS_STRIDE) * PROCESS_STRIDE or PROCESS_STRIDE
 
         logger.info("Video: %s  frames=%d  src_fps=%.1f  ocr_interval=%d",
@@ -470,8 +485,17 @@ class VideoProcessor:
                 for evt in frame_data.get("events", []):
                     if evt:
                         await self._save_event_mongo(evt, match_id)
-                        if evt.get("type", "").upper() in scoring_types:
+                        etype = evt.get("type", "").upper()
+                        if etype in scoring_types:
                             has_score_event = True
+                            # Log for retroactive sc patch at finalize (team may be "" now)
+                            pts = 1 if etype in ("MADE_FT", "FT_MADE") else (3 if etype == "MADE_3" else 2)
+                            self._scoring_events.append((
+                                ts_ms,
+                                evt.get("track_id"),
+                                pts,
+                                self._current_quarter,
+                            ))
 
                 # WebSocket update: every 5 processed frames OR immediately on scoring
                 do_broadcast = (proc_id % 5 == 0) or has_score_event
@@ -721,6 +745,15 @@ class VideoProcessor:
             if t and jr.get("track_id") is not None:
                 jersey_color_map[jr["track_id"]] = t
 
+        # Early K-Means calibration: run as soon as ≥5 players visible, no jersey
+        # confirmation needed. Clusters are arbitrary (A/B may be swapped) — a single
+        # confirmed jersey from the roster disambiguates which cluster is which team.
+        if (self._jersey and not self._kmeans_calibrated
+                and len(tracked_players) >= 5):
+            self._jersey.calibrate_teams(frame, tracked_players)
+            self._kmeans_calibrated = True
+            logger.info("Early K-Means calibration done (%d players visible)", len(tracked_players))
+
         if self._tracker:
             for player in tracked_players:
                 tid = player["track_id"]
@@ -731,36 +764,42 @@ class VideoProcessor:
                         confirmed_team = entry["team"]
                         player["team"] = confirmed_team
                         self._last_known_team[tid] = confirmed_team
-                        # Accumulate torso HSV for roster-anchored color calibration
-                        if self._jersey and confirmed_team not in self._team_color_ready:
+
+                        # Disambiguate K-Means clusters using first confirmed jersey.
+                        # Roster tells us confirmed_team; K-Means may have it swapped.
+                        if (self._jersey and self._kmeans_calibrated
+                                and not self._kmeans_disambiguated):
                             try:
                                 x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
-                                crop = frame[max(0,y1):min(frame.shape[0],y2),
-                                             max(0,x1):min(frame.shape[1],x2)]
+                                crop = frame[max(0, y1):min(frame.shape[0], y2),
+                                             max(0, x1):min(frame.shape[1], x2)]
                                 if crop.size > 0:
-                                    th, tw = crop.shape[:2]
-                                    torso = crop[int(th*0.15):int(th*0.65),
-                                                 int(tw*0.1):int(tw*0.9)]
-                                    if torso.size > 0:
-                                        hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
-                                        mean_hsv = hsv.reshape(-1,3).mean(axis=0).tolist()
-                                        self._team_color_samples[confirmed_team].append(mean_hsv)
-                            except Exception:
-                                pass
-                            # Once ≥8 samples per team, set reference and activate classifier
-                            if (len(self._team_color_samples.get("A", [])) >= 8 and
-                                    len(self._team_color_samples.get("B", [])) >= 8):
-                                for _t in ("A", "B"):
-                                    if _t not in self._team_color_ready:
-                                        mean = np.mean(self._team_color_samples[_t], axis=0).tolist()
-                                        self._jersey.set_team_reference(_t, mean)
-                                        self._team_color_ready.add(_t)
-                                        logger.info("Team color calibrated from roster: %s → HSV %s", _t, [round(v,1) for v in mean])
+                                    # Remove cached assignment so _classify_team recomputes
+                                    self._jersey._track_team.pop(tid, None)
+                                    kmeans_team = self._jersey._classify_team(crop, tid)
+                                    if kmeans_team and kmeans_team != confirmed_team:
+                                        # Clusters are swapped — swap A↔B references
+                                        colors = self._jersey._team_colors
+                                        colors["A"], colors["B"] = colors["B"], colors["A"]
+                                        self._jersey._track_team.clear()
+                                        logger.info(
+                                            "K-Means clusters swapped: jersey #%s is team %s "
+                                            "but K-Means said %s → swapped A↔B",
+                                            jersey_num, confirmed_team, kmeans_team,
+                                        )
+                                    else:
+                                        logger.info(
+                                            "K-Means verified: jersey #%s → team %s ✓",
+                                            jersey_num, confirmed_team,
+                                        )
+                                    self._kmeans_disambiguated = True
+                                    self._team_color_ready.update(("A", "B"))
+                            except Exception as e:
+                                logger.debug("K-Means disambiguation error: %s", e)
                         continue
                 if tid in self._last_known_team:
                     player["team"] = self._last_known_team[tid]
                 elif tid in jersey_color_map:
-                    # Color-based team: applies once color classifier is calibrated
                     player["team"] = jersey_color_map[tid]
                     self._last_known_team[tid] = jersey_color_map[tid]
 
@@ -917,11 +956,15 @@ class VideoProcessor:
                 }
 
         return {
-            "ts": timestamp_ms,
-            "p":  players_out,
-            "bl": ball_out,
-            "sc": list(self._pts_cache),
-            "q":  self._current_quarter,
+            "ts":   timestamp_ms,
+            "p":    players_out,
+            "bl":   ball_out,
+            "sc":   list(self._pts_cache),
+            "q_sc": [
+                max(0, self._pts_cache[0] - self._q_pts_start[0]),
+                max(0, self._pts_cache[1] - self._q_pts_start[1]),
+            ],
+            "q":    self._current_quarter,
         }
 
     # ── WebSocket message builder ─────────────────────────────────────────────
@@ -1239,8 +1282,78 @@ class VideoProcessor:
             "team_stats":   team_out,
         }
 
+    def _patch_frame_scores(self) -> None:
+        """
+        Retroactively correct sc and q_sc in every frame snapshot.
+
+        During processing, K-Means team calibration and jersey OCR confirmation
+        lag behind actual scoring events — so events arrive with team="" and are
+        not counted in team_stats at that moment. By _finalize() time all teams
+        are known. We rebuild a correct score timeline here and patch _frame_store.
+        """
+        if not self._scoring_events or not self._frame_store or not self._stats:
+            return
+
+        # Final team assignment per track_id from StatsCalculator
+        final_stats = self._stats.get_live_stats()
+        tid_to_team: dict = {
+            tid: p.get("team", "")
+            for tid, p in final_stats.get("player_stats", {}).items()
+        }
+
+        # Build cumulative score timeline sorted by timestamp
+        # Entry: (ts_ms, total_A, total_B, quarter)
+        cum_a, cum_b = 0, 0
+        timeline: list = [(0, 0, 0, self._start_quarter)]
+        for ts_ms, tid, pts, q in sorted(self._scoring_events):
+            team = tid_to_team.get(tid, "")
+            if team == "A":
+                cum_a += pts
+            elif team == "B":
+                cum_b += pts
+            else:
+                continue  # still unknown — skip
+            timeline.append((ts_ms, cum_a, cum_b, q))
+
+        if len(timeline) <= 1:
+            return  # no attributable scoring events — nothing to patch
+
+        # Patch each snapshot: binary search for latest timeline entry ≤ snap ts
+        tl_ts = [e[0] for e in timeline]
+        from bisect import bisect_right
+
+        # Quarter boundary cumulative scores: q_sc = sc - score_at_quarter_start
+        q_start: dict = {self._start_quarter: (0, 0)}
+
+        for snap in self._frame_store:
+            snap_ts = snap.get("ts", 0)
+            idx = bisect_right(tl_ts, snap_ts) - 1
+            if idx < 0:
+                idx = 0
+            _, sa, sb, q = timeline[idx]
+            snap["sc"] = [sa, sb]
+
+            # Derive q_sc: score accumulated within the current quarter
+            if q not in q_start:
+                # First time we see this quarter in the timeline — record start score
+                q_start[q] = (sa, sb)
+            qa, qb = q_start.get(q, (0, 0))
+            snap["q_sc"] = [max(0, sa - qa), max(0, sb - qb)]
+            snap["q"] = q
+
+        logger.info(
+            "_patch_frame_scores: patched %d frames, final score A=%d B=%d",
+            len(self._frame_store), cum_a, cum_b,
+        )
+
     async def _finalize(self, match_id: str) -> None:
         """Update MongoDB match status; push final stats; write output files."""
+
+        # ── 0. Retroactively patch sc/q_sc using final team assignments ──────
+        # During processing, team may be "" for early scoring events (K-Means not
+        # yet calibrated, jersey OCR not yet confirmed). At finalize time all teams
+        # are known → rebuild correct running score and patch every frame snapshot.
+        self._patch_frame_scores()
 
         # ── 1. Write per-frame bbox JSON (frontend time-lookup) ───────────────
         # Use quarter-suffixed filename so Q1 and Q2 files don't overwrite each other.
@@ -1621,6 +1734,8 @@ class VideoProcessor:
         return elapsed_s >= QUARTER_DURATION_S
 
     def _handle_quarter_change(self) -> None:
+        # Snapshot cumulative score at end of this quarter so q_sc resets to 0 for next
+        self._q_pts_start         = list(self._pts_cache)
         self._current_quarter    += 1
         self._quarter_start_frame = self._frame_count
         logger.info("Quarter %d started (frame=%d)",

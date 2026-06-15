@@ -24,6 +24,8 @@ const initialState: MatchState = {
   matchStep: 'setup',
   pipelineFps: 0,
   gpuMetrics: { gpu: 0, vramUsed: 0, vramTotal: 0 },
+  quarterScoreA: 0,
+  quarterScoreB: 0,
 }
 
 export const useMatchStore = create<MatchState & {
@@ -50,6 +52,7 @@ export const useMatchStore = create<MatchState & {
   setVideoUrl: (url: string) => void
   setMatchStep: (step: string) => void
   setPipelineMetrics: (fps: number, gpuMetrics: { gpu: number; vramUsed: number; vramTotal: number }) => void
+  setQuarterScore: (a: number, b: number) => void
   patchEventsByTrackId: (trackId: number, jerseyNumber: number, playerName: string, team: string) => void
   reset: () => void
 }>()(
@@ -101,6 +104,7 @@ export const useMatchStore = create<MatchState & {
       setVideoUrl: (videoUrl) => set({ videoUrl }),
       setMatchStep: (matchStep) => set({ matchStep }),
       setPipelineMetrics: (fps, gpuMetrics) => set({ pipelineFps: fps, gpuMetrics }),
+      setQuarterScore: (a, b) => set({ quarterScoreA: a, quarterScoreB: b }),
       patchEventsByTrackId: (trackId, jerseyNumber, playerName, team) =>
         set((state) => ({
           events: state.events.map((e) =>

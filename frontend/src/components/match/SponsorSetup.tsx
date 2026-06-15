@@ -45,15 +45,23 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
   const [showLib, setShowLib]     = useState(true)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  // Fetch sponsors + library on mount
+  // Library is global — fetch regardless of matchId
+  useEffect(() => {
+    axios.get(`${API}/api/sponsors/library`)
+      .then((res) => setLibrary((res.data.library ?? []).map((e: any) => ({
+        id:          e.id,
+        companyName: e.company_name,
+        logoUrl:     e.logo_url ? `${API}${e.logo_url}` : null,
+      }))))
+      .catch(() => {})
+  }, [])
+
+  // Match sponsors depend on matchId
   useEffect(() => {
     if (!matchId) { setLoading(false); return }
-    Promise.allSettled([
-      axios.get(`${API}/api/sponsors/${matchId}`),
-      axios.get(`${API}/api/sponsors/library`),
-    ]).then(([sponsorsRes, libRes]) => {
-      if (sponsorsRes.status === 'fulfilled') {
-        const list: Sponsor[] = (sponsorsRes.value.data.sponsors ?? []).map((s: any) => ({
+    axios.get(`${API}/api/sponsors/${matchId}`)
+      .then((res) => {
+        const list: Sponsor[] = (res.data.sponsors ?? []).map((s: any) => ({
           id:          s.id,
           category:    s.category as SponsorCategory,
           companyName: s.company_name,
@@ -61,15 +69,9 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
         }))
         setLocal(list)
         setSponsors(list)
-      }
-      if (libRes.status === 'fulfilled') {
-        setLibrary((libRes.value.data.library ?? []).map((e: any) => ({
-          id:          e.id,
-          companyName: e.company_name,
-          logoUrl:     e.logo_url ? `${API}${e.logo_url}` : null,
-        })))
-      }
-    }).finally(() => setLoading(false))
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
   }, [matchId])
 
   const sponsorsByCategory = (cat: SponsorCategory) =>

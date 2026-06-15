@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import { useMatchStore } from '../../store/matchStore'
 import { PlayerStats } from '../../types'
-import EventCorrectionPanel from './EventCorrectionPanel'
+// import EventCorrectionPanel from './EventCorrectionPanel'  // re-enable when KOREKSI tab is restored
 import clsx from 'clsx'
 
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
@@ -80,13 +80,13 @@ export default function TabsStatsLineup() {
       .catch(() => setQuarterFetched(null))
   }, [quarter, matchId])
 
-  // Badge count: unidentified players with scoring events
-  const unidentifiedCount = useMemo(
-    () => Object.values(stats).filter(
-      (p) => p.jerseyNumber == null && (p.pts > 0 || p.twoPointAtt > 0 || p.threePointAtt > 0)
-    ).length,
-    [stats]
-  )
+  // unidentifiedCount: re-enable when KOREKSI tab is restored
+  // const unidentifiedCount = useMemo(
+  //   () => Object.values(stats).filter(
+  //     (p) => p.jerseyNumber == null && (p.pts > 0 || p.twoPointAtt > 0 || p.threePointAtt > 0)
+  //   ).length,
+  //   [stats]
+  // )
 
   const { teamAStats, teamBStats } = useMemo(() => {
     if (quarter === 0) {

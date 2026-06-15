@@ -176,6 +176,7 @@ Buka **dua terminal** terpisah:
 ```bash
 cd backend
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --reload --host 0.0.0.0 --port 8000 2>&1 | ts '[%Y-%m-%d %H:%M:%S]
 ```
 
 **Terminal 2 — Frontend:**

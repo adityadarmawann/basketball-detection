@@ -13,6 +13,7 @@
 #
 # Step 4: Install boxmot terpisah (konflik metadata numpy)
 #   pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
+#   pip install loguru gdown ftfy regex
 #
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -33,6 +33,11 @@ MODEL_FILENAME = "jersey_no.pt"
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
 MAX_VOTE_HISTORY      = 40   # wider window — fast players may only give readable frames
                              # occasionally; OCR_SAMPLE_EVERY=5 × 40 = 200 frames (~7s)
+TRANSFER_MIN_LONG_VOTES = 3  # 2-digit candidate needs this many independent reads before
+                             # 1-digit votes are reinterpreted as partial reads of it.
+                             # Value 3 resists a stray background misread (player #3 briefly
+                             # appearing in crop of player #13) while still correcting the
+                             # common "10→1" OCR clipping artifact within ~0.5s at 25fps.
 OCR_SAMPLE_EVERY      = 4    # run OCR once every N frames per player
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
@@ -49,14 +54,19 @@ BLUR_THRESHOLD    = 0.0   # disabled — blur filter skips too many fast-player 
 def _back_crop_heuristic(player_h: int, player_w: int) -> tuple[int, int, int, int]:
     """
     Return (y1, y2, x1, x2) of the jersey number area within the player crop.
-    Covers head-to-thigh (10%-75%) to catch numbers when player is bent,
-    jumping, or leaning — jersey number position varies greatly in motion.
-    Full width (5%-95%) avoids clipping numbers near edges.
+
+    Chest-focused strip (15%-55% height, 10%-90% width):
+    - Targets the jersey chest/back number zone directly
+    - Avoids the top-of-frame area that bleeds into background sponsor banners
+    - Avoids the leg area below the jersey hem
+    - Slightly inset horizontally to reduce arm-edge and adjacent-player noise
+    - Tested against indoor basketball footage: correctly reads jersey numbers
+      that the wider (10%-75%) heuristic missed due to background contamination
     """
-    y1 = int(player_h * 0.10)
-    y2 = int(player_h * 0.75)
-    x1 = int(player_w * 0.05)
-    x2 = int(player_w * 0.95)
+    y1 = int(player_h * 0.15)
+    y2 = int(player_h * 0.55)
+    x1 = int(player_w * 0.10)
+    x2 = int(player_w * 0.90)
     return y1, y2, x1, x2
 
 
@@ -451,9 +461,23 @@ class JerseyOCR:
                 })
                 continue
 
-            # Layer 2 — OCR
+            # Layer 2 — OCR (dual-strip strategy)
+            # Primary: chest crop from _back_crop_heuristic (15%-55%, tighter SNR).
+            # Fallback: wider torso (10%-75%) if chest yields nothing — covers cases
+            # where jersey number sits lower (tall/close players, bending poses).
             self._last_ocr_frame[track_id] = self._frame_counter
             candidate = self._run_ocr(number_crop)
+
+            if candidate is None:
+                ph_full, pw_full = player_crop.shape[:2]
+                fallback_crop = player_crop[
+                    int(ph_full * 0.10):int(ph_full * 0.75),
+                    int(pw_full * 0.05):int(pw_full * 0.95),
+                ]
+                if fallback_crop.size > 0:
+                    candidate = self._run_ocr(fallback_crop)
+                    if candidate is not None:
+                        logger.debug("track %d: digit from fallback wide crop", track_id)
 
             # Roster whitelist: discard any candidate not in the roster so it
             # never pollutes the vote deque.  Numbers like "0" or "99" that
@@ -607,8 +631,8 @@ class JerseyOCR:
         """
         Accumulate candidate votes per track_id.
         - None candidates are ignored (not added to history), preserving existing votes.
-        - Returns confirmed jersey number (mode) once >= VOTE_THRESHOLD votes exist,
-          else None.
+        - Returns confirmed jersey number (via prefix-aware resolution) once
+          >= VOTE_THRESHOLD votes exist, else None.
         """
         if candidate is not None:
             if track_id not in self._votes:
@@ -617,35 +641,91 @@ class JerseyOCR:
 
         return self._current_confirmed(track_id)
 
+    def _resolve_votes(self, raw_counter: Counter, total: int) -> tuple[Optional[int], float]:
+        """
+        Prefix/suffix-aware vote resolution for jersey number ambiguity.
+
+        OCR often produces partial digit reads from fast camera motion:
+          "10" → "1"  (right digit clipped when camera pans left)
+          "23" → "3"  (left digit clipped when camera pans right)
+        Simple majority voting would lock onto the wrong single digit.
+
+        Rule: if a 1-digit candidate AND a 2-digit candidate share a digit
+        in the same position (prefix OR suffix), AND the 2-digit candidate
+        has >= TRANSFER_MIN_LONG_VOTES independent reads (enough evidence it
+        is real), then all 1-digit votes are reinterpreted as partial reads
+        and transferred to the 2-digit candidate.
+
+        True single-digit players (#1–#9) are protected: if no matching
+        2-digit candidate has sufficient votes, no transfer occurs and the
+        1-digit reading is kept as-is.
+
+        Multiple 2-digit matches (rare): votes distributed proportionally
+        to each match's existing count.
+        """
+        if not raw_counter:
+            return None, 0.0
+
+        adjusted = dict(raw_counter)
+
+        for short_num, short_count in list(raw_counter.items()):
+            if short_num is None or not (0 <= short_num <= 9):
+                continue  # only process 1-digit candidates
+
+            short_str = str(short_num)
+
+            # Collect 2-digit candidates that contain this digit as first or last digit
+            # and have enough reads to be considered genuine (not background contamination).
+            matching_long = [
+                (long_num, long_count)
+                for long_num, long_count in raw_counter.items()
+                if long_num is not None
+                and 10 <= long_num <= 99
+                and (str(long_num)[0] == short_str or str(long_num)[-1] == short_str)
+                and long_count >= TRANSFER_MIN_LONG_VOTES
+            ]
+
+            if not matching_long:
+                continue  # no 2-digit match with enough evidence → keep 1-digit votes
+
+            # Distribute 1-digit votes proportionally across matching 2-digit candidates
+            total_long = sum(c for _, c in matching_long)
+            for long_num, long_count in matching_long:
+                transfer = round(short_count * long_count / total_long)
+                adjusted[long_num] = adjusted.get(long_num, 0) + transfer
+            adjusted[short_num] = 0  # 1-digit votes fully absorbed
+
+        valid = {k: v for k, v in adjusted.items() if k is not None and v > 0}
+        if not valid:
+            return None, 0.0
+
+        best = max(valid, key=valid.get)
+        best_count = valid[best]
+        confirmed = best if best_count >= VOTE_THRESHOLD else None
+        confidence = best_count / total if total > 0 else 0.0
+        return confirmed, confidence
+
     def _current_confirmed(self, track_id: int) -> Optional[int]:
         if track_id not in self._votes or not self._votes[track_id]:
             return None
-        counter = Counter(self._votes[track_id])
-        most_common, count = counter.most_common(1)[0]
-        return most_common if count >= VOTE_THRESHOLD else None
+        votes = self._votes[track_id]
+        confirmed, _ = self._resolve_votes(Counter(votes), len(votes))
+        return confirmed
 
     def _vote_confidence(self, track_id: int) -> float:
         """Fraction of votes for the leading candidate [0.0, 1.0]."""
         if track_id not in self._votes or not self._votes[track_id]:
             return 0.0
-        counter = Counter(self._votes[track_id])
-        top_count = counter.most_common(1)[0][1]
-        return top_count / len(self._votes[track_id])
+        votes = self._votes[track_id]
+        _, confidence = self._resolve_votes(Counter(votes), len(votes))
+        return confidence
 
     def _vote_status(self, track_id: int) -> tuple[Optional[int], float]:
-        """Return (confirmed_number, confidence) in a single Counter pass.
-
-        Use this wherever confirmed and confidence are both needed to avoid
-        building Counter twice for the same track in the same call.
-        """
+        """Return (confirmed_number, confidence) using prefix-aware vote resolution."""
         if track_id not in self._votes or not self._votes[track_id]:
             return None, 0.0
         votes = self._votes[track_id]
-        counter = Counter(votes)
-        most_common, count = counter.most_common(1)[0]
-        confirmed = most_common if count >= VOTE_THRESHOLD else None
-        confidence = count / len(votes)
-        return confirmed, confidence
+        return self._resolve_votes(Counter(votes), len(votes))
 
     def reset(self) -> None:
         """
@@ -831,16 +911,15 @@ if __name__ == "__main__":
     print("--- 1. _vote_number ---")
     tid = 10
 
-    # 2 votes for 7 → not confirmed
+    # 1 vote for 7 → not confirmed yet (need >= VOTE_THRESHOLD=2)
     jerseyocr._vote_number(tid, 7)
-    jerseyocr._vote_number(tid, 7)
-    assert jerseyocr._vote_number(tid, 3) is None, "Should not confirm with 2 votes"
-    print("  2 votes for 7, 1 for 3 → not confirmed ✓")
+    assert jerseyocr._current_confirmed(tid) is None, "1 vote should not confirm"
+    print("  1 vote for 7 → not confirmed ✓")
 
-    # 3rd vote for 7 → confirmed
+    # 2nd vote for 7 → confirmed (VOTE_THRESHOLD=2)
     result = jerseyocr._vote_number(tid, 7)
-    assert result == 7, f"Expected 7, got {result}"
-    print(f"  3 votes for 7 → confirmed: {result} ✓")
+    assert result == 7, f"Expected 7 confirmed after 2 votes, got {result}"
+    print(f"  2 votes for 7 → confirmed: {result} ✓ (VOTE_THRESHOLD={VOTE_THRESHOLD})")
 
     # Confidence
     conf = jerseyocr._vote_confidence(tid)
@@ -872,6 +951,37 @@ if __name__ == "__main__":
     assert len(jerseyocr._votes) == 0
     print("  reset_votes() clears all ✓")
 
+    # ── 1b. prefix/suffix-aware _resolve_votes ────────────────────────
+    print("\n--- 1b. _resolve_votes (prefix/suffix-aware) ---")
+    from collections import deque as _deque
+
+    # Case 1: "10" OCR'd as "1" — "1"×4 + "10"×3 → should confirm "10"
+    jerseyocr._votes[81] = _deque([1, 1, 10, 1, 10, 10, 1], maxlen=MAX_VOTE_HISTORY)
+    num, conf = jerseyocr._vote_status(81)
+    assert num == 10, f"Expected 10 (prefix-aware: '1' transfers to '10'), got {num}"
+    print(f"  '1'×4 + '10'×3 → prefix transfer → confirms: {num} ✓")
+
+    # Case 2: True #1 — no 2-digit match with enough votes → stays as 1
+    jerseyocr._votes[82] = _deque([1, 1, 1, 1, 1], maxlen=MAX_VOTE_HISTORY)
+    num, conf = jerseyocr._vote_status(82)
+    assert num == 1, f"Expected 1 (no 2-digit match), got {num}"
+    print(f"  '1'×5 only → no transfer → confirms: {num} (true #1 protected) ✓")
+
+    # Case 3: Suffix — "23" OCR'd as "3" — "3"×4 + "23"×3 → should confirm "23"
+    jerseyocr._votes[83] = _deque([3, 3, 23, 3, 23, 23, 3], maxlen=MAX_VOTE_HISTORY)
+    num, conf = jerseyocr._vote_status(83)
+    assert num == 23, f"Expected 23 (suffix-aware: '3' transfers to '23'), got {num}"
+    print(f"  '3'×4 + '23'×3 → suffix transfer → confirms: {num} ✓")
+
+    # Case 4: Stray misread — "1"×5 + "10"×2 → not enough 2-digit evidence, no transfer
+    jerseyocr._votes[84] = _deque([1, 1, 10, 1, 10, 1, 1], maxlen=MAX_VOTE_HISTORY)
+    num, conf = jerseyocr._vote_status(84)
+    # "10" only has 2 votes < TRANSFER_MIN_LONG_VOTES=3 → no transfer → "1" wins
+    assert num == 1, f"Expected 1 (insufficient 2-digit evidence, TRANSFER_MIN=3), got {num}"
+    print(f"  '1'×5 + '10'×2 → insufficient evidence → no transfer → confirms: {num} ✓")
+
+    jerseyocr.reset_votes()
+
     # ── 2. _parse_jersey_number ───────────────────────────────────────
     print("\n--- 2. _parse_jersey_number ---")
     cases = [
@@ -896,22 +1006,22 @@ if __name__ == "__main__":
     print("\n--- 3. _preprocess_for_ocr ---")
     dummy_crop = np.random.randint(0, 255, (80, 60, 3), dtype=np.uint8)
     processed  = _preprocess_for_ocr(dummy_crop)
-    assert processed.shape[0] == OCR_HEIGHT_PX, f"Expected height={OCR_HEIGHT_PX}"
+    assert processed.shape[0] >= OCR_HEIGHT_PX, f"Expected height >= {OCR_HEIGHT_PX}"
     assert processed.shape[2] == 3, "Expected 3 channels"
-    print(f"  Input (80×60) → output {processed.shape[:2]} (height={OCR_HEIGHT_PX}px) ✓")
+    print(f"  Input (80×60) → output {processed.shape[:2]} (base height={OCR_HEIGHT_PX}px + padding) ✓")
 
     tiny = np.zeros((2, 1, 3), dtype=np.uint8)
     result_tiny = _preprocess_for_ocr(tiny)
-    assert result_tiny.shape[0] == OCR_HEIGHT_PX
+    assert result_tiny.shape[0] >= OCR_HEIGHT_PX
     print("  Tiny 2×1 crop → safe output ✓")
 
     # ── 4. _back_crop_heuristic ──────────────────────────────────────
     print("\n--- 4. _back_crop_heuristic ---")
     y1, y2, x1, x2 = _back_crop_heuristic(200, 100)
     assert y1 < y2 and x1 < x2
-    assert y1 == 30 and y2 == 130  # 15% of 200 and 65% of 200
-    assert x1 == 20 and x2 == 80   # 20% and 80% of 100 (center 60%)
-    print(f"  200×100 player → number bbox: y=[{y1},{y2}] x=[{x1},{x2}] ✓")
+    assert y1 == 30 and y2 == 110  # 15%-55% of 200 (chest strip)
+    assert x1 == 10 and x2 == 90   # 10%-90% of 100
+    print(f"  200×100 player → chest strip: y=[{y1},{y2}] x=[{x1},{x2}] ✓")
 
     # ── 5. HSV team distance ──────────────────────────────────────────
     print("\n--- 5. _hsv_distance (circular hue) ---")

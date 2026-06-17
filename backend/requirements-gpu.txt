@@ -4,20 +4,18 @@
 #   pip install torch==2.2.2 torchvision==0.17.2 \
 #     --index-url https://download.pytorch.org/whl/cu121
 #
-# Step 2: Install file ini
+# Step 2: Install paddlepaddle-gpu dulu (sebelum file ini)
+#   pip install paddlepaddle-gpu==3.0.0 \
+#     -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+#
+# Step 3: Install file ini
 #   pip install -r requirements-gpu.txt
 #
-# Step 3: Install boxmot terpisah (konflik metadata numpy)
+# Step 4: Install boxmot terpisah (konflik metadata numpy)
 #   pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
 #   pip install loguru gdown ftfy regex
 #
-# Step 4: EasyOCR download model otomatis saat pertama kali dipakai (~200MB).
-#   Atau pre-download manual: python -c "import easyocr; easyocr.Reader(['en'], gpu=True)"
-#
-# ── PaddleOCR (diganti EasyOCR) — kept for rollback reference ────────────────
-# Step 2 lama: Install paddlepaddle-gpu dulu (sebelum file ini)
-#   pip install paddlepaddle-gpu==3.0.0 \
-#     -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+# ─────────────────────────────────────────────────────────────────────────────
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -46,10 +44,9 @@ pytorchvideo==0.1.5
 # boxmot==10.0.43   → pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
 # lapx==0.9.4
 
-# ── OCR (GPU) ─────────────────────────────────────────────────────────────────
-easyocr==1.7.2          # pakai PyTorch GPU yang sudah ada — tidak perlu install terpisah
-# paddlepaddle-gpu==3.0.0  → diganti EasyOCR (kept for rollback)
-# paddleocr==3.5.0
+# ── OCR (GPU) — paddlepaddle-gpu sudah diinstall via Step 2 ──────────────────
+# paddlepaddle-gpu==3.0.0  → sudah via Step 2
+paddleocr==3.5.0
 
 # ── Numerics ──────────────────────────────────────────────────────────────────
 numpy==1.26.4

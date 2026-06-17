@@ -75,7 +75,7 @@ cv2.imwrite("/tmp/ocr_debug_detections.jpg", frame_annot)
 print("  Saved: /tmp/ocr_debug_detections.jpg")
 
 # ── 3. Load PaddleOCR ────────────────────────────────────────────────────────
-print("\n[STEP 2] Loading EasyOCR...")
+print("\n[STEP 2] Loading PaddleOCR...")
 from pipeline.jersey_ocr import (
     JerseyOCR, _preprocess_for_ocr, _otsu_variant, _adaptive_variant,
     OCR_MIN_SCORE, OCR_HEIGHT_PX
@@ -83,7 +83,7 @@ from pipeline.jersey_ocr import (
 
 ocr_inst = JerseyOCR()
 ocr_inst.load_ocr()
-print("  EasyOCR loaded.")
+print("  PaddleOCR loaded.")
 
 # ── 4. OCR each player ────────────────────────────────────────────────────────
 print("\n[STEP 3] OCR per player")

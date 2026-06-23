@@ -353,6 +353,74 @@ async def get_uploaded_quarters(match_id: str):
     }
 
 
+# ── GET /upload/frames/{match_id}/stream ──────────────────────────────────────
+
+@router.get("/upload/frames/{match_id}/stream")
+async def get_frame_data_stream(match_id: str):
+    """
+    Return per-frame bbox data as a JSON array for progressive streaming.
+
+    During processing: reads the incremental JSONL file written frame-by-frame
+    and returns however many frames have been analysed so far.  Returns [] when
+    the processor is registered but no frames have been written yet.
+
+    After processing: serves the full patched JSON array (same as /frames/{id}).
+    """
+    import asyncio as _asyncio
+
+    processor = _processors.get(match_id)
+    if processor:
+        status = getattr(processor, "_status", "")
+
+        # Done — serve complete patched JSON
+        if status == "done":
+            path = getattr(processor, "_frames_json_path", "")
+            if path and os.path.exists(path):
+                return FileResponse(path, media_type="application/json",
+                                    headers={"Cache-Control": "no-cache"})
+
+        # Still processing — parse JSONL and return array so far
+        jsonl_path = getattr(processor, "_frames_jsonl_path", "")
+        if jsonl_path and os.path.exists(jsonl_path):
+            def _read_jsonl(p: str):
+                frames = []
+                try:
+                    with open(p, 'r') as _f:
+                        for _line in _f:
+                            _line = _line.strip()
+                            if _line:
+                                try:
+                                    frames.append(json.loads(_line))
+                                except json.JSONDecodeError:
+                                    pass
+                except Exception:
+                    pass
+                return frames
+
+            frames = await _asyncio.get_event_loop().run_in_executor(
+                None, _read_jsonl, jsonl_path
+            )
+            return JSONResponse(content=frames)
+
+        # Processor registered but JSONL not yet written
+        return JSONResponse(content=[])
+
+    # No active processor — fall back to completed match data in MongoDB
+    db = get_db()
+    if db:
+        try:
+            match = db["matches"].find_one({"match_id": match_id}, {"frames_json_path": 1})
+            if match:
+                path = match.get("frames_json_path", "")
+                if path and os.path.exists(path):
+                    return FileResponse(path, media_type="application/json",
+                                        headers={"Cache-Control": "public, max-age=86400"})
+        except Exception as e:
+            logger.warning("MongoDB stream frames lookup: %s", e)
+
+    return JSONResponse(content=[])
+
+
 # ── GET /upload/frames/{match_id} ─────────────────────────────────────────────
 
 @router.get("/upload/frames/{match_id}")

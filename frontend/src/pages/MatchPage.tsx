@@ -33,6 +33,9 @@ export default function MatchPage() {
   const [nextUploadQuarter, setNextUploadQuarter] = useState<number | undefined>(undefined)
   const [uploadedQuarters, setUploadedQuarters]   = useState<number[]>([])
 
+  // Ref for the streaming poll interval (active during 'analyzing' step)
+  const streamPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   // Wrappers that keep local state and store in sync
   const setStep = useCallback((s: MatchStep) => {
     setStepLocal(s)
@@ -75,13 +78,19 @@ export default function MatchPage() {
   // store.setGameClock(`${mm}:${ss}`)
   //
   const handleVideoTimeUpdate = useCallback((currentTime: number) => {
-    if (store.isLive) return   // pipeline still running — let WS drive the clock
+    // Clock always follows video playback position (elapsed MM:SS).
+    // WS also calls setGameClock (FIBA countdown) but video fires more often —
+    // for pre-recorded video, elapsed time is more useful to the user.
     const mm = String(Math.floor(currentTime / 60)).padStart(2, '0')
     const ss = String(Math.floor(currentTime % 60)).padStart(2, '0')
     store.setGameClock(`${mm}:${ss}`)
 
-    // Sync score & quarter from nearest frame snapshot (video replay mode)
-    if (frameData.length > 0) {
+    // Score & quarter sync: only from patched frameData when WS is NOT active.
+    //   • During 'analyzing' (isLive=true)  → WS drives score; frameData is
+    //     pre-patch (sc may be 0-0 from K-Means lag) — don't override WS.
+    //   • After analysis   (isLive=false) → frameData is fully patched; use it
+    //     for frame-accurate score sync as the user scrubs/plays the video.
+    if (frameData.length > 0 && !store.isLive) {
       const videoMs = currentTime * 1000
       let lo = 0, hi = frameData.length - 1
       while (lo < hi) {
@@ -112,6 +121,42 @@ export default function MatchPage() {
         .get<{ uploaded: number[] }>(`${import.meta.env.VITE_API_URL}/api/upload/quarters/${store.matchId}`)
         .then((r) => setUploadedQuarters(r.data.uploaded ?? []))
         .catch(() => {})
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, store.matchId])
+
+  // Progressive streaming: poll /stream every 2 s during 'analyzing' so the
+  // VideoPlayer can show bbox overlays before full analysis completes.
+  useEffect(() => {
+    if (step !== 'analyzing' || !store.matchId) {
+      if (streamPollRef.current) {
+        clearInterval(streamPollRef.current)
+        streamPollRef.current = null
+      }
+      return
+    }
+
+    const pollStream = async () => {
+      try {
+        const res = await axios.get<FrameBboxEntry[]>(
+          `${import.meta.env.VITE_API_URL}/api/upload/frames/${store.matchId}/stream`
+        )
+        if (Array.isArray(res.data) && res.data.length > 0) {
+          setFrameData(res.data)
+        }
+      } catch {
+        // non-fatal — overlay stays empty until data arrives
+      }
+    }
+
+    pollStream()   // immediate first poll
+    streamPollRef.current = setInterval(pollStream, 2000)
+
+    return () => {
+      if (streamPollRef.current) {
+        clearInterval(streamPollRef.current)
+        streamPollRef.current = null
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, store.matchId])
@@ -249,28 +294,25 @@ export default function MatchPage() {
             </button>
           </div>
 
-          {/* Original video preview — shown immediately after upload */}
+          {/* Video with live progressive AI overlay */}
           <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-100">
+            <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between">
               <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
-                Preview Video Asli
+                Video Analisis AI
+              </span>
+              <span className="flex items-center gap-1.5 text-xs font-medium text-amber-500">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                {frameData.length > 0
+                  ? `${frameData.length} frame dianalisis`
+                  : 'AI sedang menganalisis...'}
               </span>
             </div>
-            <div className="relative">
-              <video
-                src={videoUrl}
-                controls
-                muted
-                className="w-full max-h-80 object-contain bg-black"
-                onError={(e) => { (e.currentTarget as HTMLVideoElement).style.display = 'none' }}
-              />
-              <div className="absolute bottom-10 inset-x-0 flex justify-center pointer-events-none">
-                <div className="bg-black/75 text-white text-xs px-3 py-1.5 rounded-full flex items-center gap-2">
-                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                  AI sedang menganalisis — bbox overlay tampil setelah selesai
-                </div>
-              </div>
-            </div>
+            <VideoPlayer
+              videoUrl={videoUrl}
+              showCourtMap={true}
+              frameData={frameData}
+              onTimeUpdate={handleVideoTimeUpdate}
+            />
           </div>
 
           {/* AI scanning progress */}

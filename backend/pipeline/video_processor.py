@@ -263,6 +263,8 @@ class VideoProcessor:
         self._frame_store:        list = []   # [{ts, p:[{i,j,t,b}], bl}]
         self._video_path:         str  = ""   # set in process_video, used in _finalize
         self._frames_json_path:   str  = ""   # output path written in _finalize
+        self._frames_jsonl_path:  str  = ""   # incremental JSONL for progressive streaming
+        self._jsonl_lock = threading.Lock()   # guards concurrent append vs. finalize rewrite
         self._output_video_path:  str  = ""   # rendered video with overlay
         self._output_csv_path:    str  = ""   # player stats CSV
 
@@ -419,6 +421,18 @@ class VideoProcessor:
         self._start_quarter   = max(1, min(4, start_quarter))   # kept for _finalize merge
         self._current_quarter = self._start_quarter
 
+        # Progressive streaming: one JSON line per processed frame, read by /stream endpoint.
+        # Overwritten at finalize with retroactively patched sc/q_sc.
+        self._frames_jsonl_path = (
+            os.path.splitext(str(video_path))[0]
+            + f"_q{self._start_quarter}_frames.jsonl"
+        )
+        try:
+            open(self._frames_jsonl_path, 'w').close()   # truncate / create fresh
+        except Exception as _e:
+            logger.warning("Cannot create JSONL stream file: %s", _e)
+            self._frames_jsonl_path = ""
+
         if self._stats is None:
             self._init_pipeline(self._models_path)
 
@@ -487,6 +501,7 @@ class VideoProcessor:
 
                 # Store compact bbox snapshot — used by frontend for time-based replay lookup
                 self._frame_store.append(self._snapshot_frame(frame_data, ts_ms))
+                self._append_frame_to_jsonl(self._frame_store[-1])
 
                 # Persist events
                 scoring_types = {"MADE_FG", "MADE_3", "SHOT_MADE", "MADE_FT", "FT_MADE"}
@@ -976,6 +991,20 @@ class VideoProcessor:
             "q":    self._current_quarter,
         }
 
+    # ── Incremental JSONL writer (progressive streaming) ─────────────────────
+
+    def _append_frame_to_jsonl(self, entry: dict) -> None:
+        """Append one frame snapshot as a JSON line for progressive streaming."""
+        if not self._frames_jsonl_path:
+            return
+        try:
+            line = json.dumps(entry, separators=(',', ':')) + '\n'
+            with self._jsonl_lock:
+                with open(self._frames_jsonl_path, 'a') as f:
+                    f.write(line)
+        except Exception as e:
+            logger.debug("JSONL append error (non-fatal): %s", e)
+
     # ── WebSocket message builder ─────────────────────────────────────────────
 
     def _build_ws_message(self, frame_data: dict, stats: dict) -> dict:
@@ -1363,6 +1392,19 @@ class VideoProcessor:
         # yet calibrated, jersey OCR not yet confirmed). At finalize time all teams
         # are known → rebuild correct running score and patch every frame snapshot.
         self._patch_frame_scores()
+
+        # Rewrite JSONL with retroactively patched sc/q_sc so the /stream endpoint
+        # serves correct scores after processing completes.
+        if self._frames_jsonl_path and self._frame_store:
+            try:
+                with self._jsonl_lock:
+                    with open(self._frames_jsonl_path, 'w') as _jfp:
+                        for _entry in self._frame_store:
+                            _jfp.write(json.dumps(_entry, separators=(',', ':')) + '\n')
+                logger.info("JSONL stream rewritten with patched scores (%d frames)",
+                            len(self._frame_store))
+            except Exception as _je:
+                logger.warning("JSONL rewrite failed: %s", _je)
 
         # ── 1. Write per-frame bbox JSON (frontend time-lookup) ───────────────
         # Use quarter-suffixed filename so Q1 and Q2 files don't overwrite each other.

@@ -201,10 +201,13 @@ class ActionClassifier:
                 }
                 model.load_state_dict(remapped)
                 self.model = model.to(target).eval()
+                if target.startswith("cuda"):
+                    self.model.half()   # FP16: 386MB → ~193MB VRAM, ~2x faster on RTX
+                self._target = target
                 self._model_mode = True
                 logger.info(
-                    "action_best_v1.pt loaded (SlowFast-R50, %d classes) on %s — model mode active",
-                    len(self._action_classes), target,
+                    "action_best_v1.pt loaded (SlowFast-R50, %d classes) on %s fp16=%s — model mode active",
+                    len(self._action_classes), target, target.startswith("cuda"),
                 )
             except ImportError:
                 logger.warning(
@@ -225,6 +228,25 @@ class ActionClassifier:
 
     def is_model_loaded(self) -> bool:
         return self.model is not None
+
+    def warmup(self) -> None:
+        """One dummy forward pass to trigger CUDA JIT compilation for SlowFast."""
+        if not self.is_model_loaded():
+            return
+        try:
+            import torch
+            device   = next(self.model.parameters()).device
+            use_half = next(self.model.parameters()).dtype == torch.float16
+            dtype    = torch.float16 if use_half else torch.float32
+            slow_t = torch.zeros(1, 3, _T_SLOW, _INPUT_SIZE, _INPUT_SIZE,
+                                 dtype=dtype, device=device)
+            fast_t = torch.zeros(1, 3, _T_FAST, _INPUT_SIZE, _INPUT_SIZE,
+                                 dtype=dtype, device=device)
+            with torch.no_grad():
+                self.model([slow_t, fast_t])
+            logger.info("ActionClassifier warmup done (SlowFast fp16=%s)", use_half)
+        except Exception as e:
+            logger.debug("ActionClassifier warmup error (non-fatal): %s", e)
 
     def get_mode(self) -> str:
         return "model" if (self._model_mode and self.model is not None) else "rule_based"
@@ -542,8 +564,9 @@ class ActionClassifier:
         if not frames:
             raise RuntimeError("empty frame buffer")
 
-        device  = next(self.model.parameters()).device
-        actions = []
+        device    = next(self.model.parameters()).device
+        use_half  = next(self.model.parameters()).dtype == torch.float16
+        actions   = []
 
         for player in tracked_players:
             track_id    = player["track_id"]
@@ -554,9 +577,16 @@ class ActionClassifier:
             slow_idx    = torch.linspace(0, _T_FAST - 1, _T_SLOW).long()
             slow_tensor = fast_tensor[:, :, slow_idx, :, :]
 
+            # Match input dtype to model weights (FP16 when model.half() was called)
+            slow_t = slow_tensor.to(device)
+            fast_t = fast_tensor.to(device)
+            if use_half:
+                slow_t = slow_t.half()
+                fast_t = fast_t.half()
+
             try:
                 with torch.no_grad():
-                    logits = self.model([slow_tensor.to(device), fast_tensor.to(device)])
+                    logits = self.model([slow_t, fast_t])
                     probs  = torch.softmax(logits, dim=-1)[0]
                     top1   = int(probs.argmax().item())
                     conf   = float(probs[top1].item())

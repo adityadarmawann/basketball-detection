@@ -108,7 +108,11 @@ class PoseEstimator:
             target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
             self.model = YOLO(str(path))
             self.model.to(target)
-            logger.info("PoseEstimator loaded: %s (device=%s)", path.name, target)
+            if target.startswith("cuda"):
+                self.model.half()   # FP16 weights → Tensor Core acceleration
+            self._use_half = target.startswith("cuda")
+            logger.info("PoseEstimator loaded: %s (device=%s, fp16=%s)",
+                        path.name, target, self._use_half)
 
         except ImportError as exc:
             raise ImportError(
@@ -119,9 +123,25 @@ class PoseEstimator:
             from ultralytics import YOLO
             self.model = YOLO(str(path))
             self.model.to("cpu")
+            self._use_half = False
 
     def is_model_loaded(self) -> bool:
         return self.model is not None
+
+    def warmup(self, height: int = 720, width: int = 1280) -> None:
+        """One dummy inference to trigger CUDA JIT compilation."""
+        if not self.is_model_loaded():
+            return
+        dummy_crop = np.zeros((64, 48, 3), dtype=np.uint8)
+        try:
+            self.model.predict(
+                [dummy_crop, dummy_crop], verbose=False,
+                conf=self.conf_threshold,
+                half=getattr(self, "_use_half", False),
+            )
+            logger.info("PoseEstimator warmup done")
+        except Exception as e:
+            logger.debug("PoseEstimator warmup error (non-fatal): %s", e)
 
     # ------------------------------------------------------------------
     # Public API
@@ -130,6 +150,9 @@ class PoseEstimator:
     def estimate(self, frame: np.ndarray, tracked_players: list[dict]) -> dict:
         """
         Run pose estimation for every tracked player.
+
+        Batches ALL player crops into a single YOLO predict() call so the GPU
+        runs one forward pass instead of N sequential passes — ~N× faster on CUDA.
 
         Args:
             frame:           Full BGR frame from OpenCV.
@@ -143,78 +166,82 @@ class PoseEstimator:
             return {"poses": []}
 
         h_frame, w_frame = frame.shape[:2]
-        poses: list[dict] = []
+
+        # ── Build crops and track their frame-space offsets ───────────────
+        crops:   list                    = []   # ndarray or None per player
+        offsets: list[tuple[int, int]]   = []   # (x1c, y1c) for coord mapping
 
         for player in tracked_players:
-            track_id = player["track_id"]
-            bbox = player["bbox"]                     # [x1, y1, x2, y2]
+            x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
+            x1c = max(0, x1);  y1c = max(0, y1)
+            x2c = min(w_frame, x2);  y2c = min(h_frame, y2)
+            if x2c <= x1c or y2c <= y1c:
+                crops.append(None)
+            else:
+                crop = frame[y1c:y2c, x1c:x2c]
+                crops.append(crop if crop.size > 0 else None)
+            offsets.append((x1c, y1c))
 
-            keypoints = self._crop_and_estimate(frame, bbox, w_frame, h_frame)
+        # ── Single-batch GPU inference for all valid crops ────────────────
+        valid_idx   = [i for i, c in enumerate(crops) if c is not None]
+        valid_crops = [crops[i] for i in valid_idx]
 
-            angles = self._calc_joint_angles(keypoints)
-            is_shooting = self._detect_shooting(keypoints)
-            jump_h = self._estimate_jump_height(track_id, keypoints)
+        batch_results: list = []
+        if valid_crops and self.is_model_loaded():
+            try:
+                batch_results = self.model.predict(
+                    valid_crops,
+                    verbose=False,
+                    conf=self.conf_threshold,
+                    half=getattr(self, "_use_half", False),
+                )
+            except Exception as exc:
+                logger.warning("Batch pose inference failed: %s", exc)
+                batch_results = []
 
+        # ── Map results back to each player ───────────────────────────────
+        kp_map: dict[int, list[dict]] = {}
+        for j, player_i in enumerate(valid_idx):
+            x1c, y1c = offsets[player_i]
+            if j < len(batch_results):
+                kp_map[player_i] = self._parse_keypoints(batch_results[j], x1c, y1c)
+            else:
+                kp_map[player_i] = self._empty_keypoints()
+
+        poses: list[dict] = []
+        for i, player in enumerate(tracked_players):
+            track_id  = player["track_id"]
+            keypoints = kp_map.get(i, self._empty_keypoints())
             poses.append({
-                "track_id":      track_id,
-                "keypoints":     keypoints,
-                "angles":        angles,
-                "is_shooting":   is_shooting,
-                "jump_height_px": jump_h,
-                "bbox":          bbox,
+                "track_id":       track_id,
+                "keypoints":      keypoints,
+                "angles":         self._calc_joint_angles(keypoints),
+                "is_shooting":    self._detect_shooting(keypoints),
+                "jump_height_px": self._estimate_jump_height(track_id, keypoints),
+                "bbox":           player["bbox"],
             })
 
         return {"poses": poses}
 
     # ------------------------------------------------------------------
-    # Per-player inference
+    # Keypoint parsing (used by batch estimate)
     # ------------------------------------------------------------------
 
-    def _crop_and_estimate(
-        self,
-        frame: np.ndarray,
-        bbox: list[float],
-        w_frame: int,
-        h_frame: int,
-    ) -> list[dict]:
+    def _parse_keypoints(self, result, x1c: int, y1c: int) -> list[dict]:
         """
-        Crop the player's bbox, run pose, map keypoints back to full-frame
-        coordinates. Returns a 17-element list (one entry per COCO keypoint).
-        All entries are present; occluded ones have confidence=0.
+        Parse one YOLO Results object into 17 keypoint dicts.
+        Offsets (x1c, y1c) map crop-space back to full-frame coordinates.
+        Returns empty keypoints (conf=0) when the crop has no detections.
         """
-        x1, y1, x2, y2 = [int(v) for v in bbox]
-
-        # Clamp to frame boundaries
-        x1c = max(0, x1);  y1c = max(0, y1)
-        x2c = min(w_frame, x2);  y2c = min(h_frame, y2)
-
-        if x2c <= x1c or y2c <= y1c:
+        if result.keypoints is None:
             return self._empty_keypoints()
 
-        crop = frame[y1c:y2c, x1c:x2c]
-        if crop.size == 0:
-            return self._empty_keypoints()
-
-        if not self.is_model_loaded():
-            return self._empty_keypoints()
-
-        try:
-            results = self.model.predict(
-                crop, verbose=False, conf=self.conf_threshold
-            )
-        except Exception as exc:
-            logger.warning("Pose inference failed for bbox %s: %s", bbox, exc)
-            return self._empty_keypoints()
-
-        if not results or results[0].keypoints is None:
-            return self._empty_keypoints()
-
-        kp_data = results[0].keypoints.data
+        kp_data = result.keypoints.data
         if len(kp_data) == 0:
             return self._empty_keypoints()
 
-        # Pick the highest-confidence person detection in the crop
-        boxes = results[0].boxes
+        # Pick highest-confidence person detection when crop has multiple people
+        boxes = result.boxes
         if boxes is not None and len(boxes.conf) > 1:
             best = int(boxes.conf.argmax().item())
         else:
@@ -222,7 +249,6 @@ class PoseEstimator:
 
         kp_array = kp_data[best].cpu().numpy()   # (17, 3): [x_crop, y_crop, conf]
 
-        # Map crop-space coordinates back to full-frame space
         keypoints: list[dict] = []
         for idx in range(17):
             xc, yc, conf = (
@@ -237,8 +263,39 @@ class PoseEstimator:
                 "y":          yc + y1c,   # full-frame y
                 "confidence": conf,
             })
-
         return keypoints
+
+    # ------------------------------------------------------------------
+    # Legacy single-crop helper (kept for backwards-compat / testing)
+    # ------------------------------------------------------------------
+
+    def _crop_and_estimate(
+        self,
+        frame: np.ndarray,
+        bbox: list[float],
+        w_frame: int,
+        h_frame: int,
+    ) -> list[dict]:
+        """Single-player crop inference. Use estimate() for batch processing."""
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        x1c = max(0, x1);  y1c = max(0, y1)
+        x2c = min(w_frame, x2);  y2c = min(h_frame, y2)
+        if x2c <= x1c or y2c <= y1c:
+            return self._empty_keypoints()
+        crop = frame[y1c:y2c, x1c:x2c]
+        if crop.size == 0 or not self.is_model_loaded():
+            return self._empty_keypoints()
+        try:
+            results = self.model.predict(
+                crop, verbose=False, conf=self.conf_threshold,
+                half=getattr(self, "_use_half", False),
+            )
+        except Exception as exc:
+            logger.warning("Pose inference failed for bbox %s: %s", bbox, exc)
+            return self._empty_keypoints()
+        if not results:
+            return self._empty_keypoints()
+        return self._parse_keypoints(results[0], x1c, y1c)
 
     # ------------------------------------------------------------------
     # Geometry helpers

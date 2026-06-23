@@ -85,12 +85,10 @@ export default function MatchPage() {
     const ss = String(Math.floor(currentTime % 60)).padStart(2, '0')
     store.setGameClock(`${mm}:${ss}`)
 
-    // Score & quarter sync: only from patched frameData when WS is NOT active.
-    //   • During 'analyzing' (isLive=true)  → WS drives score; frameData is
-    //     pre-patch (sc may be 0-0 from K-Means lag) — don't override WS.
-    //   • After analysis   (isLive=false) → frameData is fully patched; use it
-    //     for frame-accurate score sync as the user scrubs/plays the video.
-    if (frameData.length > 0 && !store.isLive) {
+    // Score & quarter: binary search frameData whenever available.
+    // WS score/quarter are blocked via isVideoMode when frameData is present,
+    // so video playback is the single source of truth. Pausing freezes score.
+    if (frameData.length > 0) {
       const videoMs = currentTime * 1000
       let lo = 0, hi = frameData.length - 1
       while (lo < hi) {
@@ -128,7 +126,8 @@ export default function MatchPage() {
   // Progressive streaming: poll /stream every 2 s during 'analyzing' so the
   // VideoPlayer can show bbox overlays before full analysis completes.
   useEffect(() => {
-    if (step !== 'analyzing' || !store.matchId) {
+    // Poll during 'analyzing' OR during 'live' while WS is still active (analysis in background)
+    if ((step !== 'analyzing' && step !== 'live') || !store.matchId || !store.isLive) {
       if (streamPollRef.current) {
         clearInterval(streamPollRef.current)
         streamPollRef.current = null
@@ -159,7 +158,16 @@ export default function MatchPage() {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, store.matchId])
+  }, [step, store.matchId, store.isLive])
+
+  // isVideoMode: true when frameData is ready and user is in video-driven steps.
+  // Tells WS handler to skip score/quarter/clock overrides — video binary search drives them.
+  useEffect(() => {
+    store.setIsVideoMode(
+      frameData.length > 0 && (step === 'live' || step === 'analyzing')
+    )
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frameData.length, step])
 
   // Track whether WS session has started so we only connect once per match
   // (not on every analyzing ↔ live transition).
@@ -297,7 +305,9 @@ export default function MatchPage() {
             </button>
           </div>
 
-          {/* Video with live progressive AI overlay */}
+          {/* Video — bbox overlay hanya aktif setelah analisis selesai (isLive=false).
+               Saat WS aktif, posisi bbox backend tidak sinkron dengan video frontend
+               (backend bisa 2-3 menit lebih maju) → court map di pojok kanan tetap live. */}
           <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
             <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between">
               <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
@@ -313,7 +323,7 @@ export default function MatchPage() {
             <VideoPlayer
               videoUrl={videoUrl}
               showCourtMap={true}
-              frameData={store.isLive ? [] : frameData}
+              frameData={frameData}
               onTimeUpdate={handleVideoTimeUpdate}
             />
           </div>
@@ -428,7 +438,7 @@ export default function MatchPage() {
               <VideoPlayer
                 videoUrl={videoUrl}
                 showCourtMap={true}
-                frameData={store.isLive ? [] : frameData}
+                frameData={frameData}
                 onTimeUpdate={handleVideoTimeUpdate}
               />
             </div>

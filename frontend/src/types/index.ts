@@ -152,6 +152,7 @@ export interface MatchState {
   shotClock: number;
   possession: { teamA: number; teamB: number };
   isLive: boolean;
+  isVideoMode: boolean;
   players: Player[];
   playersVideoTs: number;
   ball: BallState | null;

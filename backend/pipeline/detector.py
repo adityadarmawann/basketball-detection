@@ -70,6 +70,8 @@ class BasketballDetector:
 
             self.model = YOLO(str(path))
             self.model.to(target_device)
+            if target_device.startswith("cuda"):
+                self.model.half()   # FP16 weights → Tensor Core acceleration
             self._use_half = target_device.startswith("cuda")
 
             # Sync class name list from model metadata when available

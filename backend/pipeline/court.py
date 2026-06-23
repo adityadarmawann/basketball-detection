@@ -186,6 +186,8 @@ class CourtMapper:
             target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
             self.model = YOLO(str(path))
             self.model.to(target)
+            if target.startswith("cuda"):
+                self.model.half()   # FP16 weights → Tensor Core acceleration
             self._use_half = target.startswith("cuda")
             logger.info("CourtMapper loaded: %s (device=%s, fp16=%s)",
                         path.name, target, self._use_half)
@@ -198,6 +200,18 @@ class CourtMapper:
             from ultralytics import YOLO
             self.model = YOLO(str(path))
             self.model.to("cpu")
+
+    def warmup(self, height: int = 720, width: int = 1280) -> None:
+        """One dummy inference to trigger CUDA JIT compilation."""
+        if self.model is None:
+            return
+        dummy = np.zeros((height, width, 3), dtype=np.uint8)
+        try:
+            self.model.predict(dummy, verbose=False, conf=0.1,
+                               half=getattr(self, "_use_half", False))
+            logger.info("CourtMapper warmup done (%dx%d)", width, height)
+        except Exception as e:
+            logger.debug("CourtMapper warmup error (non-fatal): %s", e)
 
     # ------------------------------------------------------------------
     # Detection

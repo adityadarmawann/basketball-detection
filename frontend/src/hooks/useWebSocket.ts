@@ -88,9 +88,13 @@ export const useWebSocket = () => {
 
   const handleFrameUpdate = useCallback((frame: FrameUpdate) => {
     const s = useMatchStore.getState()
-    s.setScore(frame.score.teamA, frame.score.teamB)
-    s.setQuarter(frame.quarter)
-    s.setGameClock(frame.gameClock)
+    // When video is the source of truth (frameData binary search drives score/time),
+    // skip WS overrides so clock/score freeze correctly when video is paused.
+    if (!s.isVideoMode) {
+      s.setScore(frame.score.teamA, frame.score.teamB)
+      s.setQuarter(frame.quarter)
+      s.setGameClock(frame.gameClock)
+    }
     s.setPlayers(frame.players, frame.timestamp)
     s.setBall(frame.ball)
     s.setPossession(frame.possession)

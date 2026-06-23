@@ -262,6 +262,9 @@ class JerseyOCR:
             target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
             self.model = YOLO(str(path))
             self.model.to(target)
+            if target.startswith("cuda"):
+                self.model.half()   # FP16 on Tensor Cores → ~2x faster on RTX
+            self._use_half = target.startswith("cuda")
 
             # Find "number" class index in the loaded model
             for idx, name in self.model.names.items():
@@ -334,6 +337,9 @@ class JerseyOCR:
             target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
             self._digit_model = YOLO(str(path))
             self._digit_model.to(target)
+            if target.startswith("cuda"):
+                self._digit_model.half()   # FP16 → faster on Tensor Cores
+            self._digit_use_half = target.startswith("cuda")
             logger.info(
                 "best-detect-num-v2.pt loaded on %s (classes: %s)",
                 target,
@@ -621,7 +627,8 @@ class JerseyOCR:
         if self.model is None or frame is None or frame.size == 0:
             return []
         try:
-            det = self.model(frame, conf=0.20, verbose=False)
+            det = self.model(frame, conf=0.20, verbose=False,
+                             half=getattr(self, "_use_half", False))
             boxes = []
             for r in det:
                 for box in r.boxes:
@@ -687,7 +694,8 @@ class JerseyOCR:
             )
 
         try:
-            det = self._digit_model(number_crop, conf=DIGIT_CONF_THRESHOLD, verbose=False)
+            det = self._digit_model(number_crop, conf=DIGIT_CONF_THRESHOLD, verbose=False,
+                                    half=getattr(self, "_digit_use_half", False))
         except Exception as exc:
             logger.debug("YOLO digit model inference error: %s", exc)
             return None

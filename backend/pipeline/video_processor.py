@@ -175,7 +175,7 @@ FPS_DEFAULT          = 30
 # Court keypoints: camera moves slowly → run every 30 processed frames
 # Action: SlowFast needs temporal clip, result is stable → run every 20 frames
 # OCR: jersey number is stable once confirmed → run every 30 frames
-PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every other frame
+PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "4"))   # 4=every 4th frame → 15fps from 60fps source
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
 OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "15"))   # fallback default; overridden at runtime
 ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "20"))   # SlowFast action
@@ -383,6 +383,12 @@ class VideoProcessor:
             self._detector.warmup()
         if self._jersey:
             self._jersey.warmup()
+        if self._pose:
+            self._pose.warmup()
+        if self._court:
+            self._court.warmup()
+        if self._action:
+            self._action.warmup()
 
         logger.info("Pipeline ready (device=%s)", dev)
 
@@ -467,13 +473,14 @@ class VideoProcessor:
         grab_thread.start()
 
         loop     = asyncio.get_event_loop()
-        frame_id = 0       # source frame counter (every frame read from video)
-        proc_id  = 0       # processed frame counter (after stride filter)
+        # frame_id counts SOURCE frames (0, PROCESS_STRIDE, 2×STRIDE, …).
+        # Stride skipping is done in _frame_grabber via cap.grab(); the queue
+        # only contains frames that will be processed — no skip logic needed here.
+        frame_id = 0       # source frame index (steps by PROCESS_STRIDE)
+        proc_id  = 0       # processed frame count (steps by 1)
 
         try:
             while not self._stop_signal.is_set():
-                frame_start = time.perf_counter()
-
                 # Non-blocking poll so the event loop stays responsive
                 try:
                     frame = self._frame_queue.get_nowait()
@@ -484,20 +491,12 @@ class VideoProcessor:
                 if frame is None:   # sentinel — video exhausted
                     break
 
-                # Skip intermediate frames on CPU to hit a reasonable throughput.
-                # PROCESS_STRIDE=1 disables skipping entirely.
-                if PROCESS_STRIDE > 1 and frame_id % PROCESS_STRIDE != 0:
-                    frame_id += 1
-                    self._frame_count = frame_id
-                    continue
-
                 ts_ms = int(frame_id / self._source_fps * 1000)
 
                 # Heavy sync pipeline runs off the event loop
                 frame_data = await loop.run_in_executor(
                     self._executor, self._process_frame, frame, proc_id, ts_ms
                 )
-                proc_id += 1
 
                 # Store compact bbox snapshot — used by frontend for time-based replay lookup
                 self._frame_store.append(self._snapshot_frame(frame_data, ts_ms))
@@ -580,12 +579,15 @@ class VideoProcessor:
                                 except Exception as e:
                                     logger.debug("WS jersey_confirmed error: %s", e)
 
-                frame_id += 1
+                # Advance source frame index by one stride (grabber already skipped
+                # the in-between frames without decoding them)
+                frame_id += PROCESS_STRIDE
+                proc_id  += 1
                 self._frame_count = frame_id
                 elapsed = time.perf_counter() - self._start_time
                 self._fps_actual = frame_id / elapsed if elapsed > 0 else 0.0
 
-                if frame_id % FPS_LOG_INTERVAL == 0:
+                if proc_id % (max(1, FPS_LOG_INTERVAL // PROCESS_STRIDE)) == 0:
                     logger.info(
                         "Frame %d/%d (proc %d)  FPS=%.1f  dropped=%d  Q%d  stride=%d",
                         frame_id, self._total_frames, proc_id,
@@ -617,15 +619,27 @@ class VideoProcessor:
     # ── Frame grabber (background thread) ────────────────────────────────────
 
     def _frame_grabber(self, cap: cv2.VideoCapture) -> None:
-        """Read frames from cv2.VideoCapture; drop if pipeline queue is full."""
+        """
+        Read frames from cv2.VideoCapture.
+
+        Uses cap.grab() (no H.264 decode, ~0.05ms) for stride-skipped frames
+        instead of cap.read() (~3–8ms per frame). For PROCESS_STRIDE=4 this
+        eliminates 75% of video decode cost — the single biggest remaining
+        CPU bottleneck after GPU model optimisation.
+        """
         try:
             while not self._stop_signal.is_set():
+                # Skip PROCESS_STRIDE-1 frames without decoding
+                for _ in range(PROCESS_STRIDE - 1):
+                    if not cap.grab():
+                        # Video ended mid-stride — signal done
+                        self._frame_queue.put(None, block=True, timeout=2.0)
+                        return
+
                 ret, frame = cap.read()
                 if not ret:
                     break
                 try:
-                    # Block up to 10 s so frames aren't silently dropped on slow CPU.
-                    # For live streams switch to put_nowait to avoid back-pressure.
                     self._frame_queue.put(frame, block=True, timeout=10.0)
                 except queue.Full:
                     self._frames_dropped += 1
@@ -633,7 +647,6 @@ class VideoProcessor:
             logger.warning("Frame grabber error: %s", e)
         finally:
             cap.release()
-            # Sentinel so the main loop knows the stream ended
             try:
                 self._frame_queue.put(None, timeout=2.0)
             except queue.Full:

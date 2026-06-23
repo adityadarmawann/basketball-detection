@@ -407,7 +407,7 @@ async def get_frame_data_stream(match_id: str):
 
     # No active processor — fall back to completed match data in MongoDB
     db = get_db()
-    if db:
+    if db is not None:
         try:
             match = db["matches"].find_one({"match_id": match_id}, {"frames_json_path": 1})
             if match:
@@ -444,7 +444,7 @@ async def get_frame_data(match_id: str):
 
     # Fall back to MongoDB (completed match from a previous session)
     db = get_db()
-    if db:
+    if db is not None:
         try:
             match = db["matches"].find_one(
                 {"match_id": match_id}, {"frames_json_path": 1}
@@ -542,7 +542,7 @@ async def get_raw_video(match_id: str):
     if not candidates:
         # Also check MongoDB for frames_json_path — derive video path from it
         db = get_db()
-        if db:
+        if db is not None:
             try:
                 match = db["matches"].find_one({"match_id": match_id}, {"frames_json_path": 1})
                 if match:
@@ -592,7 +592,7 @@ async def get_output_stats_csv(match_id: str):
 
     # Fall back to MongoDB
     db = get_db()
-    if db:
+    if db is not None:
         try:
             match = db["matches"].find_one({"match_id": match_id}, {"output_csv_path": 1})
             if match:

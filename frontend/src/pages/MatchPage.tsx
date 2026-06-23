@@ -186,8 +186,11 @@ export default function MatchPage() {
   const handleUploadComplete = (result: { videoId: string; videoUrl: string }) => {
     setVideoUrl(result.videoUrl)
     setNextUploadQuarter(undefined)
-    setStep('analyzing')
-    // Refresh quarter status after this upload finalises
+    // Go directly to live dashboard — WS updates score/bbox/stats in real-time
+    // while AI processes in background. 'analyzing' step still accessible via goToVideo().
+    wsSessionRef.current = true
+    connect()
+    setStep('live')
     if (store.matchId) fetchUploadedQuarters(store.matchId)
   }
 
@@ -310,7 +313,7 @@ export default function MatchPage() {
             <VideoPlayer
               videoUrl={videoUrl}
               showCourtMap={true}
-              frameData={frameData}
+              frameData={store.isLive ? [] : frameData}
               onTimeUpdate={handleVideoTimeUpdate}
             />
           </div>
@@ -362,6 +365,15 @@ export default function MatchPage() {
               })}
             </div>
           </div>
+
+          {/* Analysis progress — visible while AI processes uploaded video, disappears on complete */}
+          {store.isLive && videoUrl && store.matchId && (
+            <VideoScanningStatus
+              matchId={store.matchId}
+              onComplete={handleAnalysisComplete}
+              onReupload={() => setStep('upload')}
+            />
+          )}
 
           {/* 1. Video Original — full width */}
           {videoUrl && (
@@ -416,7 +428,7 @@ export default function MatchPage() {
               <VideoPlayer
                 videoUrl={videoUrl}
                 showCourtMap={true}
-                frameData={frameData}
+                frameData={store.isLive ? [] : frameData}
                 onTimeUpdate={handleVideoTimeUpdate}
               />
             </div>

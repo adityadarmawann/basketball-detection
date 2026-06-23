@@ -27,8 +27,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-MODELS_DIR   = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
-MODEL_FILENAME = "jersey_no.pt"
+MODELS_DIR            = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
+MODEL_FILENAME         = "jersey_no.pt"
+DIGIT_MODEL_FILENAME   = "best-detect-num-v2.pt"
+DIGIT_CONF_THRESHOLD   = 0.30   # minimum per-digit detection confidence
 
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
 MAX_VOTE_HISTORY      = 20   # rolling window — 20 × OCR_SAMPLE_EVERY=4 = 80 frames (~3s)
@@ -224,8 +226,9 @@ class JerseyOCR:
         self.device         = device
         self.conf_threshold = conf_threshold
 
-        self.model = None           # jersey_no.pt (YOLO)
-        self._ocr  = None           # PaddleOCR instance
+        self.model        = None    # jersey_no.pt (YOLO localizer)
+        self._digit_model = None    # best-detect-num-v2.pt (YOLO digit 0-9 detector)
+        self._ocr         = None    # PaddleOCR (kept; currently inactive — see _run_ocr)
         self._number_class_idx: Optional[int] = None   # None → use heuristic
 
         # Voting state: track_id → deque of int candidates
@@ -316,6 +319,30 @@ class JerseyOCR:
                 "paddleocr required. pip install paddleocr paddlepaddle"
             ) from exc
 
+    def load_digit_model(self) -> None:
+        """Load best-detect-num-v2.pt — YOLO digit detector (classes 0-9)."""
+        path = Path(os.path.join(MODELS_DIR, DIGIT_MODEL_FILENAME))
+        if not path.exists():
+            logger.warning(
+                "Digit model not found: %s — YOLO digit OCR disabled.", path.resolve()
+            )
+            return
+        try:
+            import torch
+            from ultralytics import YOLO
+
+            target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+            self._digit_model = YOLO(str(path))
+            self._digit_model.to(target)
+            logger.info(
+                "best-detect-num-v2.pt loaded on %s (classes: %s)",
+                target,
+                list(self._digit_model.names.values()),
+            )
+        except Exception as exc:
+            logger.warning("Digit model load failed: %s — YOLO digit OCR disabled", exc)
+            self._digit_model = None
+
     def is_model_loaded(self) -> bool:
         return self.model is not None
 
@@ -345,21 +372,28 @@ class JerseyOCR:
         }
 
     def warmup(self, height: int = 720, width: int = 1280) -> None:
-        """One dummy inference on jersey_no.pt + PaddleOCR to trigger CUDA JIT before real frames."""
+        """One dummy inference on jersey_no.pt + digit model to trigger CUDA JIT before real frames."""
         dummy_frame = np.zeros((height, width, 3), dtype=np.uint8)
+        dummy_crop  = np.zeros((OCR_HEIGHT_PX, OCR_HEIGHT_PX, 3), dtype=np.uint8)
         if self.model is not None:
             try:
                 self._detect_numbers_fullframe(dummy_frame)
                 logger.info("jersey_no.pt warmup done (%dx%d dummy frame)", width, height)
             except Exception as e:
                 logger.debug("jersey_no.pt warmup error (non-fatal): %s", e)
-        if self._ocr is not None:
+        if self._digit_model is not None:
             try:
-                dummy_crop = np.zeros((OCR_HEIGHT_PX, OCR_HEIGHT_PX, 3), dtype=np.uint8)
-                self._ocr.predict(dummy_crop)
-                logger.info("PaddleOCR warmup done")
+                self._digit_model(dummy_crop, conf=DIGIT_CONF_THRESHOLD, verbose=False)
+                logger.info("best-detect-num-v2.pt warmup done")
             except Exception as e:
-                logger.debug("PaddleOCR warmup error (non-fatal): %s", e)
+                logger.debug("digit model warmup error (non-fatal): %s", e)
+        # PaddleOCR warmup (inactive — re-enable if switching back to PaddleOCR)
+        # if self._ocr is not None:
+        #     try:
+        #         self._ocr.predict(dummy_crop)
+        #         logger.info("PaddleOCR warmup done")
+        #     except Exception as e:
+        #         logger.debug("PaddleOCR warmup error (non-fatal): %s", e)
 
     # ------------------------------------------------------------------
     # Core pipeline
@@ -516,12 +550,12 @@ class JerseyOCR:
                 })
                 continue
 
-            # Layer 2 — OCR (dual-strip strategy)
-            # Primary: chest crop from _back_crop_heuristic (15%-55%, tighter SNR).
-            # Fallback: wider torso (10%-75%) if chest yields nothing — covers cases
-            # where jersey number sits lower (tall/close players, bending poses).
+            # Layer 2 — digit detection via best-detect-num-v2.pt (YOLO).
+            # Primary: jersey_no.pt-localised crop (tight, high SNR).
+            # Fallback: wider torso strip if tight crop yields nothing.
+            # (PaddleOCR pipeline preserved in _run_ocr() — commented out)
             self._last_ocr_frame[track_id] = self._frame_counter
-            candidate = self._run_ocr(number_crop)
+            candidate = self._run_yolo_digit_ocr(number_crop)
 
             if candidate is None:
                 ph_full, pw_full = player_crop.shape[:2]
@@ -530,7 +564,7 @@ class JerseyOCR:
                     int(pw_full * 0.05):int(pw_full * 0.95),
                 ]
                 if fallback_crop.size > 0:
-                    candidate = self._run_ocr(fallback_crop)
+                    candidate = self._run_yolo_digit_ocr(fallback_crop)
                     if candidate is not None:
                         logger.debug("track %d: digit from fallback wide crop", track_id)
 
@@ -623,74 +657,117 @@ class JerseyOCR:
         return _back_crop_heuristic(h, w)
 
     # ------------------------------------------------------------------
-    # Layer 2 — OCR
+    # Layer 2 — digit detection
     # ------------------------------------------------------------------
+
+    def _run_yolo_digit_ocr(self, number_crop: np.ndarray) -> Optional[int]:
+        """
+        Run best-detect-num-v2.pt on the jersey number crop.
+
+        Detects individual digits 0-9 as YOLO object classes, sorts detected
+        boxes left-to-right by x-coordinate, concatenates their labels into a
+        jersey number string (e.g. digit "1" at x=10, digit "9" at x=30 → "19" → 19).
+
+        Returns None when the digit model is not loaded or no digits are detected.
+        """
+        if self._digit_model is None or number_crop is None or number_crop.size == 0:
+            return None
+
+        h, w = number_crop.shape[:2]
+        if h < 8 or w < 4:
+            return None
+
+        # Upscale small crops so fine digit strokes are visible to the model
+        if h < OCR_HEIGHT_PX:
+            scale = OCR_HEIGHT_PX / h
+            number_crop = cv2.resize(
+                number_crop,
+                (max(16, int(w * scale)), OCR_HEIGHT_PX),
+                interpolation=cv2.INTER_CUBIC,
+            )
+
+        try:
+            det = self._digit_model(number_crop, conf=DIGIT_CONF_THRESHOLD, verbose=False)
+        except Exception as exc:
+            logger.debug("YOLO digit model inference error: %s", exc)
+            return None
+
+        digit_boxes: list[tuple[float, str]] = []  # (x1, digit_char)
+        for r in det:
+            for box in r.boxes:
+                cls = int(box.cls[0])
+                # Prefer model class name when it is a bare digit char; fallback to index
+                raw_name   = self._digit_model.names.get(cls, str(cls))
+                digit_char = raw_name if (len(raw_name) == 1 and raw_name.isdigit()) else str(cls)
+                x1   = float(box.xyxy[0][0])
+                conf = float(box.conf[0])
+                digit_boxes.append((x1, digit_char))
+                logger.debug("digit: '%s' x1=%.0f conf=%.2f", digit_char, x1, conf)
+
+        if not digit_boxes:
+            return None
+
+        # Sort left-to-right; basketball numbers are 0-99 → max 2 digits
+        digit_boxes.sort(key=lambda b: b[0])
+        number_str = "".join(b[1] for b in digit_boxes[:2])
+
+        try:
+            number = int(number_str)
+            if 0 <= number <= 99:
+                logger.debug("YOLO digit OCR → jersey %d", number)
+                return number
+        except ValueError:
+            pass
+
+        return None
 
     def _run_ocr(self, number_crop: np.ndarray) -> Optional[int]:
         """
-        Preprocess crop → PaddleOCR → parse first numeric result in [0-99].
-        Tries normal and inverted image (light number on dark jersey and vice versa).
-        Returns None if no valid number found or confidence below OCR_MIN_SCORE.
+        PaddleOCR pipeline — currently inactive; YOLO digit model is used instead.
+        To re-enable: change _run_yolo_digit_ocr() calls in process() back to _run_ocr()
+        and restore load_ocr() + warmup() calls in create_jersey_ocr().
         """
-        if self._ocr is None:
-            return None
-        if number_crop.size == 0:
-            return None
-
-        processed = _preprocess_for_ocr(number_crop)
-        otsu      = _otsu_variant(number_crop)
-        adaptive  = _adaptive_variant(number_crop)
-
-        # Four variants: CLAHE, inverted CLAHE, Otsu binary, adaptive binary.
-        # Adaptive handles light jerseys (dark numbers on white) without needing
-        # a separate bright-crop branch — THRESH_BINARY_INV normalises both cases.
-        # Early exit: once any variant produces a high-confidence result
-        # (≥ HIGH_CONF_EARLY_EXIT) there is no benefit in trying the remaining ones.
-        candidates: list[tuple[int, float]] = []
-        for img in [processed, cv2.bitwise_not(processed), otsu, adaptive]:
-            try:
-                results = self._ocr.predict(img)
-            except Exception as exc:
-                logger.debug("PaddleOCR predict error: %s", exc)
-                continue
-
-            if not results:
-                continue
-
-            # PaddleOCR 3.5.0: predict() returns list[OCRResult]
-            # Each OCRResult is dict-like: res['rec_texts'], res['rec_scores']
-            for res in results:
-                try:
-                    texts  = res["rec_texts"]
-                    scores = res["rec_scores"]
-                except (TypeError, KeyError):
-                    continue
-
-                for text, score in zip(texts or [], scores or []):
-                    if score < OCR_MIN_SCORE:
-                        logger.debug(
-                            "OCR: '%s' rejected (score=%.2f < %.2f)",
-                            text, score, OCR_MIN_SCORE,
-                        )
-                        continue
-                    number = self._parse_jersey_number(text)
-                    if number is not None:
-                        candidates.append((number, score))
-                        logger.debug(
-                            "OCR: '%s' (score=%.2f) → jersey %d", text, score, number
-                        )
-
-            # High-confidence early exit — skip remaining variants.
-            if candidates and max(c[1] for c in candidates) >= HIGH_CONF_EARLY_EXIT:
-                break
-
-        if not candidates:
-            return None
-
-        # Return highest-confidence candidate
-        best_number, best_score = max(candidates, key=lambda x: x[1])
-        logger.debug("OCR best: jersey %d (score=%.2f)", best_number, best_score)
-        return best_number
+        # if self._ocr is None:
+        #     return None
+        # if number_crop.size == 0:
+        #     return None
+        #
+        # processed = _preprocess_for_ocr(number_crop)
+        # otsu      = _otsu_variant(number_crop)
+        # adaptive  = _adaptive_variant(number_crop)
+        #
+        # # Four variants: CLAHE, inverted CLAHE, Otsu binary, adaptive binary.
+        # candidates: list[tuple[int, float]] = []
+        # for img in [processed, cv2.bitwise_not(processed), otsu, adaptive]:
+        #     try:
+        #         results = self._ocr.predict(img)
+        #     except Exception as exc:
+        #         logger.debug("PaddleOCR predict error: %s", exc)
+        #         continue
+        #     if not results:
+        #         continue
+        #     for res in results:
+        #         try:
+        #             texts  = res["rec_texts"]
+        #             scores = res["rec_scores"]
+        #         except (TypeError, KeyError):
+        #             continue
+        #         for text, score in zip(texts or [], scores or []):
+        #             if score < OCR_MIN_SCORE:
+        #                 continue
+        #             number = self._parse_jersey_number(text)
+        #             if number is not None:
+        #                 candidates.append((number, score))
+        #                 logger.debug("OCR: '%s' (score=%.2f) → jersey %d", text, score, number)
+        #     if candidates and max(c[1] for c in candidates) >= HIGH_CONF_EARLY_EXIT:
+        #         break
+        #
+        # if not candidates:
+        #     return None
+        # best_number, best_score = max(candidates, key=lambda x: x[1])
+        # logger.debug("OCR best: jersey %d (score=%.2f)", best_number, best_score)
+        # return best_number
+        return None  # inactive — use _run_yolo_digit_ocr()
 
     # Common OCR character confusions for jersey number context.
     # Applied before digit extraction so "O3" → "03", "S7" → "57", etc.
@@ -976,11 +1053,12 @@ def create_jersey_ocr(
     models_path: Optional[str] = None,
     device: Optional[str] = None,
 ) -> "JerseyOCR":
-    """Create, load model, and load OCR in one call."""
+    """Create and load models in one call. Uses YOLO digit detector as primary OCR."""
     model_file = os.path.join(models_path or MODELS_DIR, MODEL_FILENAME)
     ocr = JerseyOCR(model_path=model_file, device=device)
     ocr.load_model()
-    ocr.load_ocr()
+    ocr.load_digit_model()
+    # ocr.load_ocr()   # PaddleOCR — inactive; uncomment to switch back
     return ocr
 
 

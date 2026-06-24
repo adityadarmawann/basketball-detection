@@ -74,6 +74,22 @@ class BasketballDetector:
                 self.model.half()   # FP16 weights → Tensor Core acceleration
             self._use_half = target_device.startswith("cuda")
 
+            # torch.compile: fuses CUDA ops at runtime, ~15-25% faster inference.
+            # Mathematically identical output — no weight change, no quantization.
+            # First call compiles (~15s one-time); all subsequent calls use the
+            # compiled graph. fullgraph=False lets YOLO's custom ops fall back
+            # to eager mode safely if they can't be traced.
+            if target_device.startswith("cuda") and hasattr(torch, "compile"):
+                try:
+                    self.model.model = torch.compile(
+                        self.model.model,
+                        mode="reduce-overhead",
+                        fullgraph=False,
+                    )
+                    logger.info("torch.compile applied to detector model")
+                except Exception as _tc:
+                    logger.debug("torch.compile skipped for detector: %s", _tc)
+
             # Sync class name list from model metadata when available
             if hasattr(self.model, "names") and self.model.names:
                 # model.names is a dict {int: str} in ultralytics

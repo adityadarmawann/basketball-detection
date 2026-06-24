@@ -16,7 +16,8 @@ const CATEGORIES: { key: SponsorCategory; label: string; desc: string; Icon: Rea
 interface LibraryEntry {
   id:          string
   companyName: string
-  logoUrl:     string | null
+  logoUrl:     string | null   // full URL for display (with host prefix)
+  logoPath:    string | null   // path-only for API calls e.g. /api/media/logos/xxx.png
 }
 
 interface AddForm {
@@ -53,6 +54,7 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
         id:          e.id,
         companyName: e.company_name,
         logoUrl:     e.logo_url ? `${API}${e.logo_url}` : null,
+        logoPath:    e.logo_url ?? null,   // raw path — sent to backend as existing_logo_url
       }))))
       .catch(() => {})
   }, [])
@@ -91,8 +93,8 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
       ...f,
       companyName:     entry.companyName,
       logoFile:        null,
-      logoPreview:     entry.logoUrl,
-      logoExistingUrl: entry.logoUrl,
+      logoPreview:     entry.logoUrl,          // full URL for preview display
+      logoExistingUrl: entry.logoPath,         // path-only sent to backend (avoids doubled host prefix)
       saveToLib:       false,
     }))
     setShowLib(false)

@@ -30,15 +30,18 @@ logger = logging.getLogger(__name__)
 MODELS_DIR            = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME         = "jersey_no.pt"
 DIGIT_MODEL_FILENAME   = "best-detect-num-v2.pt"
-DIGIT_CONF_THRESHOLD   = 0.30   # minimum per-digit detection confidence
+DIGIT_CONF_THRESHOLD   = 0.15   # minimum per-digit detection confidence
+                                 # voting + roster whitelist handle noise; low threshold
+                                 # catches distant/angled digits that would otherwise be missed
 
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
-MAX_VOTE_HISTORY      = 20   # rolling window — 20 × OCR_SAMPLE_EVERY=4 = 80 frames (~3s)
+MAX_VOTE_HISTORY      = 20   # rolling window — 20 reads per player (OCR_SAMPLE_EVERY=1)
                              # smaller window lets wrong reads be forgotten faster
 TRANSFER_MIN_LONG_VOTES = 2  # 2-digit candidate needs this many reads before 1-digit votes
                              # are reinterpreted as partial reads; 2 is enough to resist
                              # a single stray misread while correcting "72→7" faster
-OCR_SAMPLE_EVERY      = 4    # run OCR once every N frames per player
+OCR_SAMPLE_EVERY      = 1    # run OCR on every process() call per player
+                             # roster whitelist removes false positives; voting absorbs noise
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 CONF_THRESHOLD    = 0.40  # jersey_no.pt detection confidence
 OCR_HEIGHT_PX     = 160   # larger resize → OCR reads small/distant jersey numbers better
@@ -497,7 +500,7 @@ class JerseyOCR:
                             best_ratio = ratio
                             best_match = (nx1f, ny1f, nx2f, ny2f)
 
-                if best_match and best_ratio >= 0.50:
+                if best_match and best_ratio >= 0.35:
                     nx1f, ny1f, nx2f, ny2f = best_match
                     pad = 10
                     nc  = frame[
@@ -700,7 +703,7 @@ class JerseyOCR:
             logger.debug("YOLO digit model inference error: %s", exc)
             return None
 
-        digit_boxes: list[tuple[float, str]] = []  # (x1, digit_char)
+        digit_boxes: list[tuple[float, str, float]] = []  # (x1, digit_char, conf)
         for r in det:
             for box in r.boxes:
                 cls = int(box.cls[0])
@@ -709,15 +712,19 @@ class JerseyOCR:
                 digit_char = raw_name if (len(raw_name) == 1 and raw_name.isdigit()) else str(cls)
                 x1   = float(box.xyxy[0][0])
                 conf = float(box.conf[0])
-                digit_boxes.append((x1, digit_char))
+                digit_boxes.append((x1, digit_char, conf))
                 logger.debug("digit: '%s' x1=%.0f conf=%.2f", digit_char, x1, conf)
 
         if not digit_boxes:
             return None
 
-        # Sort left-to-right; basketball numbers are 0-99 → max 2 digits
+        # When >2 digits detected (background artifacts), keep the 2 most confident
+        # before sorting left-to-right — avoids wrongly taking low-conf edge detections.
+        if len(digit_boxes) > 2:
+            digit_boxes.sort(key=lambda b: -b[2])
+            digit_boxes = digit_boxes[:2]
         digit_boxes.sort(key=lambda b: b[0])
-        number_str = "".join(b[1] for b in digit_boxes[:2])
+        number_str = "".join(b[1] for b in digit_boxes)
 
         try:
             number = int(number_str)

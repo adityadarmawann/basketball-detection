@@ -26,8 +26,22 @@ _CLS_PLAYER  = 0
 _CLS_REFEREE = 2
 
 
+_LOST_TRACK_MAX_AGE = 60  # processed frames to keep lost-track jersey cache
+
+
 def _center(x1: float, y1: float, x2: float, y2: float) -> list[float]:
     return [(x1 + x2) / 2.0, (y1 + y2) / 2.0]
+
+
+def _box_iou(a: list, b: list) -> float:
+    """Axis-aligned IoU of two [x1,y1,x2,y2] boxes."""
+    ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
 
 
 class PlayerTracker:
@@ -80,6 +94,12 @@ class PlayerTracker:
 
         # Populated by update_jersey() after jersey_ocr.py resolves numbers.
         self.track_jersey_map: dict[int, int] = {}
+
+        # Jersey inheritance: when ByteTrack drops a track and re-assigns a new
+        # track_id to the same physical player, the new ID inherits the jersey from
+        # the old one without waiting for another OCR confirmation.
+        self._player_last_seen: dict[int, list] = {}    # track_id → bbox (last frame)
+        self._lost_jersey_cache: dict[int, tuple] = {}  # track_id → (bbox, jersey, age)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -140,6 +160,8 @@ class PlayerTracker:
         if self._frame_shape:
             self.initialize(self._frame_shape)
         self.track_jersey_map.clear()
+        self._player_last_seen.clear()
+        self._lost_jersey_cache.clear()
         logger.info("PlayerTracker reset (quarter boundary or new clip)")
 
     # ------------------------------------------------------------------
@@ -194,6 +216,50 @@ class PlayerTracker:
         tracked_players = self._run_tracker(
             self._player_tracker, player_arr, frame, "player"
         )
+
+        # ── Jersey inheritance: recover jersey when ByteTrack re-assigns track_id ──
+        # ByteTrack drops a track after track_buffer frames of absence and creates
+        # a new track_id when the player reappears. We use the last known bbox of
+        # lost tracks to spatially match new IDs and transfer the confirmed jersey
+        # immediately — without waiting for another OCR confirmation cycle.
+        current_player_ids = {p["track_id"] for p in tracked_players}
+
+        # Age existing lost-track cache and prune stale entries
+        self._lost_jersey_cache = {
+            tid: (bbox, jersey, age + 1)
+            for tid, (bbox, jersey, age) in self._lost_jersey_cache.items()
+            if age < _LOST_TRACK_MAX_AGE
+        }
+
+        # Register newly disappeared player tracks that had a confirmed jersey
+        for tid, prev_bbox in self._player_last_seen.items():
+            if tid not in current_player_ids and tid in self.track_jersey_map:
+                self._lost_jersey_cache.setdefault(
+                    tid, (prev_bbox, self.track_jersey_map[tid], 0)
+                )
+
+        # Inherit jersey for brand-new track IDs via spatial proximity (IoU ≥ 0.25)
+        new_track_ids = current_player_ids - set(self._player_last_seen.keys())
+        if new_track_ids and self._lost_jersey_cache:
+            for player in tracked_players:
+                tid = player["track_id"]
+                if tid not in new_track_ids or tid in self.track_jersey_map:
+                    continue
+                best_iou, best_jersey = 0.0, None
+                for _ltid, (lost_bbox, lost_jersey, _age) in self._lost_jersey_cache.items():
+                    iou = _box_iou(player["bbox"], lost_bbox)
+                    if iou > best_iou:
+                        best_iou, best_jersey = iou, lost_jersey
+                if best_iou >= 0.25 and best_jersey is not None:
+                    self.track_jersey_map[tid] = best_jersey
+                    player["jersey_number"] = best_jersey
+                    logger.info(
+                        "Jersey inherited: new tid=%d ← #%d (IoU=%.2f)",
+                        tid, best_jersey, best_iou,
+                    )
+
+        # Update last-seen positions for next frame's inheritance check
+        self._player_last_seen = {p["track_id"]: p["bbox"] for p in tracked_players}
 
         # Referees
         ref_arr = self._detections_to_array(

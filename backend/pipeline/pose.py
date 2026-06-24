@@ -111,20 +111,6 @@ class PoseEstimator:
             if target.startswith("cuda"):
                 self.model.half()   # FP16 weights → Tensor Core acceleration
             self._use_half = target.startswith("cuda")
-
-            # torch.compile: fuses CUDA ops at runtime, ~15-25% faster inference.
-            # Mathematically identical — no weight change, no quantization.
-            if target.startswith("cuda") and hasattr(torch, "compile"):
-                try:
-                    self.model.model = torch.compile(
-                        self.model.model,
-                        mode="reduce-overhead",
-                        fullgraph=False,
-                    )
-                    logger.info("torch.compile applied to pose model")
-                except Exception as _tc:
-                    logger.debug("torch.compile skipped for pose: %s", _tc)
-
             logger.info("PoseEstimator loaded: %s (device=%s, fp16=%s)",
                         path.name, target, self._use_half)
 

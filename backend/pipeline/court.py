@@ -338,7 +338,7 @@ class CourtMapper:
             if is_inlier:
                 inlier_kps.append(kp)
             else:
-                logger.warning(
+                logger.debug(
                     "RANSAC outlier: label=%d %s pixel=%s court=%s",
                     kp["point_id"], kp["name"],
                     kp["pixel_pos"], kp["court_pos"],

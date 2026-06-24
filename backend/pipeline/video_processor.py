@@ -685,6 +685,8 @@ class VideoProcessor:
         tracked_players = []
         ball_info       = None
 
+        _t0 = time.perf_counter()
+
         # ── 1. Detection ──────────────────────────────────────────────────
         if self._detector:
             try:
@@ -692,6 +694,7 @@ class VideoProcessor:
                 frame_data["detections"] = detections
             except Exception as e:
                 logger.debug("Detector frame %d: %s", frame_id, e)
+        _t1 = time.perf_counter()
 
         # ── 2. Tracking ───────────────────────────────────────────────────
         if self._tracker:
@@ -702,8 +705,10 @@ class VideoProcessor:
                 ball_info       = tracking.get("tracked_ball")
             except Exception as e:
                 logger.debug("Tracker frame %d: %s", frame_id, e)
+        _t2 = time.perf_counter()
 
         # ── 3. Court mapping ──────────────────────────────────────────────
+        # (keypoint-pose YOLO, every COURT_EVERY_N_FRAMES; cached H on skipped)
         # YOLOv8-pose keypoint inference runs only every COURT_EVERY_N_FRAMES;
         # pixel_to_court() uses the cached H matrix on skipped frames.
         if self._court:
@@ -731,6 +736,7 @@ class VideoProcessor:
                         self._last_court_pos.pop(player["track_id"], None)
             except Exception as e:
                 logger.warning("Court frame %d: %s", frame_id, e, exc_info=True)
+        _t3 = time.perf_counter()
 
         # ── 4. Pose estimation ────────────────────────────────────────────
         if self._pose and tracked_players:
@@ -761,6 +767,7 @@ class VideoProcessor:
                                     break
             except Exception as e:
                 logger.debug("Pose frame %d: %s", frame_id, e)
+        _t4 = time.perf_counter()
 
         # ── 5. Jersey OCR — run every self._ocr_interval (FPS-aware, stride-aligned) ──
         if self._jersey and tracked_players and frame_id % self._ocr_interval == 0:
@@ -772,6 +779,7 @@ class VideoProcessor:
                 frame_data["jersey"] = jersey
             except Exception as e:
                 logger.debug("Jersey OCR frame %d: %s", frame_id, e)
+        _t5 = time.perf_counter()
 
         # ── Annotate tracked_players with team ───────────────────────────────────
         # Priority: (1) roster lookup via confirmed jersey number, (2) last confirmed
@@ -852,6 +860,7 @@ class VideoProcessor:
                 frame_data["actions"] = actions
             except Exception as e:
                 logger.debug("Action frame %d: %s", frame_id, e)
+        _t6 = time.perf_counter()
 
         # ── 7. Event engine ───────────────────────────────────────────────
         # Ensure event engine always has hoop pixel references for scoring.
@@ -882,6 +891,7 @@ class VideoProcessor:
                 frame_data["events"] = events or []
             except Exception as e:
                 logger.warning("EventEngine frame %d: %s", frame_id, e, exc_info=True)
+        _t7 = time.perf_counter()
 
         # ── 8. Stats update ───────────────────────────────────────────────
         if self._stats:
@@ -925,6 +935,22 @@ class VideoProcessor:
                 logger.warning("Stats update frame %d: %s", frame_id, e, exc_info=True)
 
         self._frame_buffer.append(frame)
+
+        # ── Per-step timing log (every 25 analyzed frames) ────────────────
+        # Logs: det=detect trk=track court=court pose=pose
+        #       ocr=jersey_ocr act=action evt=events sts=stats TOTAL ms
+        _t8 = time.perf_counter()
+        if frame_id % 25 == 0:
+            ms = lambda a, b: round((b - a) * 1000)
+            logger.info(
+                "TIMING f%-4d  det=%3d  trk=%3d  court=%3d  pose=%3d  "
+                "ocr=%3d  act=%3d  evt=%3d  sts=%3d  TOTAL=%3d ms  players=%d",
+                frame_id,
+                ms(_t0, _t1), ms(_t1, _t2), ms(_t2, _t3), ms(_t3, _t4),
+                ms(_t4, _t5), ms(_t5, _t6), ms(_t6, _t7), ms(_t7, _t8),
+                ms(_t0, _t8), len(tracked_players),
+            )
+
         return frame_data
 
     # ── Per-frame bbox snapshot (for frontend time-based lookup) ─────────────

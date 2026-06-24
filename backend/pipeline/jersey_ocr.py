@@ -437,11 +437,11 @@ class JerseyOCR:
         results: list[dict] = []
 
         # ── jersey_no.pt: one full-frame inference shared by all players ─────
-        # Runs on the complete frame (trained context) — gives 0.4-0.9 conf vs
-        # near-zero when the same model is fed a small 60-160px player crop.
-        # Each player loop then finds which detected number bbox (if any) falls
-        # inside that player's bbox and uses it as the primary OCR crop.
         _frame_num_boxes = self._detect_numbers_fullframe(frame)
+        logger.info(
+            "JerseyOCR call #%d: %d players  jersey_no.pt=%d boxes",
+            self._frame_counter, len(tracked_players), len(_frame_num_boxes),
+        )
 
         for player in tracked_players:
             track_id = player["track_id"]
@@ -592,6 +592,13 @@ class JerseyOCR:
             self._vote_number(track_id, candidate)
             confirmed, conf = self._vote_status(track_id)
 
+            logger.info(
+                "track %d: candidate=%s  votes=%s  confirmed=%s",
+                track_id, candidate,
+                dict(Counter(self._votes.get(track_id, []))),
+                confirmed,
+            )
+
             if confirmed is not None and tracker is not None:
                 tracker.update_jersey(track_id, confirmed)
 
@@ -630,7 +637,7 @@ class JerseyOCR:
         if self.model is None or frame is None or frame.size == 0:
             return []
         try:
-            det = self.model(frame, conf=0.20, verbose=False,
+            det = self.model(frame, conf=0.10, verbose=False,
                              half=getattr(self, "_use_half", False))
             boxes = []
             for r in det:
@@ -644,11 +651,11 @@ class JerseyOCR:
                     x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                     conf = float(box.conf[0])
                     boxes.append((x1, y1, x2, y2, conf))
-            if boxes:
-                logger.debug("jersey_no.pt full-frame: %d number boxes", len(boxes))
+            # INFO level so we can see in logs whether the localiser fires at all
+            logger.info("jersey_no.pt full-frame: %d number boxes found", len(boxes))
             return boxes
         except Exception as exc:
-            logger.debug("jersey_no.pt full-frame inference error: %s", exc)
+            logger.warning("jersey_no.pt full-frame inference error: %s", exc)
             return []
 
     def _detect_number_bbox(
@@ -716,6 +723,7 @@ class JerseyOCR:
                 logger.debug("digit: '%s' x1=%.0f conf=%.2f", digit_char, x1, conf)
 
         if not digit_boxes:
+            logger.debug("digit model: no digits found in crop h=%d w=%d", *number_crop.shape[:2])
             return None
 
         # When >2 digits detected (background artifacts), keep the 2 most confident

@@ -582,12 +582,18 @@ class JerseyOCR:
             # Roster whitelist: discard any candidate not in the roster so it
             # never pollutes the vote deque.  Numbers like "0" or "99" that
             # no player wears are dropped here before any vote is cast.
-            if candidate is not None and roster and str(candidate) not in roster:
-                logger.debug(
-                    "track %d: OCR candidate %d rejected — not in roster",
-                    track_id, candidate,
-                )
-                candidate = None
+            # Roster keys may be plain "11" (legacy) or team-qualified "11_A"/"11_B".
+            if candidate is not None and roster:
+                js = str(candidate)
+                in_roster = (js in roster or
+                             f"{js}_A" in roster or
+                             f"{js}_B" in roster)
+                if not in_roster:
+                    logger.debug(
+                        "track %d: OCR candidate %d rejected — not in roster",
+                        track_id, candidate,
+                    )
+                    candidate = None
 
             # _vote_number appends candidate; _vote_status reads confirmed+confidence
             # in a single Counter pass (avoids the duplicate Counter in _vote_confidence).

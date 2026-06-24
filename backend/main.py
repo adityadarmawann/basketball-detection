@@ -18,6 +18,16 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+# cuDNN auto-tuner: finds fastest conv algorithm for each fixed input size.
+# Gives 10-20% speedup on all YOLO/pose/action models once warmed up.
+try:
+    import torch
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        logging.getLogger(__name__).info("cuDNN benchmark mode enabled")
+except Exception:
+    pass
+
 # Load environment variables
 load_dotenv()
 

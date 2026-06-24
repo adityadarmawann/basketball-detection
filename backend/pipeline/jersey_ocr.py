@@ -34,12 +34,14 @@ DIGIT_CONF_THRESHOLD   = 0.15   # minimum per-digit detection confidence
                                  # voting + roster whitelist handle noise; low threshold
                                  # catches distant/angled digits that would otherwise be missed
 
-VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
+VOTE_THRESHOLD        = 4    # OCR reads required to confirm a jersey number
+                             # at 13fps OCR_SAMPLE_EVERY=1, 4 votes ≈ 0.3s — fast but resistant
+                             # to 1-2 stray misreads from fast player movement
 MAX_VOTE_HISTORY      = 20   # rolling window — 20 reads per player (OCR_SAMPLE_EVERY=1)
                              # smaller window lets wrong reads be forgotten faster
-TRANSFER_MIN_LONG_VOTES = 2  # 2-digit candidate needs this many reads before 1-digit votes
-                             # are reinterpreted as partial reads; 2 is enough to resist
-                             # a single stray misread while correcting "72→7" faster
+TRANSFER_MIN_LONG_VOTES = 3  # 2-digit candidate needs this many reads before 1-digit votes
+                             # are reinterpreted as partial reads; raised to 3 so "10→1"
+                             # partial reads accumulate enough evidence before reassigning
 OCR_SAMPLE_EVERY      = 1    # run OCR on every process() call per player
                              # roster whitelist removes false positives; voting absorbs noise
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score

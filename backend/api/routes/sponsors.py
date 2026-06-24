@@ -116,6 +116,7 @@ async def add_sponsor(
     category: str     = Form(...),
     company_name: str = Form(...),
     logo: Optional[UploadFile] = File(None),
+    existing_logo_url: Optional[str] = Form(None),
 ):
     if category not in VALID_CATEGORIES:
         raise HTTPException(status_code=400, detail=f"category must be one of {VALID_CATEGORIES}")
@@ -131,6 +132,8 @@ async def add_sponsor(
         dest     = LOGOS_DIR / filename
         dest.write_bytes(await logo.read())
         logo_url = f"/api/media/logos/{filename}"
+    elif existing_logo_url:
+        logo_url = existing_logo_url
 
     doc = {
         "match_id":     match_id,

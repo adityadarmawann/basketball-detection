@@ -20,16 +20,17 @@ interface LibraryEntry {
 }
 
 interface AddForm {
-  companyName:  string
-  logoFile:     File | null
-  logoPreview:  string | null
-  saving:       boolean
-  error:        string
-  saveToLib:    boolean
+  companyName:      string
+  logoFile:         File | null
+  logoPreview:      string | null
+  logoExistingUrl:  string | null  // URL logo dari library — skip re-upload
+  saving:           boolean
+  error:            string
+  saveToLib:        boolean
 }
 
 const emptyForm = (): AddForm => ({
-  companyName: '', logoFile: null, logoPreview: null, saving: false, error: '', saveToLib: false,
+  companyName: '', logoFile: null, logoPreview: null, logoExistingUrl: null, saving: false, error: '', saveToLib: false,
 })
 
 export default function SponsorSetup({ onComplete }: { onComplete: () => void }) {
@@ -80,29 +81,19 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
   const handleLogoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-    setForm((f) => ({ ...f, logoFile: file, logoPreview: URL.createObjectURL(file) }))
+    setForm((f) => ({ ...f, logoFile: file, logoPreview: URL.createObjectURL(file), logoExistingUrl: null }))
     e.target.value = ''
   }
 
-  // Pick from library — pre-fills form (logo fetched as blob for upload)
-  const handlePickLibrary = async (entry: LibraryEntry) => {
-    let file: File | null = null
-    let preview: string | null = null
-    if (entry.logoUrl) {
-      try {
-        const res  = await fetch(entry.logoUrl)
-        const blob = await res.blob()
-        const ext  = entry.logoUrl.split('.').pop() ?? 'png'
-        file       = new File([blob], `logo.${ext}`, { type: blob.type })
-        preview    = URL.createObjectURL(blob)
-      } catch { /* logo stays null */ }
-    }
+  // Pick from library — pre-fills form using existing server URL (no re-download needed)
+  const handlePickLibrary = (entry: LibraryEntry) => {
     setForm((f) => ({
       ...f,
-      companyName: entry.companyName,
-      logoFile:    file,
-      logoPreview: preview,
-      saveToLib:   false,
+      companyName:     entry.companyName,
+      logoFile:        null,
+      logoPreview:     entry.logoUrl,
+      logoExistingUrl: entry.logoUrl,
+      saveToLib:       false,
     }))
     setShowLib(false)
   }
@@ -115,6 +106,7 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
       fd.append('category',     addingFor)
       fd.append('company_name', form.companyName.trim())
       if (form.logoFile) fd.append('logo', form.logoFile)
+      else if (form.logoExistingUrl) fd.append('existing_logo_url', form.logoExistingUrl)
 
       const res = await axios.post(`${API}/api/sponsors/${matchId}`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },

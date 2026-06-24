@@ -826,37 +826,45 @@ class VideoProcessor:
                         player["team"] = confirmed_team
                         self._last_known_team[tid] = confirmed_team
 
-                        # Disambiguate K-Means clusters using first confirmed jersey.
-                        # Roster tells us confirmed_team; K-Means may have it swapped.
+                        # Disambiguate K-Means clusters using first UNIQUE-team jersey.
+                        # Only use jersey numbers worn by exactly ONE team — shared
+                        # numbers (e.g. #11 in both rosters) give ambiguous signal.
                         if (self._jersey and self._kmeans_calibrated
                                 and not self._kmeans_disambiguated):
-                            try:
-                                x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
-                                crop = frame[max(0, y1):min(frame.shape[0], y2),
-                                             max(0, x1):min(frame.shape[1], x2)]
-                                if crop.size > 0:
-                                    # Remove cached assignment so _classify_team recomputes
-                                    self._jersey._track_team.pop(tid, None)
-                                    kmeans_team = self._jersey._classify_team(crop, tid)
-                                    if kmeans_team and kmeans_team != confirmed_team:
-                                        # Clusters are swapped — swap A↔B references
-                                        colors = self._jersey._team_colors
-                                        colors["A"], colors["B"] = colors["B"], colors["A"]
-                                        self._jersey._track_team.clear()
-                                        logger.info(
-                                            "K-Means clusters swapped: jersey #%s is team %s "
-                                            "but K-Means said %s → swapped A↔B",
-                                            jersey_num, confirmed_team, kmeans_team,
-                                        )
-                                    else:
-                                        logger.info(
-                                            "K-Means verified: jersey #%s → team %s ✓",
-                                            jersey_num, confirmed_team,
-                                        )
-                                    self._kmeans_disambiguated = True
-                                    self._team_color_ready.update(("A", "B"))
-                            except Exception as e:
-                                logger.debug("K-Means disambiguation error: %s", e)
+                            other_team = "B" if confirmed_team == "A" else "A"
+                            other_key  = f"{jersey_num}_{other_team}"
+                            jersey_is_unique = other_key not in self._roster
+                            if not jersey_is_unique:
+                                logger.debug(
+                                    "K-Means disambiguation skipped: jersey #%d exists in "
+                                    "both teams — waiting for unique jersey", jersey_num,
+                                )
+                            else:
+                                try:
+                                    x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
+                                    crop = frame[max(0, y1):min(frame.shape[0], y2),
+                                                 max(0, x1):min(frame.shape[1], x2)]
+                                    if crop.size > 0:
+                                        self._jersey._track_team.pop(tid, None)
+                                        kmeans_team = self._jersey._classify_team(crop, tid)
+                                        if kmeans_team and kmeans_team != confirmed_team:
+                                            colors = self._jersey._team_colors
+                                            colors["A"], colors["B"] = colors["B"], colors["A"]
+                                            self._jersey._track_team.clear()
+                                            logger.info(
+                                                "K-Means clusters swapped: jersey #%d unique "
+                                                "to team %s but K-Means said %s → swapped A↔B",
+                                                jersey_num, confirmed_team, kmeans_team,
+                                            )
+                                        else:
+                                            logger.info(
+                                                "K-Means verified: jersey #%d unique to "
+                                                "team %s ✓", jersey_num, confirmed_team,
+                                            )
+                                        self._kmeans_disambiguated = True
+                                        self._team_color_ready.update(("A", "B"))
+                                except Exception as e:
+                                    logger.debug("K-Means disambiguation error: %s", e)
                         continue
                 if tid in self._last_known_team:
                     player["team"] = self._last_known_team[tid]

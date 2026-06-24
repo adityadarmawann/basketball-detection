@@ -154,6 +154,22 @@ def _fmt_wall_clock() -> str:
     return datetime.datetime.now().strftime("%H:%M:%S")
 
 
+def _roster_entry(roster: dict, jersey_num: int, team: str = "") -> dict:
+    """
+    Look up a player's roster entry by jersey number + team.
+
+    Tries "{jersey}_{team}" first (team-qualified, no collision when both teams
+    share the same number), then falls back to plain "{jersey}" for backward
+    compatibility with old roster format or numbers unique to one team.
+    """
+    if team:
+        entry = roster.get(f"{jersey_num}_{team}")
+        if isinstance(entry, dict):
+            return entry
+    entry = roster.get(str(jersey_num))
+    return entry if isinstance(entry, dict) else {}
+
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 MODELS_DIR           = os.getenv("MODELS_PATH",
@@ -558,11 +574,10 @@ class VideoProcessor:
                                 if _tid in self._confirmed_jersey_sent:
                                     continue
                                 self._confirmed_jersey_sent.add(_tid)
-                                _entry = self._roster.get(str(_jn), {})
-                                _name  = (_entry.get("name", f"#{_jn}")
-                                          if isinstance(_entry, dict) else f"#{_jn}")
-                                _team  = (_entry.get("team", "")
-                                          if isinstance(_entry, dict) else "")
+                                _known_team = self._last_known_team.get(_tid, "")
+                                _entry = _roster_entry(self._roster, _jn, _known_team)
+                                _name  = _entry.get("name", f"#{_jn}")
+                                _team  = _entry.get("team", _known_team)
                                 _conf_msg = {
                                     "type":        "jersey_confirmed",
                                     "trackId":     _tid,
@@ -804,8 +819,9 @@ class VideoProcessor:
                 tid = player["track_id"]
                 jersey_num = self._tracker.get_jersey_number(tid)
                 if jersey_num is not None and self._roster:
-                    entry = self._roster.get(str(jersey_num), {})
-                    if isinstance(entry, dict) and entry.get("team"):
+                    kmeans_team = player.get("team") or self._last_known_team.get(tid, "")
+                    entry = _roster_entry(self._roster, jersey_num, kmeans_team)
+                    if entry.get("team"):
                         confirmed_team = entry["team"]
                         player["team"] = confirmed_team
                         self._last_known_team[tid] = confirmed_team
@@ -911,13 +927,10 @@ class VideoProcessor:
             stats_roster: dict = {}
             if self._tracker and self._roster:
                 for tid, jersey in self._tracker.track_jersey_map.items():
-                    entry = self._roster.get(str(jersey), {})
-                    if isinstance(entry, dict):
-                        name = entry.get("name", f"#{jersey}")
-                        team = entry.get("team", "")
-                    else:
-                        name = str(entry) if entry else f"#{jersey}"
-                        team = ""
+                    known_team = self._last_known_team.get(tid, "")
+                    entry = _roster_entry(self._roster, jersey, known_team)
+                    name = entry.get("name", f"#{jersey}")
+                    team = entry.get("team", known_team)
                     stats_roster[tid] = {
                         "name":         name,
                         "jersey_number": jersey,

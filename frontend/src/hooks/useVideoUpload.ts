@@ -28,10 +28,13 @@ export const useVideoUpload = () => {
       formData.append('file', file)
       formData.append('match_id', matchId || `match-${Date.now()}`)
 
-      // Send roster as JSON: { jersey_number: { name, team } }
+      // Send roster as JSON keyed by "{jersey}_{team}" so shared jersey numbers
+      // across two teams don't overwrite each other (e.g. both teams having #11).
       if (roster.length > 0) {
         const rosterMap: Record<string, { name: string; team: string }> = {}
-        roster.forEach((p) => { rosterMap[String(p.jerseyNumber)] = { name: p.name, team: p.team } })
+        roster.forEach((p) => {
+          rosterMap[`${p.jerseyNumber}_${p.team}`] = { name: p.name, team: p.team }
+        })
         formData.append('roster', JSON.stringify(rosterMap))
       }
 

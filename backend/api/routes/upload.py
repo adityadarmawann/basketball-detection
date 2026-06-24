@@ -139,9 +139,11 @@ async def upload_video(
         )
 
     # ── Parse roster ───────────────────────────────────────────────────────
-    # Accepts two formats:
-    #   new: { "7": {"name": "Bima", "team": "A"}, ... }
-    #   old: { "7": "Bima", ... }  (legacy — team defaults to "")
+    # Accepts two key formats:
+    #   team-qualified (new): { "7_A": {"name": "Daffa", "team": "A"}, "7_B": {"name": "Johan", "team": "B"} }
+    #   plain (legacy):       { "7": {"name": "Bima", "team": "A"} }
+    # Plain keys are stored as-is for fallback; team-qualified keys avoid collision
+    # when two teams share the same jersey number.
     roster_data: dict = {}
     if roster:
         try:

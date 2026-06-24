@@ -972,52 +972,59 @@ class JerseyOCR:
         self, frame: np.ndarray, tracked_players: list[dict]
     ) -> dict[str, list[float]]:
         """
-        Collect torso pixel samples from all visible players, run K-Means (K=2),
-        and store the two cluster centers as team color references.
+        Cluster one representative HSV point per player (not raw pixels) so
+        jersey colors dominate over background, court, and skin noise.
 
-        Call once per game start (or after significant lighting change).
-        Returns {"A": [h,s,v], "B": [h,s,v]}.
+        Previous approach pooled all raw torso pixels → thousands of samples
+        where court / shorts / skin contaminated the cluster centers.
+
+        New approach:
+          1. Tight chest crop (20-50% height) per player — skips shoulders & shorts
+          2. Median HSV per player — robust to white numbers on coloured jerseys
+          3. K-Means on N per-player medians (N ≈ players on frame, ~5-10 points)
+          4. K-Means++ init + 20 restarts — stable on small datasets
         """
         if frame is None or not tracked_players:
             return self._team_colors
 
         h_frame, w_frame = frame.shape[:2]
-        all_hsv_samples: list[np.ndarray] = []
+        per_player: list[np.ndarray] = []   # one [H, S, V] median per player
 
         for player in tracked_players:
             x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
-            x1c = max(0, x1); y1c = max(0, y1)
-            x2c = min(w_frame, x2); y2c = min(h_frame, y2)
-            crop = frame[y1c:y2c, x1c:x2c]
+            crop = frame[max(0, y1):min(h_frame, y2),
+                         max(0, x1):min(w_frame, x2)]
             if crop.size == 0:
                 continue
-            # Sample torso region only
             th, tw = crop.shape[:2]
-            torso = crop[int(th * 0.15):int(th * 0.65), int(tw * 0.1):int(tw * 0.9)]
-            if torso.size == 0:
+            # Chest strip: 20%-50% height, 15%-85% width
+            # Avoids head, shoulders (skin), shorts (black), arms
+            chest = crop[int(th * 0.20):int(th * 0.50),
+                         int(tw * 0.15):int(tw * 0.85)]
+            if chest.size == 0:
                 continue
-            hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(np.float32)
-            # Sub-sample to limit compute
-            step = max(1, len(hsv) // 100)
-            all_hsv_samples.append(hsv[::step])
+            hsv = cv2.cvtColor(chest, cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(np.float32)
+            per_player.append(np.median(hsv, axis=0))  # median robust to number pixels
 
-        if len(all_hsv_samples) < 2:
-            logger.warning("calibrate_teams: need ≥ 2 players, got %d", len(all_hsv_samples))
+        if len(per_player) < 2:
+            logger.warning("calibrate_teams: need ≥ 2 players, got %d", len(per_player))
             return self._team_colors
 
-        samples = np.vstack(all_hsv_samples)
+        samples = np.array(per_player, dtype=np.float32)
 
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1.0)
+        # K-Means++ gives stable init on small N; 20 restarts + tighter eps
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.5)
         _, _, centers = cv2.kmeans(
-            samples, 2, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
+            samples, 2, None, criteria, 20, cv2.KMEANS_PP_CENTERS
         )
 
         self._team_colors["A"] = centers[0].tolist()
         self._team_colors["B"] = centers[1].tolist()
-        self._track_team.clear()   # re-classify all players
+        self._track_team.clear()
 
         logger.info(
-            "Team colors calibrated: A=%s  B=%s",
+            "Team colors calibrated (%d players): A=%s  B=%s",
+            len(per_player),
             [round(v, 1) for v in self._team_colors["A"]],
             [round(v, 1) for v in self._team_colors["B"]],
         )
@@ -1036,15 +1043,21 @@ class JerseyOCR:
 
     @staticmethod
     def _dominant_hsv(crop: np.ndarray) -> Optional[list[float]]:
-        """Return mean HSV of the torso region of a player crop."""
+        """
+        Median HSV of the jersey chest region.
+
+        Uses the same 20-50%/15-85% chest crop as calibrate_teams() so that
+        classify_team() compares apples-to-apples against the calibration centers.
+        Median is robust to white jersey numbers and dark shorts bleeding into crop.
+        """
         h, w = crop.shape[:2]
         if h < 4 or w < 4:
             return None
-        torso = crop[int(h * 0.15):int(h * 0.65), int(w * 0.1):int(w * 0.9)]
-        if torso.size == 0:
+        chest = crop[int(h * 0.20):int(h * 0.50), int(w * 0.15):int(w * 0.85)]
+        if chest.size == 0:
             return None
-        hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
-        return hsv.reshape(-1, 3).astype(np.float32).mean(axis=0).tolist()
+        hsv = cv2.cvtColor(chest, cv2.COLOR_BGR2HSV)
+        return np.median(hsv.reshape(-1, 3).astype(np.float32), axis=0).tolist()
 
     @staticmethod
     def _hsv_distance(a: list[float], b: list[float]) -> float:

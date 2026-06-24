@@ -1628,14 +1628,64 @@ class VideoProcessor:
             src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
             width   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()  # metadata only — frames will come from NVDEC pipe below
 
             out_path = os.path.join(out_dir, f"{match_id}_q{quarter}_analyzed.mp4")
-            fourcc   = cv2.VideoWriter_fourcc(*"mp4v")
-            writer   = cv2.VideoWriter(out_path, fourcc, src_fps, (width, height))
-            if not writer.isOpened():
-                cap.release()
-                logger.warning("_render_output_video: VideoWriter could not be opened")
-                return None
+
+            # Stream raw BGR frames directly into ffmpeg via stdin pipe.
+            # h264_nvenc (GPU hardware encoder) runs at ~300 fps 1080p — far
+            # faster than libx264 and needs no intermediate mp4v file.
+            # Fall back to libx264 ultrafast if NVENC is unavailable.
+            import subprocess as _sp
+
+            def _open_encoder(codec: str, extra_flags: list):
+                return _sp.Popen(
+                    ["ffmpeg", "-y",
+                     "-f", "rawvideo", "-vcodec", "rawvideo",
+                     "-pix_fmt", "bgr24",
+                     "-s", f"{width}x{height}",
+                     "-r", f"{src_fps:.4f}",
+                     "-i", "pipe:0",
+                     "-c:v", codec, *extra_flags,
+                     "-an", "-movflags", "+faststart",
+                     out_path],
+                    stdin=_sp.PIPE, stderr=_sp.PIPE,
+                )
+
+            _nvenc_ok = False
+            try:
+                enc_proc = _open_encoder("h264_nvenc", ["-preset", "p2", "-b:v", "5M"])
+                _nvenc_ok = True
+                logger.info(
+                    "Render encoder: h264_nvenc GPU  %dx%d @ %.1f fps",
+                    width, height, src_fps,
+                )
+            except Exception as _ne:
+                enc_proc = _open_encoder("libx264", ["-preset", "ultrafast", "-crf", "23"])
+                logger.info(
+                    "Render encoder: libx264 ultrafast (NVENC unavailable: %s)  %dx%d @ %.1f fps",
+                    _ne, width, height, src_fps,
+                )
+
+            # NVDEC: decode source video on GPU, stream raw BGR frames via pipe.
+            # -hwaccel cuda makes ffmpeg auto-select h264_cuvid / hevc_cuvid when
+            # available; if the GPU can't handle the codec it silently falls back
+            # to CPU decode — no extra code needed.
+            _frame_bytes = width * height * 3
+            dec_proc = _sp.Popen(
+                [
+                    "ffmpeg", "-loglevel", "error",
+                    "-hwaccel", "cuda",
+                    "-i", self._video_path,
+                    "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
+                ],
+                stdout=_sp.PIPE,
+                stderr=_sp.DEVNULL,
+            )
+            logger.info(
+                "Render decoder: ffmpeg -hwaccel cuda → bgr24 pipe  %dx%d",
+                width, height,
+            )
 
             # Pre-build sorted timestamp list for O(log n) binary search per frame
             ts_list = [e["ts"] for e in self._frame_store]
@@ -1708,9 +1758,10 @@ class VideoProcessor:
 
             frame_idx = 0
             while True:
-                ret, frame = cap.read()
-                if not ret:
+                raw = dec_proc.stdout.read(_frame_bytes)
+                if len(raw) < _frame_bytes:
                     break
+                frame = np.frombuffer(raw, np.uint8).reshape(height, width, 3).copy()
 
                 ts_ms = int(frame_idx / src_fps * 1000)
 
@@ -1780,36 +1831,43 @@ class VideoProcessor:
                     qtr  = snap.get("q", 1)
                     _score_banner(frame, sc[0], sc[1], qtr, width, height)
 
-                writer.write(frame)
+                try:
+                    enc_proc.stdin.write(frame.tobytes())
+                except BrokenPipeError:
+                    logger.warning(
+                        "_render_output_video: encoder pipe closed early at frame %d",
+                        frame_idx,
+                    )
+                    break
                 frame_idx += 1
 
-            cap.release()
-            writer.release()
-            logger.info("Output video (mp4v): %s  (frames=%d)", out_path, frame_idx)
-
-            # Re-encode to H.264 so browsers can play the output video.
-            # mp4v (MPEG-4 Part 2) is not supported by Chrome/Firefox/Safari.
-            h264_path = out_path + ".h264.mp4"
+            dec_proc.stdout.close()
             try:
-                import subprocess as _sp
-                result = _sp.run(
-                    ["ffmpeg", "-y", "-i", out_path,
-                     "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                     "-an", "-movflags", "+faststart",
-                     h264_path],
-                    capture_output=True, timeout=600,
+                dec_proc.wait(timeout=30)
+            except _sp.TimeoutExpired:
+                dec_proc.kill()
+            enc_proc.stdin.close()
+            try:
+                rc = enc_proc.wait(timeout=300)
+            except _sp.TimeoutExpired:
+                enc_proc.kill()
+                rc = -1
+                logger.warning("_render_output_video: encoder timed out — killed")
+
+            if rc != 0:
+                _err = (enc_proc.stderr.read() or b"")[-400:]
+                logger.warning(
+                    "Encoder exit %d%s — output may be incomplete.\n%s",
+                    rc,
+                    " (h264_nvenc)" if _nvenc_ok else " (libx264)",
+                    _err.decode(errors="replace"),
                 )
-                if result.returncode == 0 and os.path.getsize(h264_path) > 0:
-                    os.replace(h264_path, out_path)
-                    logger.info("Output video re-encoded to H.264: %s", out_path)
-                else:
-                    if os.path.exists(h264_path):
-                        os.remove(h264_path)
-                    logger.warning("ffmpeg H.264 re-encode failed (rc=%d) — keeping mp4v", result.returncode)
-            except Exception as fe:
-                if os.path.exists(h264_path):
-                    os.remove(h264_path)
-                logger.warning("ffmpeg re-encode error: %s — keeping mp4v", fe)
+            else:
+                logger.info(
+                    "Output video encoded (%s): %s  frames=%d",
+                    "h264_nvenc" if _nvenc_ok else "libx264",
+                    out_path, frame_idx,
+                )
 
             return out_path
 

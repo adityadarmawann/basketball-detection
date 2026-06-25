@@ -11,8 +11,10 @@ interface UploadProgress {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export const useVideoUpload = () => {
-  const matchId = useMatchStore((s) => s.matchId)
-  const roster  = useMatchStore((s) => s.roster)
+  const matchId       = useMatchStore((s) => s.matchId)
+  const roster        = useMatchStore((s) => s.roster)
+  const jerseyColorA  = useMatchStore((s) => s.jerseyColorA)
+  const jerseyColorB  = useMatchStore((s) => s.jerseyColorB)
 
   const [uploadProgress, setUploadProgress] = useState<UploadProgress>({
     progress: 0,
@@ -42,6 +44,10 @@ export const useVideoUpload = () => {
       if (quarter && quarter >= 1 && quarter <= 4) {
         formData.append('quarter', String(quarter))
       }
+
+      // Jersey colors preset from roster setup — bypass K-Means calibration
+      if (jerseyColorA) formData.append('jersey_color_a', jerseyColorA)
+      if (jerseyColorB) formData.append('jersey_color_b', jerseyColorB)
 
       const response = await axios.post(
         `${import.meta.env.VITE_API_URL}/api/upload-video`,

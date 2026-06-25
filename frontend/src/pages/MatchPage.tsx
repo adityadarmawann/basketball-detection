@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { ChevronLeft, LayoutDashboard } from 'lucide-react'
+import { ChevronLeft, LayoutDashboard, Download } from 'lucide-react'
 import axios from 'axios'
 import { useMatchStore } from '../store/matchStore'
 import FormSetupMatch from '../components/match/FormSetupMatch'
@@ -325,6 +325,7 @@ export default function MatchPage() {
               showCourtMap={true}
               frameData={frameData}
               onTimeUpdate={handleVideoTimeUpdate}
+              matchId={store.matchId}
             />
           </div>
 
@@ -440,6 +441,7 @@ export default function MatchPage() {
                 showCourtMap={true}
                 frameData={frameData}
                 onTimeUpdate={handleVideoTimeUpdate}
+                matchId={store.matchId}
               />
             </div>
           )}
@@ -464,14 +466,30 @@ export default function MatchPage() {
             sponsors={store.sponsors}
           />
 
-          {/* Stats Tabs */}
-          <TabsStatsLineup />
+          {/* Stats Tabs + download CSV */}
+          <div>
+            <div className="flex items-center justify-end mb-2">
+              <a
+                href={`${import.meta.env.VITE_API_URL}/api/output/${store.matchId}/stats`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold border border-gray-300 rounded-lg hover:border-primary hover:text-primary transition-smooth"
+                title="Download stats CSV (server-generated)"
+              >
+                <Download size={13} />
+                Export CSV
+              </a>
+            </div>
+            <TabsStatsLineup />
+          </div>
 
-          {/* Live Event Log — di bawah statistik */}
+          {/* Event Log — live real-time atau riwayat dari MongoDB setelah selesai */}
           <LiveEventFeed
             events={store.events}
             teamA={store.teamA.name}
             teamB={store.teamB.name}
+            matchId={store.matchId}
+            isLive={store.isLive}
           />
         </div>
       )}

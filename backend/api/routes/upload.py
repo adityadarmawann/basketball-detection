@@ -72,11 +72,13 @@ _processors: dict = {}
 # ── Background pipeline helper ────────────────────────────────────────────────
 
 async def _run_pipeline(
-    video_path:    str,
-    match_id:      str,
-    roster:        dict,
-    start_quarter: int  = 1,
-    lock_quarter:  bool = False,
+    video_path:     str,
+    match_id:       str,
+    roster:         dict,
+    start_quarter:  int  = 1,
+    lock_quarter:   bool = False,
+    jersey_color_a: str  = "",
+    jersey_color_b: str  = "",
 ) -> None:
     """
     Async background task: wires DB/Redis, creates VideoProcessor, runs pipeline.
@@ -105,6 +107,8 @@ async def _run_pipeline(
             ws_manager=_ws_manager,
             start_quarter=start_quarter,
             lock_quarter=lock_quarter,
+            jersey_color_a=jersey_color_a,
+            jersey_color_b=jersey_color_b,
         )
     except Exception as e:
         logger.error("Pipeline error match_id=%s: %s", match_id, e, exc_info=True)
@@ -115,10 +119,12 @@ async def _run_pipeline(
 @router.post("/upload-video")
 async def upload_video(
     background_tasks: BackgroundTasks,
-    file:     UploadFile    = File(...),
-    match_id: str           = Form(...),
-    roster:   Optional[str] = Form(None),   # JSON: {"7": "Bima", "12": "Arya"}
-    quarter:  Optional[int] = Form(None),   # 1–4 for quarter clips; None = full game
+    file:             UploadFile    = File(...),
+    match_id:         str           = Form(...),
+    roster:           Optional[str] = Form(None),   # JSON: {"7": "Bima", "12": "Arya"}
+    quarter:          Optional[int] = Form(None),   # 1–4 for quarter clips; None = full game
+    jersey_color_a:   Optional[str] = Form(None),   # hex "#RRGGBB" for Team A jersey
+    jersey_color_b:   Optional[str] = Form(None),   # hex "#RRGGBB" for Team B jersey
 ):
     """
     Upload a video file and immediately start background analytics processing.
@@ -224,6 +230,8 @@ async def upload_video(
             roster=roster_data,
             start_quarter=start_quarter,
             lock_quarter=lock_quarter,
+            jersey_color_a=jersey_color_a or "",
+            jersey_color_b=jersey_color_b or "",
         )
         status  = "processing"
         message = "Video uploaded, pipeline started"

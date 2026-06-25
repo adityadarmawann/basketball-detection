@@ -167,4 +167,6 @@ export interface MatchState {
   gpuMetrics: { gpu: number; vramUsed: number; vramTotal: number };
   quarterScoreA: number;
   quarterScoreB: number;
+  jerseyColorA: string;
+  jerseyColorB: string;
 }

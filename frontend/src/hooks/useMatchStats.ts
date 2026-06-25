@@ -223,7 +223,7 @@ export function useMatchStats(
 
     const [statsResult, mpiResult] = await Promise.allSettled([
       axios.get<{ player_stats?: Record<string, RawPlayerStats> }>(statsUrl),
-      axios.get<{ mpi?: RawMpiPlayer[] }>(mpiUrl),
+      axios.get<{ players?: RawMpiPlayer[] }>(mpiUrl),
     ])
 
     // ── Stats: nested backend format → flat camelCase PlayerStats ────────
@@ -268,8 +268,8 @@ export function useMatchStats(
 
     // ── MPI: list of backend dicts → Record<playerId, MpiMetrics> ────────
     if (mpiResult.status === 'fulfilled') {
-      // Backend returns { mpi: [...] } — always a list, index by track_id
-      const list = mpiResult.value.data.mpi ?? []
+      // Backend returns { players: [...] } — always a list, index by track_id
+      const list = mpiResult.value.data.players ?? []
       const normalised: Record<number, MpiMetrics> = {}
       for (const raw of list) {
         const entry = normalizeMpiStats(raw)

@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from 'react'
-import { Play, Pause } from 'lucide-react'
+import { Play, Pause, Download } from 'lucide-react'
 import CourtMap2D from './CourtMap2D'
 import CourtOverlay from './CourtOverlay'
 import { FrameBboxEntry } from '../../types'
@@ -13,9 +13,11 @@ interface VideoPlayerProps {
   frameData?: FrameBboxEntry[]
   /** Called on every timeupdate — lets parent sync game clock to video position. */
   onTimeUpdate?: (currentTime: number, duration: number) => void
+  /** Match ID — enables download buttons for analyzed + raw video. */
+  matchId?: string
 }
 
-export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeUpdate }: VideoPlayerProps) {
+export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeUpdate, matchId }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -154,6 +156,31 @@ export default function VideoPlayer({ videoUrl, showCourtMap, frameData, onTimeU
           <div className="text-xs text-gray-400">
             {formatTime(duration)}
           </div>
+
+          {matchId && (
+            <div className="ml-auto flex items-center gap-2">
+              <a
+                href={`${import.meta.env.VITE_API_URL}/api/output/${matchId}/video`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300 hover:text-white transition-smooth"
+                title="Download video hasil analisis AI (dengan overlay bbox)"
+              >
+                <Download size={13} />
+                Video AI
+              </a>
+              <a
+                href={`${import.meta.env.VITE_API_URL}/api/upload/raw/${matchId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300 hover:text-white transition-smooth"
+                title="Download video original (tanpa overlay)"
+              >
+                <Download size={13} />
+                Video Original
+              </a>
+            </div>
+          )}
         </div>
       </div>
     </div>

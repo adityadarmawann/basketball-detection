@@ -26,6 +26,7 @@ class MatchInput(BaseModel):
     team_b: str
     category: str
     round: str
+    region: str = ""
 
 @router.post("/match")
 async def create_match(match: MatchInput):
@@ -49,6 +50,7 @@ async def create_match(match: MatchInput):
             "team_b": {"name": match.team_b, "color": "#1A1A2E"},
             "category": match.category,
             "round": match.round,
+            "region": match.region,
             "status": "setup",
             "created_at": datetime.now(),
             "updated_at": datetime.now()
@@ -63,6 +65,7 @@ async def create_match(match: MatchInput):
             "team_b": match.team_b,
             "category": match.category,
             "round": match.round,
+            "region": match.region,
             "status": "setup",
             "created_at": datetime.now().isoformat(),
             "message": "Match created successfully"
@@ -90,6 +93,7 @@ async def get_match(match_id: str):
             "team_b": match_doc["team_b"]["name"],
             "category": match_doc.get("category"),
             "round": match_doc.get("round"),
+            "region": match_doc.get("region", ""),
             "status": match_doc.get("status"),
             "created_at": match_doc["created_at"].isoformat() if "created_at" in match_doc else None
         }

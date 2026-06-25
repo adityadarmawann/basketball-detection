@@ -13,6 +13,7 @@ Threading model
 
 import asyncio
 import bisect
+import colorsys
 import concurrent.futures
 import csv
 import json
@@ -209,6 +210,14 @@ _ACTION_WS_MAP: dict[str, str] = {
 
 def _norm_action(action_str: str) -> str:
     return _ACTION_WS_MAP.get((action_str or "stand").lower(), (action_str or "STAND").upper())
+
+
+def _hex_to_hsv(hex_color: str) -> list:
+    """Convert #RRGGBB to OpenCV HSV [H:0-180, S:0-255, V:0-255]."""
+    h = hex_color.lstrip('#')
+    r, g, b = int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0
+    hh, s, v = colorsys.rgb_to_hsv(r, g, b)
+    return [hh * 180.0, s * 255.0, v * 255.0]
 
 
 # ── Main class ────────────────────────────────────────────────────────────────
@@ -412,12 +421,14 @@ class VideoProcessor:
 
     async def process_video(
         self,
-        video_path:    str,
-        match_id:      str,
-        roster:        Optional[dict] = None,
-        ws_manager                    = None,
-        start_quarter: int            = 1,
-        lock_quarter:  bool           = False,
+        video_path:      str,
+        match_id:        str,
+        roster:          Optional[dict] = None,
+        ws_manager                      = None,
+        start_quarter:   int            = 1,
+        lock_quarter:    bool           = False,
+        jersey_color_a:  str            = "",
+        jersey_color_b:  str            = "",
     ) -> None:
         """
         Process video end-to-end as an async coroutine (FastAPI BackgroundTask).
@@ -457,6 +468,31 @@ class VideoProcessor:
 
         if self._stats is None:
             self._init_pipeline(self._models_path)
+
+        # Apply user-preset jersey colors — bypasses K-Means entirely when both are set.
+        if jersey_color_a and jersey_color_b:
+            try:
+                self._jersey.set_team_reference("A", _hex_to_hsv(jersey_color_a))
+                self._jersey.set_team_reference("B", _hex_to_hsv(jersey_color_b))
+                self._kmeans_calibrated = True
+                logger.info(
+                    "Jersey colors preset from UI — A=%s B=%s → K-Means skipped",
+                    jersey_color_a, jersey_color_b,
+                )
+            except Exception as _e:
+                logger.warning("Failed to apply preset jersey colors: %s", _e)
+        elif jersey_color_a:
+            try:
+                self._jersey.set_team_reference("A", _hex_to_hsv(jersey_color_a))
+                logger.info("Team A jersey color preset: %s", jersey_color_a)
+            except Exception as _e:
+                logger.warning("Failed to apply jersey_color_a '%s': %s", jersey_color_a, _e)
+        elif jersey_color_b:
+            try:
+                self._jersey.set_team_reference("B", _hex_to_hsv(jersey_color_b))
+                logger.info("Team B jersey color preset: %s", jersey_color_b)
+            except Exception as _e:
+                logger.warning("Failed to apply jersey_color_b '%s': %s", jersey_color_b, _e)
 
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
@@ -810,9 +846,13 @@ class VideoProcessor:
         # confirmed jersey from the roster disambiguates which cluster is which team.
         if (self._jersey and not self._kmeans_calibrated
                 and len(tracked_players) >= 5):
-            self._jersey.calibrate_teams(frame, tracked_players)
-            self._kmeans_calibrated = True
-            logger.info("Early K-Means calibration done (%d players visible)", len(tracked_players))
+            colors = self._jersey.calibrate_teams(frame, tracked_players)
+            # Only mark done when BOTH clusters were valid (≥2 members each).
+            # calibrate_teams() returns unchanged dict when it skips due to
+            # unbalanced clusters (referee/official in frame) — retry next frame.
+            if "A" in colors and "B" in colors:
+                self._kmeans_calibrated = True
+                logger.info("Early K-Means calibration done (%d players visible)", len(tracked_players))
 
         if self._tracker:
             for player in tracked_players:

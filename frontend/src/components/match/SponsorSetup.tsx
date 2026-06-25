@@ -135,6 +135,7 @@ export default function SponsorSetup({ onComplete }: { onComplete: () => void })
             id:          r.data.id,
             companyName: r.data.company_name,
             logoUrl:     r.data.logo_url ? `${API}${r.data.logo_url}` : null,
+            logoPath:    r.data.logo_url ?? null,
           }
           setLibrary((prev) => [...prev, newEntry].sort((a, b) => a.companyName.localeCompare(b.companyName)))
         }).catch(() => { /* 409 = already exists, ignore */ })

@@ -1,22 +1,170 @@
-import { useState } from 'react'
+import { ChangeEvent, useRef, useState } from 'react'
 import axios, { isAxiosError } from 'axios'
 import { useMatchStore } from '../../store/matchStore'
 import { DEMO_TEAMS } from '../../data/demoTeams'
-import { Users } from 'lucide-react'
+import { Upload, Users } from 'lucide-react'
 
 type BuiltinRegion = 'Bandung' | 'Surabaya'
 type RegionChoice = BuiltinRegion | 'Lainnya' | ''
+
+const JERSEY_SWATCHES = [
+  { hex: '#FFFFFF', label: 'Putih' },
+  { hex: '#E5E7EB', label: 'Abu-abu' },
+  { hex: '#FACC15', label: 'Kuning' },
+  { hex: '#F97316', label: 'Oranye' },
+  { hex: '#EF4444', label: 'Merah' },
+  { hex: '#22C55E', label: 'Hijau' },
+  { hex: '#3B82F6', label: 'Biru' },
+  { hex: '#1E3A8A', label: 'Biru tua' },
+  { hex: '#7C3AED', label: 'Ungu' },
+  { hex: '#1F2937', label: 'Hitam' },
+]
+
+function isLightColor(hex: string) {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return (r * 299 + g * 587 + b * 114) / 1000 > 140
+}
+
+function extractDominantColor(img: HTMLImageElement): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = img.naturalWidth
+  canvas.height = img.naturalHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return '#FFFFFF'
+  ctx.drawImage(img, 0, 0)
+  const W = img.naturalWidth, H = img.naturalHeight
+  // Sample chest region: y 20-55%, x 15-85% — same as backend _dominant_hsv()
+  const x1 = Math.floor(W * 0.15), x2 = Math.floor(W * 0.85)
+  const y1 = Math.floor(H * 0.20), y2 = Math.floor(H * 0.55)
+  const { data } = ctx.getImageData(x1, y1, x2 - x1, y2 - y1)
+  const rs: number[] = [], gs: number[] = [], bs: number[] = []
+  for (let i = 0; i < data.length; i += 4) {
+    rs.push(data[i]); gs.push(data[i + 1]); bs.push(data[i + 2])
+  }
+  rs.sort((a, b) => a - b); gs.sort((a, b) => a - b); bs.sort((a, b) => a - b)
+  const m = Math.floor(rs.length / 2)
+  const h = (n: number) => n.toString(16).padStart(2, '0')
+  return `#${h(rs[m])}${h(gs[m])}${h(bs[m])}`
+}
+
+interface JerseyPickerProps {
+  value: string
+  onChange: (hex: string) => void
+  label: string
+}
+
+function JerseyColorPicker({ value, onChange, label }: JerseyPickerProps) {
+  const [imgSrc, setImgSrc] = useState<string | null>(null)
+  const fileRef  = useRef<HTMLInputElement>(null)
+  const colorRef = useRef<HTMLInputElement>(null)
+  const isPreset = JERSEY_SWATCHES.some((s) => s.hex.toLowerCase() === value.toLowerCase())
+
+  const handleFile = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const dataUrl = ev.target?.result as string
+      setImgSrc(dataUrl)
+      const img = new Image()
+      img.onload = () => onChange(extractDominantColor(img))
+      img.src = dataUrl
+    }
+    reader.readAsDataURL(file)
+  }
+
+  return (
+    <div className="mt-3">
+      <label className="block text-text-secondary text-xs font-medium mb-1.5">{label}</label>
+
+      {/* Upload row */}
+      <div className="flex items-start gap-3 mb-2">
+        {imgSrc ? (
+          <div className="relative flex-shrink-0">
+            <img src={imgSrc} alt="jersey" className="w-14 h-14 object-cover rounded-lg border border-gray-200" />
+            <button
+              type="button"
+              onClick={() => setImgSrc(null)}
+              className="absolute -top-1 -right-1 w-4 h-4 bg-danger text-white rounded-full text-[9px] leading-none flex items-center justify-center"
+            >×</button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            className="flex flex-col items-center justify-center gap-0.5 w-14 h-14 rounded-lg border-2 border-dashed border-gray-300 hover:border-primary hover:bg-primary/5 transition-smooth text-gray-400 hover:text-primary flex-shrink-0"
+          >
+            <Upload size={13} />
+            <span className="text-[9px] text-center leading-tight">Upload<br/>jersey</span>
+          </button>
+        )}
+        <div className="flex flex-col justify-center h-14 gap-1">
+          {imgSrc && (
+            <button type="button" onClick={() => fileRef.current?.click()} className="text-xs text-primary hover:underline text-left">
+              Ganti foto
+            </button>
+          )}
+          <div className="flex items-center gap-1.5">
+            <div className="w-5 h-5 rounded border border-gray-300 flex-shrink-0" style={{ backgroundColor: value }} />
+            <span className="text-xs font-mono text-text-secondary">{value.toUpperCase()}</span>
+          </div>
+          {imgSrc && <p className="text-[10px] text-text-secondary">Warna diambil dari area tengah jersey</p>}
+        </div>
+      </div>
+
+      {/* Preset swatches */}
+      <div className="flex items-center gap-1 flex-wrap">
+        <span className="text-[11px] text-text-secondary mr-0.5">Atau pilih:</span>
+        {JERSEY_SWATCHES.map(({ hex, label: sl }) => (
+          <button
+            key={hex}
+            type="button"
+            title={sl}
+            onClick={() => { onChange(hex); setImgSrc(null) }}
+            style={{ backgroundColor: hex }}
+            className={`w-6 h-6 rounded-full transition-transform hover:scale-110 flex items-center justify-center
+              ${value.toUpperCase() === hex ? 'ring-2 ring-offset-1 ring-primary scale-110 border-2 border-primary' : 'border border-gray-300'}`}
+          >
+            {value.toUpperCase() === hex && (
+              <span style={{ color: isLightColor(hex) ? '#1F2937' : '#FFFFFF' }} className="text-[9px] font-bold leading-none">✓</span>
+            )}
+          </button>
+        ))}
+        {/* Custom hex picker */}
+        <button
+          type="button"
+          title="Warna kustom"
+          onClick={() => colorRef.current?.click()}
+          style={(!isPreset && !imgSrc) ? { backgroundColor: value, borderColor: '#6366f1', borderWidth: 2 } : {}}
+          className={`w-6 h-6 rounded-full border-2 border-dashed flex items-center justify-center transition-transform hover:scale-110
+            ${(!isPreset && !imgSrc) ? 'scale-110' : 'border-gray-400 bg-white'}`}
+        >
+          <span className="text-gray-400 text-[10px] font-bold leading-none">+</span>
+        </button>
+      </div>
+
+      {/* Hidden inputs */}
+      <input ref={fileRef}  type="file"  accept="image/jpeg,image/png,image/webp" onChange={handleFile} className="sr-only" />
+      <input ref={colorRef} type="color" value={value} onChange={(e) => { onChange(e.target.value); setImgSrc(null) }} className="sr-only" />
+    </div>
+  )
+}
 
 interface FormSetupMatchProps {
   onComplete: () => void
 }
 
 export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
-  const setTeamAName   = useMatchStore((s) => s.setTeamA)
-  const setTeamBName   = useMatchStore((s) => s.setTeamB)
-  const setMatchId     = useMatchStore((s) => s.setMatchId)
-  const setRegionStore = useMatchStore((s) => s.setRegion)
-  const setRoster      = useMatchStore((s) => s.setRoster)
+  const setTeamAName      = useMatchStore((s) => s.setTeamA)
+  const setTeamBName      = useMatchStore((s) => s.setTeamB)
+  const setMatchId        = useMatchStore((s) => s.setMatchId)
+  const setRegionStore    = useMatchStore((s) => s.setRegion)
+  const setRoster         = useMatchStore((s) => s.setRoster)
+  const setJerseyColorA   = useMatchStore((s) => s.setJerseyColorA)
+  const setJerseyColorB   = useMatchStore((s) => s.setJerseyColorB)
 
   // Region
   const [region, setRegion]           = useState<RegionChoice>('')
@@ -27,6 +175,10 @@ export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
   const [customTeamA, setCustomTeamA] = useState('')
   const [teamBId, setTeamBId]         = useState('')
   const [customTeamB, setCustomTeamB] = useState('')
+
+  // Jersey colors
+  const [jerseyColorA, setJerseyColorALocal] = useState('#FFFFFF')
+  const [jerseyColorB, setJerseyColorBLocal] = useState('#EF4444')
 
   // Match meta
   const [category, setCategory] = useState("Men's")
@@ -87,6 +239,8 @@ export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
       setTeamBName(teamBName)
       setRegionStore(regionName)
       setRoster(newRoster)
+      setJerseyColorA(jerseyColorA)
+      setJerseyColorB(jerseyColorB)
       onComplete()
     } catch (err: unknown) {
       if (isAxiosError(err) && err.response) {
@@ -100,6 +254,8 @@ export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
       setTeamBName(teamBName)
       setRegionStore(regionName)
       setRoster(newRoster)
+      setJerseyColorA(jerseyColorA)
+      setJerseyColorB(jerseyColorB)
       onComplete()
     } finally {
       setLoading(false)
@@ -172,6 +328,11 @@ export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
               {DEMO_TEAMS.find((t) => t.id === teamAId)?.players.length} pemain akan dimuat otomatis
             </p>
           )}
+          <JerseyColorPicker
+            value={jerseyColorA}
+            onChange={setJerseyColorALocal}
+            label="Warna Jersey Tim A"
+          />
         </div>
 
         {/* Tim B */}
@@ -204,6 +365,11 @@ export default function FormSetupMatch({ onComplete }: FormSetupMatchProps) {
               {DEMO_TEAMS.find((t) => t.id === teamBId)?.players.length} pemain akan dimuat otomatis
             </p>
           )}
+          <JerseyColorPicker
+            value={jerseyColorB}
+            onChange={setJerseyColorBLocal}
+            label="Warna Jersey Tim B"
+          />
         </div>
 
         {/* Kategori */}

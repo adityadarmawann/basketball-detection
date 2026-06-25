@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { CheckCircle, Loader2, AlertTriangle, RefreshCw } from 'lucide-react'
+import { CheckCircle, Loader2, AlertTriangle, RefreshCw, Square } from 'lucide-react'
 import axios, { AxiosError } from 'axios'
 
 interface Props {
@@ -18,6 +18,16 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
   const [fps, setFps] = useState(0)
   const [scanLine, setScanLine] = useState(0)
   const [errorMsg, setErrorMsg] = useState('')
+  const [isCancelling, setIsCancelling] = useState(false)
+
+  const handleStop = async () => {
+    setIsCancelling(true)
+    try {
+      await axios.post(`${import.meta.env.VITE_API_URL}/api/upload/stop/${matchId}`)
+    } catch {
+      // Polling will pick up the cancelled status from backend
+    }
+  }
 
   // Animated scan line sweep
   useEffect(() => {
@@ -180,14 +190,28 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
           )}
         </div>
 
-        {isDone && (
-          <button
-            onClick={onComplete}
-            className="px-4 py-1.5 bg-primary text-white text-sm font-bold rounded-lg hover:bg-primary-dark transition-smooth"
-          >
-            Lihat Dashboard ({countdown > 0 ? countdown : '→'})
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {phase === 'scanning' && !isCancelling && (
+            <button
+              onClick={handleStop}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-700/80 hover:bg-red-600 text-white text-xs font-bold rounded-lg transition-smooth"
+            >
+              <Square size={11} className="fill-white" />
+              Hentikan
+            </button>
+          )}
+          {isCancelling && (
+            <span className="text-xs text-gray-400 font-mono">Menghentikan...</span>
+          )}
+          {isDone && (
+            <button
+              onClick={onComplete}
+              className="px-4 py-1.5 bg-primary text-white text-sm font-bold rounded-lg hover:bg-primary-dark transition-smooth"
+            >
+              Lihat Dashboard ({countdown > 0 ? countdown : '→'})
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Scan animation panel */}

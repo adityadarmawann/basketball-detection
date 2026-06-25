@@ -388,6 +388,13 @@ class JerseyOCR:
         dummy_crop  = np.zeros((OCR_HEIGHT_PX, OCR_HEIGHT_PX, 3), dtype=np.uint8)
         if self.model is not None:
             try:
+                # First call with model.predict() triggers ultralytics model fusion
+                # (BN+conv layer merge). Without this, _detect_numbers_fullframe()
+                # hits a FP16/float32 dtype mismatch on the unfused model.
+                self.model.predict(
+                    dummy_frame, verbose=False,
+                    half=getattr(self, "_use_half", False),
+                )
                 self._detect_numbers_fullframe(dummy_frame)
                 logger.info("jersey_no.pt warmup done (%dx%d dummy frame)", width, height)
             except Exception as e:
@@ -1146,17 +1153,31 @@ class JerseyOCR:
 
         # K-Means++ gives stable init on small N; 20 restarts + tighter eps
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.5)
-        _, _, centers = cv2.kmeans(
+        _, labels, centers = cv2.kmeans(
             samples, 2, None, criteria, 20, cv2.KMEANS_PP_CENTERS
         )
+
+        # Guard: if one cluster has < 2 members it's likely a referee or
+        # spectator, not a second team. K-Means would split "all jerseys" vs
+        # "dark official" → every player lands in cluster A.
+        # Skip calibration and retry on the next eligible frame.
+        count_a = int(np.sum(labels == 0))
+        count_b = int(np.sum(labels == 1))
+        if min(count_a, count_b) < 2:
+            logger.info(
+                "calibrate_teams: skipped — unbalanced clusters (%d vs %d). "
+                "Likely a referee/official in frame. Retrying next frame.",
+                count_a, count_b,
+            )
+            return self._team_colors
 
         self._team_colors["A"] = centers[0].tolist()
         self._team_colors["B"] = centers[1].tolist()
         self._track_team.clear()
 
         logger.info(
-            "Team colors calibrated (%d players): A=%s  B=%s",
-            len(per_player),
+            "Team colors calibrated (%d players, clusters %d+%d): A=%s  B=%s",
+            len(per_player), count_a, count_b,
             [round(v, 1) for v in self._team_colors["A"]],
             [round(v, 1) for v in self._team_colors["B"]],
         )

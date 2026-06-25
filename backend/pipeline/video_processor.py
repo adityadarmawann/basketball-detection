@@ -474,9 +474,10 @@ class VideoProcessor:
             try:
                 self._jersey.set_team_reference("A", _hex_to_hsv(jersey_color_a))
                 self._jersey.set_team_reference("B", _hex_to_hsv(jersey_color_b))
-                self._kmeans_calibrated = True
+                self._kmeans_calibrated    = True
+                self._kmeans_disambiguated = True  # preset = user already declared A/B, never swap
                 logger.info(
-                    "Jersey colors preset from UI — A=%s B=%s → K-Means skipped",
+                    "Jersey colors preset from UI — A=%s B=%s → K-Means + disambiguation skipped",
                     jersey_color_a, jersey_color_b,
                 )
             except Exception as _e:

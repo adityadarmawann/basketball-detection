@@ -1214,12 +1214,22 @@ class JerseyOCR:
 
     @staticmethod
     def _hsv_distance(a: list[float], b: list[float]) -> float:
-        """Hue-aware HSV distance. Hue is circular [0, 180]."""
+        """
+        Hue-aware HSV distance, robust to arena lighting variation.
+
+        Hue weight scales with the minimum saturation of the two colors:
+        achromatic colors (white/gray/black, S≈0) have undefined/unreliable
+        hue, so the hue term is suppressed when either color is achromatic.
+        V weight is low (0.25) since brightness shifts under different arena
+        lighting conditions should not flip a player's team assignment.
+        """
         dh = abs(a[0] - b[0])
-        dh = min(dh, 180.0 - dh)   # circular
+        dh = min(dh, 180.0 - dh)          # circular hue distance
         ds = abs(a[1] - b[1])
         dv = abs(a[2] - b[2])
-        return float(dh * 2 + ds + dv * 0.5)
+        # Scale hue weight by saturation — 0 when achromatic, up to 2.0 when fully saturated
+        hue_weight = 2.0 * min(a[1], b[1]) / 255.0
+        return float(hue_weight * dh + ds + dv * 0.25)
 
     # ------------------------------------------------------------------
     # Helpers

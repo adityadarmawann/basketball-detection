@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { Trash2, Plus, Pencil, Check, X, Camera } from 'lucide-react'
+import { ChangeEvent, useRef, useState } from 'react'
+import { Trash2, Plus, Pencil, Check, X, Camera, Upload } from 'lucide-react'
 import axios, { isAxiosError } from 'axios'
 import { useMatchStore } from '../../store/matchStore'
 
@@ -21,6 +21,90 @@ interface RosterManagerProps {
   teamA: string
   teamB: string
   onComplete: () => void
+}
+
+const JERSEY_SWATCHES = [
+  { hex: '#FFFFFF', label: 'Putih' },
+  { hex: '#E5E7EB', label: 'Abu-abu' },
+  { hex: '#FACC15', label: 'Kuning' },
+  { hex: '#F97316', label: 'Oranye' },
+  { hex: '#EF4444', label: 'Merah' },
+  { hex: '#22C55E', label: 'Hijau' },
+  { hex: '#3B82F6', label: 'Biru' },
+  { hex: '#1E3A8A', label: 'Biru tua' },
+  { hex: '#7C3AED', label: 'Ungu' },
+  { hex: '#1F2937', label: 'Hitam' },
+]
+
+function isLightColor(hex: string) {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return (r * 299 + g * 587 + b * 114) / 1000 > 140
+}
+
+function extractDominantColor(img: HTMLImageElement): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = img.naturalWidth; canvas.height = img.naturalHeight
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return '#FFFFFF'
+  ctx.drawImage(img, 0, 0)
+  const W = img.naturalWidth, H = img.naturalHeight
+  const x1 = Math.floor(W * 0.15), x2 = Math.floor(W * 0.85)
+  const y1 = Math.floor(H * 0.20), y2 = Math.floor(H * 0.55)
+  const { data } = ctx.getImageData(x1, y1, x2 - x1, y2 - y1)
+  const rs: number[] = [], gs: number[] = [], bs: number[] = []
+  for (let i = 0; i < data.length; i += 4) { rs.push(data[i]); gs.push(data[i+1]); bs.push(data[i+2]) }
+  rs.sort((a, b) => a - b); gs.sort((a, b) => a - b); bs.sort((a, b) => a - b)
+  const m = Math.floor(rs.length / 2)
+  const h = (n: number) => n.toString(16).padStart(2, '0')
+  return `#${h(rs[m])}${h(gs[m])}${h(bs[m])}`
+}
+
+interface JerseyStripProps {
+  color: string
+  onColor: (c: string) => void
+  onFile: (e: ChangeEvent<HTMLInputElement>) => void
+}
+
+function JerseyStrip({ color, onColor, onFile }: JerseyStripProps) {
+  const fileRef  = useRef<HTMLInputElement>(null)
+  const colorRef = useRef<HTMLInputElement>(null)
+  const isPreset = JERSEY_SWATCHES.some((s) => s.hex.toLowerCase() === color.toLowerCase())
+  return (
+    <div className="flex items-center gap-2 flex-wrap py-1.5 px-0.5">
+      <span className="text-[11px] text-text-secondary font-medium shrink-0">Warna jersey:</span>
+      <button type="button" onClick={() => fileRef.current?.click()} title="Upload foto jersey untuk deteksi warna otomatis"
+        className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-primary transition-colors">
+        <Upload size={12} />
+      </button>
+      <div className="w-4 h-4 rounded border border-gray-300 flex-shrink-0" style={{ backgroundColor: color }} />
+      <span className="text-[11px] font-mono text-text-secondary">{color.toUpperCase()}</span>
+      <div className="flex gap-1 flex-wrap">
+        {JERSEY_SWATCHES.map(({ hex, label: sl }) => (
+          <button key={hex} type="button" title={sl} onClick={() => onColor(hex)}
+            style={{ backgroundColor: hex }}
+            className={`w-5 h-5 rounded-full transition-transform hover:scale-110 flex items-center justify-center
+              ${color.toUpperCase() === hex
+                ? 'ring-2 ring-offset-1 ring-primary scale-110 border-2 border-primary'
+                : 'border border-gray-300'}`}>
+            {color.toUpperCase() === hex && (
+              <span style={{ color: isLightColor(hex) ? '#1F2937' : '#FFFFFF' }}
+                className="text-[8px] font-bold leading-none">✓</span>
+            )}
+          </button>
+        ))}
+        <button type="button" title="Warna kustom" onClick={() => colorRef.current?.click()}
+          style={!isPreset ? { backgroundColor: color, borderColor: '#6366f1', borderWidth: 2 } : {}}
+          className={`w-5 h-5 rounded-full border-2 border-dashed flex items-center justify-center transition-transform hover:scale-110
+            ${!isPreset ? 'scale-110' : 'border-gray-400 bg-white'}`}>
+          <span className="text-gray-400 text-[9px] font-bold leading-none">+</span>
+        </button>
+      </div>
+      <input ref={fileRef}  type="file" accept="image/jpeg,image/png,image/webp" onChange={onFile} className="sr-only" />
+      <input ref={colorRef} type="color" value={color} onChange={(e) => onColor(e.target.value)} className="sr-only" />
+    </div>
+  )
 }
 
 // Default avatar SVG — shown when no photo is set
@@ -54,8 +138,12 @@ function PlayerPhoto({ src, onClick }: { src?: string; onClick: () => void }) {
 }
 
 export default function RosterManager({ matchId, teamA, teamB, onComplete }: RosterManagerProps) {
-  const savedRoster = useMatchStore((s) => s.roster)
-  const setRoster   = useMatchStore((s) => s.setRoster)
+  const savedRoster     = useMatchStore((s) => s.roster)
+  const setRoster       = useMatchStore((s) => s.setRoster)
+  const jerseyColorA    = useMatchStore((s) => s.jerseyColorA)
+  const jerseyColorB    = useMatchStore((s) => s.jerseyColorB)
+  const setJerseyColorA = useMatchStore((s) => s.setJerseyColorA)
+  const setJerseyColorB = useMatchStore((s) => s.setJerseyColorB)
 
   const [players, setPlayers] = useState<RosterPlayer[]>(() =>
     savedRoster.map((p) => ({ jersey_number: p.jerseyNumber, name: p.name, team: p.team }))
@@ -82,6 +170,19 @@ export default function RosterManager({ matchId, teamA, teamB, onComplete }: Ros
   const [error,        setError]        = useState('')
   const [editingIdx,   setEditingIdx]   = useState<number | null>(null)
   const [editDraft,    setEditDraft]    = useState<EditDraft>({ jersey_number: '', name: '' })
+
+  const handleJerseyFile = (setter: (c: string) => void) => (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const img = new Image()
+      img.onload = () => setter(extractDominantColor(img))
+      img.src = ev.target?.result as string
+    }
+    reader.readAsDataURL(file)
+  }
 
   // ── Photo helpers ─────────────────────────────────────────────────────────
   const openPhotoPicker = (key: string) => {
@@ -275,7 +376,7 @@ export default function RosterManager({ matchId, teamA, teamB, onComplete }: Ros
           {([['A', teamAPlayers], ['B', teamBPlayers]] as const).map(([slot, list]) =>
             list.length > 0 && (
               <div key={slot}>
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center justify-between mb-0.5">
                   <h3 className="text-sm font-bold text-text-secondary uppercase tracking-wide">
                     {slot === 'A' ? teamA || 'Tim A' : teamB || 'Tim B'}
                     <span className="ml-2 text-primary">({list.length} pemain)</span>
@@ -288,6 +389,11 @@ export default function RosterManager({ matchId, teamA, teamB, onComplete }: Ros
                     <Trash2 size={12} /> Hapus Tim
                   </button>
                 </div>
+                <JerseyStrip
+                  color={(slot === 'A' ? jerseyColorA : jerseyColorB) || (slot === 'A' ? '#FFFFFF' : '#EF4444')}
+                  onColor={slot === 'A' ? setJerseyColorA : setJerseyColorB}
+                  onFile={handleJerseyFile(slot === 'A' ? setJerseyColorA : setJerseyColorB)}
+                />
                 <div className="overflow-x-auto rounded-lg border border-gray-200">
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50">

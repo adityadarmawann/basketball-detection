@@ -194,6 +194,7 @@ FPS_DEFAULT          = 30
 # OCR: jersey number is stable once confirmed → run every 30 frames
 PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "4"))   # 4=every 4th frame → 15fps from 60fps source
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
+POSE_EVERY_N_FRAMES   = int(os.getenv("POSE_EVERY_N",     "2"))   # player pose estimation stride
 OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "15"))   # fallback default; overridden at runtime
 ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "20"))   # SlowFast action
 
@@ -273,6 +274,8 @@ class VideoProcessor:
 
         # Court result cache — avoid running YOLOv8-pose every frame (camera is slow)
         self._last_court_result:  dict = {"is_calibrated": False}
+        # Pose cache — reuse last result on skipped frames (POSE_EVERY_N_FRAMES)
+        self._last_pose_result:   dict = {"poses": []}
         # Sticky courtPos cache: {track_id → [x,y]} — last known valid position per player
         self._last_court_pos:     dict = {}
         # Sticky team cache: {track_id → "A"|"B"} — persists even when OCR not running
@@ -791,11 +794,19 @@ class VideoProcessor:
         _t3 = time.perf_counter()
 
         # ── 4. Pose estimation ────────────────────────────────────────────
-        if self._pose and tracked_players:
+        if self._pose and tracked_players and frame_id % (POSE_EVERY_N_FRAMES * PROCESS_STRIDE) == 0:
             try:
                 pose = self._pose.estimate(frame, tracked_players)
+                self._last_pose_result = pose
                 frame_data["pose"] = pose
+            except Exception as e:
+                logger.debug("Pose frame %d: %s", frame_id, e)
+        elif self._pose and tracked_players:
+            frame_data["pose"] = getattr(self, "_last_pose_result", {"poses": []})
 
+        if self._pose and tracked_players and frame_data.get("pose"):
+            pose = frame_data["pose"]
+            try:
                 # Refine court_pos using ankle keypoints (indices 15/16 = COCO).
                 # Ankles are at floor level → homography projection is accurate.
                 # Bbox center is at mid-body height → 0.3–0.8 m displacement in

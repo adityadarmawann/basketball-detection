@@ -33,7 +33,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 MODELS_DIR     = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
-MODEL_FILENAME = "action_best_v1.pt"
+MODEL_FILENAME = os.getenv("ACTION_MODEL", "best-action-vmae.pt")
 
 # ── Action class registry ────────────────────────────────────────────────────
 ACTION_NAMES: dict[int, str] = {
@@ -66,15 +66,20 @@ SHOOT_CONFIDENCE = 0.85   # from pose.py shooting detection
 MODEL_BUFFER_MIN = 16  # minimum frames before model runs
 MODEL_CONF_MIN   = 0.15  # minimum softmax confidence to accept model prediction; below → rule-based
                          # 6 classes → uniform baseline ≈ 0.167, so 0.15 accepts most model outputs
-_T_FAST          = 32  # SlowFast fast-pathway temporal dim (head pool expects 32)
-_T_SLOW          = 8   # SlowFast slow-pathway temporal dim: T_FAST / lateral_stride=4
-_INPUT_SIZE      = 224 # spatial resize for model input
+_INPUT_SIZE      = 224   # spatial resize for model input
 
-# Normalisation constants from training script (NormalizeVideo mean/std)
-# Training: T.NormalizeVideo(mean=[0.45,0.45,0.45], std=[0.225,0.225,0.225])
-# Inference MUST match — inference was previously only dividing by 255.
-_NORM_MEAN = (0.45,  0.45,  0.45)
-_NORM_STD  = (0.225, 0.225, 0.225)
+# ── VideoMAE constants ───────────────────────────────────────────────────────
+_T_VMAE          = 16    # VideoMAE temporal dim (matches training NUM_FRAMES)
+# Normalisation: VideoMAEImageProcessor default (ImageNet stats)
+_VMAE_MEAN = (0.485, 0.456, 0.406)
+_VMAE_STD  = (0.229, 0.224, 0.225)
+
+# ── SlowFast constants (kept for reference / fallback) ───────────────────────
+# _T_FAST          = 32  # SlowFast fast-pathway temporal dim (head pool expects 32)
+# _T_SLOW          = 8   # SlowFast slow-pathway temporal dim: T_FAST / lateral_stride=4
+# # Training: T.NormalizeVideo(mean=[0.45,0.45,0.45], std=[0.225,0.225,0.225])
+# _NORM_MEAN = (0.45,  0.45,  0.45)
+# _NORM_STD  = (0.225, 0.225, 0.225)
 
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
@@ -117,7 +122,9 @@ class ActionClassifier:
         self.model_path = model_path or os.path.join(MODELS_DIR, MODEL_FILENAME)
         self.device     = device
         self.model      = None
-        self._model_mode = False
+        self._model_mode    = False
+        self._model_backend = "unknown"   # "videomae" | "slowfast"
+        self._vmae_processor = None       # VideoMAEImageProcessor instance
         self._action_classes: list = list(ACTION_NAMES.values())
         self._idx_to_action: dict  = dict(enumerate(self._action_classes))
 
@@ -140,23 +147,21 @@ class ActionClassifier:
 
     def load_model(self) -> None:
         """
-        Load action_best_v1.pt (SlowFast-R50, 6 action classes — Plan B).
-        Requires pytorchvideo. Falls back to rule-based silently if unavailable.
+        Load action model checkpoint. Auto-detects backend from checkpoint metadata:
+          - "videomae" in model_ckpt key  →  VideoMAE-Base (transformers)
+          - otherwise                     →  SlowFast-R50  (pytorchvideo)  [commented out below]
+        Falls back to rule-based silently on any error.
         """
         path = Path(self.model_path)
         if not path.exists():
-            logger.warning(
-                "action_best_v1.pt not found at %s — rule-based mode",
-                path.resolve(),
-            )
+            logger.warning("Action model not found at %s — rule-based mode", path.resolve())
             return
         try:
             import torch
-
             target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
-            ckpt = torch.load(str(path), map_location="cpu", weights_only=False)
+            ckpt   = torch.load(str(path), map_location="cpu", weights_only=False)
 
-            # Metadata from checkpoint
+            # ── Shared metadata ──────────────────────────────────────────────
             self._action_classes = ckpt.get("classes", self._action_classes)
             c2i = ckpt.get("class_to_idx", {})
             if c2i:
@@ -164,73 +169,99 @@ class ActionClassifier:
             else:
                 self._idx_to_action = dict(enumerate(self._action_classes))
 
-            try:
-                # pytorchvideo.models needs torchvision.ops.RoIAlign (unused by SlowFast).
-                # Patch the missing symbol so the import succeeds on envs where only
-                # a minimal torchvision is installed.
-                import sys, types, torch.nn as _nn
-                import torchvision as _tv
-                if not hasattr(_tv, "ops") or not hasattr(_tv.ops, "RoIAlign"):
-                    _ops = types.ModuleType("torchvision.ops")
-                    class _RoIAlign(_nn.Module):
-                        def forward(self, x, boxes): return x
-                    _ops.RoIAlign = _RoIAlign
-                    _tv.ops = _ops
-                    sys.modules["torchvision.ops"] = _ops
+            base_ckpt = ckpt.get("model_ckpt", "")
 
-                from pytorchvideo.models.slowfast import create_slowfast
+            # ── VideoMAE branch ──────────────────────────────────────────────
+            if "videomae" in base_ckpt.lower() or "vmae" in str(path.name).lower():
+                try:
+                    from transformers import (
+                        VideoMAEImageProcessor,
+                        VideoMAEForVideoClassification,
+                    )
+                    n_cls = len(self._action_classes)
+                    model = VideoMAEForVideoClassification.from_pretrained(
+                        base_ckpt or "MCG-NJU/videomae-base-finetuned-kinetics",
+                        num_labels=n_cls,
+                        ignore_mismatched_sizes=True,
+                        label2id={c: i for i, c in enumerate(self._action_classes)},
+                        id2label={i: c for i, c in enumerate(self._action_classes)},
+                    )
+                    model.load_state_dict(ckpt["model"], strict=True)
+                    self.model = model.to(target).eval()
+                    if target.startswith("cuda"):
+                        self.model.half()
+                    # torch.compile: fuses ViT ops → ~15–30% faster inference
+                    # Falls back silently on PyTorch < 2.0 or unsupported platforms
+                    try:
+                        self.model = torch.compile(self.model, mode="reduce-overhead")
+                        logger.info("VideoMAE torch.compile() applied (reduce-overhead)")
+                    except Exception as _ce:
+                        logger.debug("torch.compile() skipped: %s", _ce)
+                    self._vmae_processor = VideoMAEImageProcessor.from_pretrained(
+                        base_ckpt or "MCG-NJU/videomae-base-finetuned-kinetics"
+                    )
+                    self._model_backend = "videomae"
+                    self._model_mode    = True
+                    logger.info(
+                        "%s loaded (VideoMAE-Base, %d classes) on %s fp16=%s",
+                        path.name, n_cls, target, target.startswith("cuda"),
+                    )
+                except ImportError:
+                    logger.warning(
+                        "transformers not installed — rule-based mode. "
+                        "pip install transformers to enable VideoMAE inference."
+                    )
+                except Exception as exc:
+                    logger.warning("VideoMAE load failed (%s) — rule-based mode", exc)
+                return
 
-                model = create_slowfast(
-                    model_depth=50,
-                    input_channels=(3, 3),
-                    model_num_class=len(self._action_classes),
-                    slowfast_channel_reduction_ratio=8,
-                    slowfast_conv_channel_fusion_ratio=2,
-                    slowfast_fusion_conv_kernel_size=(7, 1, 1),
-                    slowfast_fusion_conv_stride=(4, 1, 1),
-                    # Default head_pool_kernel_sizes=((8,1,1),(32,1,1)) matches
-                    # T_slow=8 and T_fast=32, consistent with lateral_stride=4.
-                )
-                # Checkpoint stores head as Sequential: proj.0=Dropout, proj.1=Linear.
-                # pytorchvideo creates head as a plain Linear: proj.weight/bias.
-                # Remap proj.1.* → proj.* so state_dict loads cleanly.
-                raw_sd = ckpt["model"]
-                remapped = {
-                    k.replace("blocks.6.proj.1.", "blocks.6.proj."): v
-                    for k, v in raw_sd.items()
-                }
-                model.load_state_dict(remapped)
-                self.model = model.to(target).eval()
-                if target.startswith("cuda"):
-                    self.model.half()   # FP16: 386MB → ~193MB VRAM, ~2x faster on RTX
-                self._target = target
-                self._model_mode = True
-                logger.info(
-                    "action_best_v1.pt loaded (SlowFast-R50, %d classes) on %s fp16=%s — model mode active",
-                    len(self._action_classes), target, target.startswith("cuda"),
-                )
-            except ImportError:
-                logger.warning(
-                    "pytorchvideo not installed — rule-based mode. "
-                    "pip install pytorchvideo to enable SlowFast inference."
-                )
-            except RuntimeError as exc:
-                logger.warning(
-                    "SlowFast state-dict mismatch (%s) — rule-based mode", exc
-                )
-            except Exception as exc:
-                logger.warning(
-                    "SlowFast model build failed (%s) — rule-based mode", exc
-                )
+            # ── SlowFast branch (kept, inactive while vmae checkpoint is active) ─
+            # try:
+            #     import sys, types, torch.nn as _nn
+            #     import torchvision as _tv
+            #     if not hasattr(_tv, "ops") or not hasattr(_tv.ops, "RoIAlign"):
+            #         _ops = types.ModuleType("torchvision.ops")
+            #         class _RoIAlign(_nn.Module):
+            #             def forward(self, x, boxes): return x
+            #         _ops.RoIAlign = _RoIAlign
+            #         _tv.ops = _ops
+            #         sys.modules["torchvision.ops"] = _ops
+            #     from pytorchvideo.models.slowfast import create_slowfast
+            #     _T_SLOW, _T_FAST = 8, 32
+            #     model = create_slowfast(
+            #         model_depth=50, input_channels=(3, 3),
+            #         model_num_class=len(self._action_classes),
+            #         slowfast_channel_reduction_ratio=8,
+            #         slowfast_conv_channel_fusion_ratio=2,
+            #         slowfast_fusion_conv_kernel_size=(7, 1, 1),
+            #         slowfast_fusion_conv_stride=(4, 1, 1),
+            #     )
+            #     raw_sd   = ckpt["model"]
+            #     remapped = {k.replace("blocks.6.proj.1.", "blocks.6.proj."): v
+            #                 for k, v in raw_sd.items()}
+            #     model.load_state_dict(remapped)
+            #     self.model = model.to(target).eval()
+            #     if target.startswith("cuda"):
+            #         self.model.half()
+            #     self._model_backend = "slowfast"
+            #     self._model_mode    = True
+            #     logger.info("action_best_v1.pt loaded (SlowFast-R50, %d classes) on %s fp16=%s",
+            #                 len(self._action_classes), target, target.startswith("cuda"))
+            # except ImportError:
+            #     logger.warning("pytorchvideo not installed — rule-based mode.")
+            # except RuntimeError as exc:
+            #     logger.warning("SlowFast state-dict mismatch (%s) — rule-based mode", exc)
+            # except Exception as exc:
+            #     logger.warning("SlowFast model build failed (%s) — rule-based mode", exc)
 
         except Exception as exc:
-            logger.warning("Failed to load action_best_v1.pt: %s — rule-based mode", exc)
+            logger.warning("Failed to load action model: %s — rule-based mode", exc)
 
     def is_model_loaded(self) -> bool:
         return self.model is not None
 
     def warmup(self) -> None:
-        """One dummy forward pass to trigger CUDA JIT compilation for SlowFast."""
+        """One dummy forward pass to trigger CUDA JIT compilation."""
         if not self.is_model_loaded():
             return
         try:
@@ -238,13 +269,22 @@ class ActionClassifier:
             device   = next(self.model.parameters()).device
             use_half = next(self.model.parameters()).dtype == torch.float16
             dtype    = torch.float16 if use_half else torch.float32
-            slow_t = torch.zeros(1, 3, _T_SLOW, _INPUT_SIZE, _INPUT_SIZE,
-                                 dtype=dtype, device=device)
-            fast_t = torch.zeros(1, 3, _T_FAST, _INPUT_SIZE, _INPUT_SIZE,
-                                 dtype=dtype, device=device)
-            with torch.no_grad():
-                self.model([slow_t, fast_t])
-            logger.info("ActionClassifier warmup done (SlowFast fp16=%s)", use_half)
+            if self._model_backend == "videomae":
+                dummy = torch.zeros(1, _T_VMAE, 3, _INPUT_SIZE, _INPUT_SIZE,
+                                    dtype=dtype, device=device)
+                with torch.no_grad():
+                    self.model(pixel_values=dummy)
+                logger.info("ActionClassifier warmup done (VideoMAE fp16=%s)", use_half)
+            # SlowFast warmup (inactive — kept for reference)
+            # else:
+            #     _T_SLOW, _T_FAST = 8, 32
+            #     slow_t = torch.zeros(1, 3, _T_SLOW, _INPUT_SIZE, _INPUT_SIZE,
+            #                          dtype=dtype, device=device)
+            #     fast_t = torch.zeros(1, 3, _T_FAST, _INPUT_SIZE, _INPUT_SIZE,
+            #                          dtype=dtype, device=device)
+            #     with torch.no_grad():
+            #         self.model([slow_t, fast_t])
+            #     logger.info("ActionClassifier warmup done (SlowFast fp16=%s)", use_half)
         except Exception as e:
             logger.debug("ActionClassifier warmup error (non-fatal): %s", e)
 
@@ -548,15 +588,12 @@ class ActionClassifier:
                 return pose
         return None
 
-    # ── Model inference (SlowFast-R50) ──────────────────────────────────────
+    # ── Model inference ───────────────────────────────────────────────────────
 
     def _model_inference(self, frame_buffer, tracked_players: list) -> dict:
         """
-        SlowFast-R50 inference.
-
-        Slow pathway: _T_SLOW uniformly sampled frames from a _T_FAST-frame clip.
-        Fast pathway: _T_FAST uniformly sampled frames from the buffer.
-        Player crops are extracted from each frame, resized to _INPUT_SIZE×_INPUT_SIZE.
+        Batched inference — all players in one forward pass.
+        Dispatches to VideoMAE or SlowFast based on self._model_backend.
         """
         import torch
 
@@ -564,42 +601,68 @@ class ActionClassifier:
         if not frames:
             raise RuntimeError("empty frame buffer")
 
-        device    = next(self.model.parameters()).device
-        use_half  = next(self.model.parameters()).dtype == torch.float16
-        actions   = []
+        device   = next(self.model.parameters()).device
+        use_half = next(self.model.parameters()).dtype == torch.float16
+        actions  = []
+
+        # ── Build per-player tensors ─────────────────────────────────────────
+        valid_players: list = []
+        tensor_list:   list = []
 
         for player in tracked_players:
-            track_id    = player["track_id"]
             x1, y1, x2, y2 = [int(v) for v in player.get("bbox", [0, 0, _INPUT_SIZE, _INPUT_SIZE])]
+            t = self._build_input_tensor(frames, x1, y1, x2, y2)  # [1, T, C, H, W]
+            valid_players.append(player)
+            tensor_list.append(t)
 
-            fast_tensor = self._build_input_tensor(frames, x1, y1, x2, y2, _T_FAST)
-            # Slow: uniformly pick _T_SLOW indices from the _T_FAST fast frames
-            slow_idx    = torch.linspace(0, _T_FAST - 1, _T_SLOW).long()
-            slow_tensor = fast_tensor[:, :, slow_idx, :, :]
+        if not valid_players:
+            return {"actions": []}
 
-            # Match input dtype to model weights (FP16 when model.half() was called)
-            slow_t = slow_tensor.to(device)
-            fast_t = fast_tensor.to(device)
-            if use_half:
-                slow_t = slow_t.half()
-                fast_t = fast_t.half()
+        # ── VideoMAE: pixel_values [N, T, C, H, W] ──────────────────────────
+        batch = torch.cat(tensor_list, dim=0).to(device)  # [N, T, C, H, W]
+        if use_half:
+            batch = batch.half()
 
-            try:
-                with torch.no_grad():
-                    logits = self.model([slow_t, fast_t])
-                    probs  = torch.softmax(logits, dim=-1)[0]
-                    top1   = int(probs.argmax().item())
-                    conf   = float(probs[top1].item())
-            except Exception as exc:
-                logger.warning("SlowFast inference error for track %d: %s", track_id, exc)
-                actions.append({
-                    "track_id":  track_id,
-                    "action":    STAND,
-                    "action_id": -1,
-                    "confidence": 0.5,
-                    "source":    "rule_based",
-                })
-                continue
+        try:
+            with torch.no_grad():
+                logits_batch = self.model(pixel_values=batch).logits  # [N, num_classes]
+                probs_batch  = torch.softmax(logits_batch, dim=-1)    # [N, num_classes]
+        except Exception as exc:
+            logger.warning("VideoMAE batched inference error: %s", exc)
+            return {"actions": [
+                {"track_id": p["track_id"], "action": STAND, "action_id": -1,
+                 "confidence": 0.5, "source": "rule_based"}
+                for p in valid_players
+            ]}
+
+        # ── SlowFast batched inference (inactive — kept for reference) ───────
+        # slow_idx   = torch.linspace(0, _T_FAST - 1, _T_SLOW).long()
+        # slow_list, fast_list = [], []
+        # for t in tensor_list:                          # t: [1, C, T_fast, H, W]
+        #     slow_list.append(t[:, :, slow_idx, :, :])
+        #     fast_list.append(t)
+        # slow_batch = torch.cat(slow_list, dim=0).to(device)
+        # fast_batch = torch.cat(fast_list, dim=0).to(device)
+        # if use_half:
+        #     slow_batch = slow_batch.half(); fast_batch = fast_batch.half()
+        # try:
+        #     with torch.no_grad():
+        #         logits_batch = self.model([slow_batch, fast_batch])
+        #         probs_batch  = torch.softmax(logits_batch, dim=-1)
+        # except Exception as exc:
+        #     logger.warning("SlowFast batched inference error: %s", exc)
+        #     return {"actions": [
+        #         {"track_id": p["track_id"], "action": STAND, "action_id": -1,
+        #          "confidence": 0.5, "source": "rule_based"}
+        #         for p in valid_players
+        #     ]}
+
+        # ── Distribute results back to each player ───────────────────────────
+        for i, player in enumerate(valid_players):
+            track_id = player["track_id"]
+            probs    = probs_batch[i]
+            top1     = int(probs.argmax().item())
+            conf     = float(probs[top1].item())
 
             # Low-confidence model prediction → rule-based is more reliable
             if conf < MODEL_CONF_MIN:
@@ -627,13 +690,10 @@ class ActionClassifier:
 
             # Resolve merged jump_action → Block | Rebound_attempt | Jump
             if action_str == "jump_action":
-                ball_info_ctx = getattr(self, "_last_ball_info", None)
                 action_str = ActionClassifier.resolve_jump_action(
-                    player, ball_info_ctx,
-                    self._tracked_players,
-                    self._ball_direction_history,
+                    player, getattr(self, "_last_ball_info", None),
+                    self._tracked_players, self._ball_direction_history,
                 )
-                # action_id stays 5 — preserves raw model class
 
             actions.append({
                 "track_id":   track_id,
@@ -649,45 +709,68 @@ class ActionClassifier:
         self,
         frames: list,
         x1: int, y1: int, x2: int, y2: int,
-        T: int,
     ):
         """
-        Crop player bbox from every frame, resize to _INPUT_SIZE, sample/pad to T frames.
-        Applies the same preprocessing as training:
-          BGR→RGB → /255 → NormalizeVideo(mean, std) → ClampVideo(-5, 5)
-        Returns FloatTensor [1, C, T, H, W].
+        Crop player bbox from every source frame, sample to _T_VMAE frames.
+        Returns FloatTensor [1, T, C, H, W] normalized with ImageNet stats
+        (matches VideoMAEImageProcessor default used during training).
         """
         import torch
         import cv2
         import numpy as np
 
-        mean = np.array(_NORM_MEAN, dtype=np.float32)
-        std  = np.array(_NORM_STD,  dtype=np.float32)
+        mean = np.array(_VMAE_MEAN, dtype=np.float32)
+        std  = np.array(_VMAE_STD,  dtype=np.float32)
 
         crops = []
         for frame in frames:
-            h, w   = frame.shape[:2]
-            crop   = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+            h, w = frame.shape[:2]
+            crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
             if crop.size == 0:
                 crop = np.zeros((_INPUT_SIZE, _INPUT_SIZE, 3), dtype=np.uint8)
             else:
                 crop = cv2.resize(crop, (_INPUT_SIZE, _INPUT_SIZE), interpolation=cv2.INTER_LINEAR)
-            # BGR → RGB → [0,1] → NormalizeVideo (match training transform)
-            rgb = crop[:, :, ::-1].astype(np.float32) / 255.0
+            rgb = crop[:, :, ::-1].astype(np.float32) / 255.0   # BGR→RGB→[0,1]
             rgb = (rgb - mean) / std
             crops.append(rgb)
 
         n = len(crops)
-        if n >= T:
-            idx   = np.linspace(0, n - 1, T, dtype=int)
+        if n >= _T_VMAE:
+            idx   = np.linspace(0, n - 1, _T_VMAE, dtype=int)
             crops = [crops[i] for i in idx]
         else:
-            crops += [crops[-1]] * (T - n)  # repeat last frame
+            crops += [crops[-1]] * (_T_VMAE - n)
 
-        arr = np.stack(crops)            # [T, H, W, C]
-        arr = arr.transpose(3, 0, 1, 2) # [C, T, H, W]
-        arr = np.clip(arr, -5.0, 5.0)   # ClampVideo — matches training
-        return torch.tensor(arr).unsqueeze(0)  # [1, C, T, H, W]
+        arr = np.stack(crops)             # [T, H, W, C]
+        arr = arr.transpose(0, 3, 1, 2)  # [T, C, H, W]  ← VideoMAE expects T first
+        return torch.tensor(arr).unsqueeze(0)  # [1, T, C, H, W]
+
+    # ── SlowFast _build_input_tensor (inactive — kept for reference) ──────────
+    # def _build_input_tensor_slowfast(self, frames, x1, y1, x2, y2, T):
+    #     """Returns FloatTensor [1, C, T, H, W] with SlowFast normalization."""
+    #     import torch, cv2, numpy as np
+    #     _NORM_MEAN = (0.45, 0.45, 0.45); _NORM_STD = (0.225, 0.225, 0.225)
+    #     mean = np.array(_NORM_MEAN, dtype=np.float32)
+    #     std  = np.array(_NORM_STD,  dtype=np.float32)
+    #     crops = []
+    #     for frame in frames:
+    #         h, w = frame.shape[:2]
+    #         crop = frame[max(0,y1):min(h,y2), max(0,x1):min(w,x2)]
+    #         if crop.size == 0:
+    #             crop = np.zeros((_INPUT_SIZE, _INPUT_SIZE, 3), dtype=np.uint8)
+    #         else:
+    #             crop = cv2.resize(crop, (_INPUT_SIZE, _INPUT_SIZE), interpolation=cv2.INTER_LINEAR)
+    #         rgb = crop[:, :, ::-1].astype(np.float32) / 255.0
+    #         rgb = (rgb - mean) / std
+    #         crops.append(rgb)
+    #     n = len(crops)
+    #     if n >= T:
+    #         idx = np.linspace(0, n-1, T, dtype=int); crops = [crops[i] for i in idx]
+    #     else:
+    #         crops += [crops[-1]] * (T - n)
+    #     arr = np.stack(crops).transpose(3, 0, 1, 2)   # [C, T, H, W]
+    #     arr = np.clip(arr, -5.0, 5.0)
+    #     return torch.tensor(arr).unsqueeze(0)          # [1, C, T, H, W]
 
     @staticmethod
     def _map_class_name(name: str) -> tuple[str, int]:

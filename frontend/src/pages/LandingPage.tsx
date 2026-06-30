@@ -155,7 +155,7 @@ const FEATURES = [
   {
     icon: <Activity size={24} className="text-primary" />,
     title: 'Action Recognition',
-    desc: 'Kenali aksi dribble, tembakan, umpan, dan rebound dengan SlowFast-R50.',
+    desc: 'Kenali aksi dribble, tembakan, umpan, dan rebound dengan VideoMAE.',
   },
   {
     icon: <BarChart3 size={24} className="text-primary" />,
@@ -170,7 +170,7 @@ const FEATURES = [
   {
     icon: <Users size={24} className="text-primary" />,
     title: 'Jersey OCR',
-    desc: 'Identifikasi nomor punggung pemain secara otomatis lewat PaddleOCR.',
+    desc: 'Identifikasi nomor punggung pemain secara otomatis lewat OCR-Detector.',
   },
   {
     icon: <Shield size={24} className="text-primary" />,
@@ -224,7 +224,7 @@ export default function LandingPage() {
             </p>
 
             <div className="flex flex-wrap gap-4 justify-center lg:justify-start text-sm text-gray-400">
-              {['YOLOv8', 'SlowFast-R50', 'PaddleOCR', 'FastAPI', 'WebSocket'].map((tech) => (
+              {['YOLOv8', 'VideoMAE', 'OCR-Detector', 'FastAPI', 'WebSocket'].map((tech) => (
                 <span key={tech} className="bg-white/5 border border-white/10 rounded-lg px-3 py-1 font-mono">
                   {tech}
                 </span>
@@ -245,9 +245,6 @@ export default function LandingPage() {
           <h2 className="font-display font-bold text-3xl text-text-primary mb-2">
             Fitur Utama
           </h2>
-          <p className="text-text-secondary text-sm max-w-xl mx-auto">
-            Pipeline computer vision end-to-end — dari video upload sampai statistik siap pakai.
-          </p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">

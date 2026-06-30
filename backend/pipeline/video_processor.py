@@ -270,6 +270,7 @@ class VideoProcessor:
         self._ocr_interval:        int   = OCR_EVERY_N_FRAMES  # overridden after FPS known
         self._frame_width:         int   = 0
         self._frame_height:        int   = 0
+        self._fps_skip:            int   = 1  # >1 when source fps > MAX_FPS_PROCESS
         self._roster:              dict  = {}
 
         # Court result cache — avoid running YOLOv8-pose every frame (camera is slow)
@@ -504,10 +505,27 @@ class VideoProcessor:
             logger.error("Cannot open video: %s", video_path)
             return
 
-        self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self._source_fps   = cap.get(cv2.CAP_PROP_FPS) or FPS_DEFAULT
+        raw_fps        = cap.get(cv2.CAP_PROP_FPS) or FPS_DEFAULT
         self._frame_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1920
         self._frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+
+        # Cap source FPS at MAX_FPS_PROCESS (default 25) so high-fps cameras
+        # (60fps, 120fps) don't double/quadruple processing load.
+        # cap.set(CAP_PROP_FPS) does nothing on file sources — instead we skip
+        # extra frames in _frame_grabber by increasing the effective stride.
+        _MAX_SRC_FPS = float(os.getenv("MAX_FPS_PROCESS", "30"))
+        if raw_fps > _MAX_SRC_FPS + 1:
+            self._fps_skip = max(1, round(raw_fps / _MAX_SRC_FPS))
+            self._source_fps = raw_fps / self._fps_skip
+            logger.info(
+                "Source %.0ffps > cap %.0ffps → fps_skip=%d, effective src_fps=%.1f",
+                raw_fps, _MAX_SRC_FPS, self._fps_skip, self._source_fps,
+            )
+        else:
+            self._fps_skip   = 1
+            self._source_fps = raw_fps
+
+        self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // self._fps_skip
 
         # FPS-aware OCR interval: target per-player OCR every ≤16 raw frames (~0.5–1s).
         # jersey.process() is called every _ocr_interval frames; inside, each player
@@ -682,12 +700,13 @@ class VideoProcessor:
         eliminates 75% of video decode cost — the single biggest remaining
         CPU bottleneck after GPU model optimisation.
         """
+        # Total grabs before each decode = fps_skip×PROCESS_STRIDE - 1 decoded frame.
+        # fps_skip>1 when source fps > MAX_FPS_PROCESS (e.g. 60fps source → skip=2).
+        _grabs_before_read = self._fps_skip * PROCESS_STRIDE - 1
         try:
             while not self._stop_signal.is_set():
-                # Skip PROCESS_STRIDE-1 frames without decoding
-                for _ in range(PROCESS_STRIDE - 1):
+                for _ in range(_grabs_before_read):
                     if not cap.grab():
-                        # Video ended mid-stride — signal done
                         self._frame_queue.put(None, block=True, timeout=2.0)
                         return
 

@@ -100,6 +100,7 @@ class PlayerTracker:
         # the old one without waiting for another OCR confirmation.
         self._player_last_seen: dict[int, list] = {}    # track_id → bbox (last frame)
         self._lost_jersey_cache: dict[int, tuple] = {}  # track_id → (bbox, jersey, age)
+        self._newly_inherited: dict[int, int] = {}      # new_tid → old_tid (current frame only)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -113,7 +114,7 @@ class PlayerTracker:
             from boxmot.trackers.botsort.bot_sort import BoTSORT
 
             if self.tracker_type == "bytetrack":
-                return BYTETracker(track_buffer=25, frame_rate=self.frame_rate)
+                return BYTETracker(track_buffer=100, frame_rate=self.frame_rate, match_thresh=0.6)
             else:  # botsort
                 return BoTSORT(
                     model_weights=None, device="cpu", fp16=False,
@@ -239,23 +240,25 @@ class PlayerTracker:
                 )
 
         # Inherit jersey for brand-new track IDs via spatial proximity (IoU ≥ 0.25)
+        self._newly_inherited.clear()
         new_track_ids = current_player_ids - set(self._player_last_seen.keys())
         if new_track_ids and self._lost_jersey_cache:
             for player in tracked_players:
                 tid = player["track_id"]
                 if tid not in new_track_ids or tid in self.track_jersey_map:
                     continue
-                best_iou, best_jersey = 0.0, None
+                best_iou, best_jersey, best_ltid = 0.0, None, None
                 for _ltid, (lost_bbox, lost_jersey, _age) in self._lost_jersey_cache.items():
                     iou = _box_iou(player["bbox"], lost_bbox)
                     if iou > best_iou:
-                        best_iou, best_jersey = iou, lost_jersey
+                        best_iou, best_jersey, best_ltid = iou, lost_jersey, _ltid
                 if best_iou >= 0.25 and best_jersey is not None:
                     self.track_jersey_map[tid] = best_jersey
                     player["jersey_number"] = best_jersey
+                    self._newly_inherited[tid] = best_ltid
                     logger.info(
-                        "Jersey inherited: new tid=%d ← #%d (IoU=%.2f)",
-                        tid, best_jersey, best_iou,
+                        "Jersey inherited: new tid=%d ← old tid=%d #%d (IoU=%.2f)",
+                        tid, best_ltid, best_jersey, best_iou,
                     )
 
         # Update last-seen positions for next frame's inheritance check

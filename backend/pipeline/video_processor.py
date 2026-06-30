@@ -527,6 +527,17 @@ class VideoProcessor:
 
         self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // self._fps_skip
 
+        # Re-initialise ByteTrack with the actual processed fps so its Kalman filter
+        # predicts position correctly. Processed fps = source_fps / PROCESS_STRIDE.
+        # Without this, ByteTrack is calibrated for TARGET_FPS=25 but receives frames
+        # at ~7.5fps → velocity model overshoots → IoU matching fails on fast players.
+        if self._tracker:
+            _eff_fps = max(1, round(self._source_fps / PROCESS_STRIDE))
+            self._tracker.frame_rate = _eff_fps
+            if self._frame_width and self._frame_height:
+                self._tracker.initialize((self._frame_height, self._frame_width, 3))
+                logger.info("Tracker re-initialised at effective fps=%d", _eff_fps)
+
         # FPS-aware OCR interval: target per-player OCR every ≤16 raw frames (~0.5–1s).
         # jersey.process() is called every _ocr_interval frames; inside, each player
         # fires OCR every OCR_SAMPLE_EVERY=4 calls → per-player = 4 × _ocr_interval.
@@ -777,6 +788,13 @@ class VideoProcessor:
                 frame_data["tracking"] = tracking
                 tracked_players = tracking.get("tracked_players", [])
                 ball_info       = tracking.get("tracked_ball")
+                # When ByteTrack re-assigns a track_id, inherit team from old ID
+                # so bbox colour doesn't flicker during the 3-vote accumulation window.
+                if self._jersey and self._tracker._newly_inherited:
+                    for _new_tid, _old_tid in self._tracker._newly_inherited.items():
+                        if _old_tid in self._last_known_team:
+                            self._last_known_team[_new_tid] = self._last_known_team[_old_tid]
+                        self._jersey.inherit_team(_new_tid, _old_tid)
             except Exception as e:
                 logger.debug("Tracker frame %d: %s", frame_id, e)
         _t2 = time.perf_counter()
@@ -896,6 +914,8 @@ class VideoProcessor:
                         confirmed_team = entry["team"]
                         player["team"] = confirmed_team
                         self._last_known_team[tid] = confirmed_team
+                        if self._stats:
+                            self._stats.confirm_player_team(tid, confirmed_team)
 
                         # Disambiguate K-Means clusters using first UNIQUE-team jersey.
                         # Only use jersey numbers worn by exactly ONE team — shared
@@ -942,6 +962,8 @@ class VideoProcessor:
                 elif tid in jersey_color_map:
                     player["team"] = jersey_color_map[tid]
                     self._last_known_team[tid] = jersey_color_map[tid]
+                    if self._stats:
+                        self._stats.confirm_player_team(tid, jersey_color_map[tid])
 
         # ── 6. Action classification — run every ACTION_EVERY_N_FRAMES ───────────
         if self._action and tracked_players and frame_id % ACTION_EVERY_N_FRAMES == 0:
@@ -1469,6 +1491,28 @@ class VideoProcessor:
             tid: p.get("team", "")
             for tid, p in final_stats.get("player_stats", {}).items()
         }
+
+        # Supplement from _last_known_team (set when jersey OCR + roster confirmed a team).
+        # This covers track_ids where StatsCalculator's roster was not updated in time.
+        for tid, team in self._last_known_team.items():
+            if team in ("A", "B") and not tid_to_team.get(tid):
+                tid_to_team[tid] = team
+
+        # Cross-reference via jersey for track_ids that changed mid-match.
+        # tracker.track_jersey_map retains ALL track_ids (even dropped ones), so
+        # old_tid → jersey → team still resolves even after ByteTrack reassigned the ID.
+        if self._tracker:
+            _jn_to_team: dict = {}
+            for jtid, jteam in self._last_known_team.items():
+                if jteam in ("A", "B"):
+                    jn = self._tracker.track_jersey_map.get(jtid)
+                    if jn is not None:
+                        _jn_to_team[jn] = jteam
+            for _, stid, _, _ in self._scoring_events:
+                if not tid_to_team.get(stid):
+                    jn = self._tracker.track_jersey_map.get(stid)
+                    if jn is not None and jn in _jn_to_team:
+                        tid_to_team[stid] = _jn_to_team[jn]
 
         # Build cumulative score timeline sorted by timestamp
         # Entry: (ts_ms, total_A, total_B, quarter)

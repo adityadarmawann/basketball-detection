@@ -240,8 +240,9 @@ class JerseyOCR:
         self._votes: dict[int, deque] = {}
 
         # Team classification
-        self._team_colors: dict[str, list[float]] = {}   # "A"/"B" → [H, S, V]
-        self._track_team:  dict[int, str]         = {}   # track_id → "A"/"B"
+        self._team_colors:       dict[str, list[float]]  = {}   # "A"/"B" → [H, S, V]
+        self._track_team:        dict[int, str]          = {}   # track_id → "A"/"B" (locked)
+        self._track_team_votes:  dict[int, dict[str, int]] = {} # track_id → {"A":n,"B":n}
 
         # Per-track OCR scheduling: frame number of last OCR run per track_id.
         # Default -OCR_SAMPLE_EVERY so the first appearance always triggers OCR.
@@ -1084,12 +1085,18 @@ class JerseyOCR:
     # Team classification (K-Means HSV)
     # ------------------------------------------------------------------
 
+    _TEAM_VOTE_LOCK   = 3   # votes needed to lock classification
+    _TEAM_VOTE_MARGIN = 2   # winning side must lead by this many votes to lock
+
     def _classify_team(
         self, player_crop: np.ndarray, track_id: int
     ) -> Optional[str]:
         """
-        Assign track to "A" or "B" based on nearest team color reference.
-        Returns None if team colors have not been calibrated yet.
+        Assign track to "A" or "B" using majority voting over multiple frames.
+
+        Locks permanently after _TEAM_VOTE_LOCK votes with a clear majority.
+        This prevents a single bad crop (white number dominating the chest region,
+        player partially occluded) from mis-classifying a player forever.
         """
         if track_id in self._track_team:
             return self._track_team[track_id]
@@ -1103,9 +1110,20 @@ class JerseyOCR:
 
         dist_a = self._hsv_distance(dominant_hsv, self._team_colors["A"])
         dist_b = self._hsv_distance(dominant_hsv, self._team_colors["B"])
-        team = "A" if dist_a <= dist_b else "B"
-        self._track_team[track_id] = team
-        return team
+        vote   = "A" if dist_a <= dist_b else "B"
+
+        votes = self._track_team_votes.setdefault(track_id, {"A": 0, "B": 0})
+        votes[vote] += 1
+        total = votes["A"] + votes["B"]
+
+        # Lock once we have enough votes with a clear margin
+        if total >= self._TEAM_VOTE_LOCK and abs(votes["A"] - votes["B"]) >= self._TEAM_VOTE_MARGIN:
+            winner = "A" if votes["A"] > votes["B"] else "B"
+            self._track_team[track_id] = winner
+            return winner
+
+        # Tentative: return current best guess without locking
+        return vote
 
     def calibrate_teams(
         self, frame: np.ndarray, tracked_players: list[dict]
@@ -1174,6 +1192,7 @@ class JerseyOCR:
         self._team_colors["A"] = centers[0].tolist()
         self._team_colors["B"] = centers[1].tolist()
         self._track_team.clear()
+        self._track_team_votes.clear()
 
         logger.info(
             "Team colors calibrated (%d players, clusters %d+%d): A=%s  B=%s",
@@ -1189,6 +1208,18 @@ class JerseyOCR:
             raise ValueError("team must be 'A' or 'B'")
         self._team_colors[team] = list(hsv_color)
         self._track_team.clear()
+        self._track_team_votes.clear()
+
+    def inherit_team(self, new_tid: int, old_tid: int) -> None:
+        """Copy locked team or accumulated votes from old_tid to new_tid.
+
+        Called when ByteTrack drops a track and re-assigns a new ID to the same
+        physical player, so team colour doesn't flicker for 3 tentative frames.
+        """
+        if old_tid in self._track_team:
+            self._track_team[new_tid] = self._track_team[old_tid]
+        elif old_tid in self._track_team_votes:
+            self._track_team_votes[new_tid] = dict(self._track_team_votes[old_tid])
 
     # ------------------------------------------------------------------
     # Colour helpers

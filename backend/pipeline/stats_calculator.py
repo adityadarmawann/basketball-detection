@@ -170,6 +170,19 @@ class StatsCalculator:
     def get_mvp_ranking(self) -> list:
         return self.get_live_stats()["mvp_ranking"]
 
+    def confirm_player_team(self, track_id: int, team: str) -> None:
+        """Update the team for a track_id confirmed via jersey OCR + roster or K-Means.
+
+        Called by VideoProcessor whenever _last_known_team is set, so that
+        _compute_team_stats() correctly sums pts even when scoring happened before
+        the team was identified (OCR/K-Means lag at the start of the match).
+        """
+        if team not in ("A", "B"):
+            return
+        rec = self._roster.setdefault(track_id, {})
+        rec["team"] = team
+        self._all_tids.add(track_id)
+
     def reset_quarter(self, quarter: int) -> None:
         """Advance the current quarter (per-quarter state is lazy-initialised)."""
         self.current_quarter = quarter

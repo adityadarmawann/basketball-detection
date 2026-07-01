@@ -193,11 +193,13 @@ export default function MpiPage() {
           ))}
         </div>
 
-        {/* Ranking list */}
-        <RankTable
-          entries={rankings[activeRank]}
-          unit={RANK_TABS.find((t) => t.key === activeRank)?.unit}
-        />
+        {/* Ranking list — max 10 rows visible, scroll for more */}
+        <div className="overflow-y-auto max-h-[360px]">
+          <RankTable
+            entries={rankings[activeRank]}
+            unit={RANK_TABS.find((t) => t.key === activeRank)?.unit}
+          />
+        </div>
       </div>
 
       {/* ── MPI detail cards ── */}

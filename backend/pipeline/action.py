@@ -606,20 +606,27 @@ class ActionClassifier:
         actions  = []
 
         # ── Build per-player tensors ─────────────────────────────────────────
+        # Pre-allocate one contiguous numpy array for all players so we avoid
+        # torch.tensor() (copies) and torch.cat() (copies again).
+        # Flow: numpy pre-alloc → fill in-place → from_numpy (zero-copy) → .to(GPU)
+        import numpy as _np
+        N = len(tracked_players)
+        batch_np = _np.empty(
+            (N, _T_VMAE, 3, _INPUT_SIZE, _INPUT_SIZE), dtype=_np.float32
+        )
         valid_players: list = []
-        tensor_list:   list = []
 
-        for player in tracked_players:
+        for i, player in enumerate(tracked_players):
             x1, y1, x2, y2 = [int(v) for v in player.get("bbox", [0, 0, _INPUT_SIZE, _INPUT_SIZE])]
-            t = self._build_input_tensor(frames, x1, y1, x2, y2)  # [1, T, C, H, W]
+            self._fill_input_slice(frames, x1, y1, x2, y2, batch_np[i])
             valid_players.append(player)
-            tensor_list.append(t)
 
         if not valid_players:
             return {"actions": []}
 
         # ── VideoMAE: pixel_values [N, T, C, H, W] ──────────────────────────
-        batch = torch.cat(tensor_list, dim=0).to(device)  # [N, T, C, H, W]
+        # from_numpy shares memory (zero-copy), .to() does one async GPU transfer
+        batch = torch.from_numpy(batch_np).to(device, non_blocking=True)
         if use_half:
             batch = batch.half()
 
@@ -705,45 +712,55 @@ class ActionClassifier:
 
         return {"actions": actions}
 
-    def _build_input_tensor(
+    def _fill_input_slice(
         self,
         frames: list,
         x1: int, y1: int, x2: int, y2: int,
-    ):
+        out,   # np.ndarray [T, C, H, W] — written in-place, no allocation
+    ) -> None:
         """
-        Crop player bbox from every source frame, sample to _T_VMAE frames.
-        Returns FloatTensor [1, T, C, H, W] normalized with ImageNet stats
-        (matches VideoMAEImageProcessor default used during training).
+        Crop+resize+normalize one player's clip directly into a pre-allocated
+        numpy slice. Avoids np.stack, np.transpose, and torch.tensor copies.
         """
-        import torch
         import cv2
         import numpy as np
 
         mean = np.array(_VMAE_MEAN, dtype=np.float32)
         std  = np.array(_VMAE_STD,  dtype=np.float32)
+        sz   = _INPUT_SIZE
 
-        crops = []
-        for frame in frames:
-            h, w = frame.shape[:2]
-            crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
-            if crop.size == 0:
-                crop = np.zeros((_INPUT_SIZE, _INPUT_SIZE, 3), dtype=np.uint8)
-            else:
-                crop = cv2.resize(crop, (_INPUT_SIZE, _INPUT_SIZE), interpolation=cv2.INTER_LINEAR)
-            rgb = crop[:, :, ::-1].astype(np.float32) / 255.0   # BGR→RGB→[0,1]
-            rgb = (rgb - mean) / std
-            crops.append(rgb)
-
-        n = len(crops)
+        # Sample frame indices first so we only process _T_VMAE frames
+        n = len(frames)
         if n >= _T_VMAE:
-            idx   = np.linspace(0, n - 1, _T_VMAE, dtype=int)
-            crops = [crops[i] for i in idx]
+            idx = np.linspace(0, n - 1, _T_VMAE, dtype=int)
         else:
-            crops += [crops[-1]] * (_T_VMAE - n)
+            idx = list(range(n)) + [n - 1] * (_T_VMAE - n)
 
-        arr = np.stack(crops)             # [T, H, W, C]
-        arr = arr.transpose(0, 3, 1, 2)  # [T, C, H, W]  ← VideoMAE expects T first
-        return torch.tensor(arr).unsqueeze(0)  # [1, T, C, H, W]
+        for j, fi in enumerate(idx):
+            frame = frames[fi]
+            fh, fw = frame.shape[:2]
+            crop = frame[max(0, y1):min(fh, y2), max(0, x1):min(fw, x2)]
+            if crop.size == 0:
+                out[j] = 0.0
+                continue
+            if crop.shape[0] != sz or crop.shape[1] != sz:
+                crop = cv2.resize(crop, (sz, sz), interpolation=cv2.INTER_LINEAR)
+            # BGR→RGB, uint8→float32, /255, normalize — write directly to out[j]
+            rgb = crop[:, :, ::-1].astype(np.float32) * (1.0 / 255.0)
+            rgb = (rgb - mean) / std       # [H, W, C]
+            out[j] = rgb.transpose(2, 0, 1)  # [C, H, W]
+
+    def _build_input_tensor(
+        self,
+        frames: list,
+        x1: int, y1: int, x2: int, y2: int,
+    ):
+        """Legacy single-player tensor builder (kept for external callers)."""
+        import torch
+        import numpy as np
+        out = np.empty((_T_VMAE, 3, _INPUT_SIZE, _INPUT_SIZE), dtype=np.float32)
+        self._fill_input_slice(frames, x1, y1, x2, y2, out)
+        return torch.from_numpy(out.copy()).unsqueeze(0)  # [1, T, C, H, W]
 
     # ── SlowFast _build_input_tensor (inactive — kept for reference) ──────────
     # def _build_input_tensor_slowfast(self, frames, x1, y1, x2, y2, T):

@@ -192,7 +192,7 @@ FPS_DEFAULT          = 30
 # Court keypoints: camera moves slowly → run every 30 processed frames
 # Action: SlowFast needs temporal clip, result is stable → run every 20 frames
 # OCR: jersey number is stable once confirmed → run every 30 frames
-PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "4"))   # 4=every 4th frame → 15fps from 60fps source
+PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every 2nd frame → 15fps from 30fps source
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
 POSE_EVERY_N_FRAMES   = int(os.getenv("POSE_EVERY_N",     "2"))   # player pose estimation stride
 OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "15"))   # fallback default; overridden at runtime
@@ -538,12 +538,13 @@ class VideoProcessor:
                 self._tracker.initialize((self._frame_height, self._frame_width, 3))
                 logger.info("Tracker re-initialised at effective fps=%d", _eff_fps)
 
-        # FPS-aware OCR interval: target per-player OCR every ≤16 raw frames (~0.5–1s).
-        # jersey.process() is called every _ocr_interval frames; inside, each player
-        # fires OCR every OCR_SAMPLE_EVERY=4 calls → per-player = 4 × _ocr_interval.
-        # Divisor 6 gives _ocr_interval=4 at 25fps → per-player = 16 frames = 0.64s.
+        # FPS-aware OCR interval: target per-player OCR every ~8 source frames (~0.27s at 30fps).
+        # jersey.process() is called every _ocr_interval processed frames; each player
+        # fires OCR on every process() call (OCR_SAMPLE_EVERY=1).
+        # Divisor 6 gives _raw=5 at 30fps; aligned to PROCESS_STRIDE=2 → _ocr_interval=4
+        # → OCR every 4×2=8 source frames = 0.27s at 30fps.
         # Aligning to PROCESS_STRIDE prevents the lcm-doubling bug where an odd
-        # interval combined with PROCESS_STRIDE=2 makes the modulo never fire.
+        # interval combined with PROCESS_STRIDE makes the modulo never fire.
         _raw = max(PROCESS_STRIDE, int(self._source_fps / 6))
         self._ocr_interval = (_raw // PROCESS_STRIDE) * PROCESS_STRIDE or PROCESS_STRIDE
 

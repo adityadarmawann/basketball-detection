@@ -207,8 +207,7 @@ class CourtMapper:
             return
         dummy = np.zeros((height, width, 3), dtype=np.uint8)
         try:
-            self.model.predict(dummy, verbose=False, conf=0.1,
-                               half=getattr(self, "_use_half", False))
+            self.model.predict(dummy, verbose=False, conf=0.1)
             logger.info("CourtMapper warmup done (%dx%d)", width, height)
         except Exception as e:
             logger.debug("CourtMapper warmup error (non-fatal): %s", e)
@@ -225,8 +224,7 @@ class CourtMapper:
         if self.model is None or frame is None or frame.size == 0:
             return []
 
-        results = self.model.predict(frame, verbose=False, conf=0.1,
-                                     half=getattr(self, "_use_half", False))
+        results = self.model.predict(frame, verbose=False, conf=0.1)
         if not results or results[0].keypoints is None:
             return []
 

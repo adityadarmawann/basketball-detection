@@ -137,7 +137,6 @@ class PoseEstimator:
             self.model.predict(
                 [dummy_crop, dummy_crop], verbose=False,
                 conf=self.conf_threshold,
-                half=getattr(self, "_use_half", False),
             )
             logger.info("PoseEstimator warmup done")
         except Exception as e:
@@ -193,7 +192,6 @@ class PoseEstimator:
                     valid_crops,
                     verbose=False,
                     conf=self.conf_threshold,
-                    half=getattr(self, "_use_half", False),
                 )
             except Exception as exc:
                 logger.warning("Batch pose inference failed: %s", exc)
@@ -288,7 +286,6 @@ class PoseEstimator:
         try:
             results = self.model.predict(
                 crop, verbose=False, conf=self.conf_threshold,
-                half=getattr(self, "_use_half", False),
             )
         except Exception as exc:
             logger.warning("Pose inference failed for bbox %s: %s", bbox, exc)

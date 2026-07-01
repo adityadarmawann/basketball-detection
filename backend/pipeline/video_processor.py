@@ -351,9 +351,13 @@ class VideoProcessor:
         self._output_csv_path:    str  = ""   # player stats CSV
 
         # Threading
-        self._frame_queue = queue.Queue(maxsize=FRAME_QUEUE_MAXSIZE)
-        self._stop_signal = threading.Event()
-        self._executor    = concurrent.futures.ThreadPoolExecutor(max_workers=2,
+        self._frame_queue  = queue.Queue(maxsize=FRAME_QUEUE_MAXSIZE)
+        # Parallel detection: _detection_worker runs GPU detect for frame N while
+        # the main loop runs CPU ByteTrack for frame N-1. maxsize=3 caps the
+        # pre-detected frame buffer so GPU never races too far ahead of CPU.
+        self._detect_queue = queue.Queue(maxsize=3)
+        self._stop_signal  = threading.Event()
+        self._executor     = concurrent.futures.ThreadPoolExecutor(max_workers=2,
                                 thread_name_prefix="pipeline")
 
         # Data buffers
@@ -617,30 +621,39 @@ class VideoProcessor:
         )
         grab_thread.start()
 
+        # Detection thread: runs GPU inference for frame N while the main loop
+        # runs CPU ByteTrack for frame N-1. frame_id/proc_id/ts_ms are computed
+        # inside the worker and arrive pre-packaged via _detect_queue.
+        detect_thread = threading.Thread(
+            target=self._detection_worker,
+            daemon=True, name="detection",
+        )
+        detect_thread.start()
+
         loop     = asyncio.get_event_loop()
-        # frame_id counts SOURCE frames (0, PROCESS_STRIDE, 2×STRIDE, …).
-        # Stride skipping is done in _frame_grabber via cap.grab(); the queue
-        # only contains frames that will be processed — no skip logic needed here.
-        frame_id = 0       # source frame index (steps by PROCESS_STRIDE)
-        proc_id  = 0       # processed frame count (steps by 1)
+        frame_id = 0   # updated from detect_queue each iteration
+        proc_id  = 0
 
         try:
             while not self._stop_signal.is_set():
                 # Non-blocking poll so the event loop stays responsive
                 try:
-                    frame = self._frame_queue.get_nowait()
+                    item = self._detect_queue.get_nowait()
                 except queue.Empty:
                     await asyncio.sleep(0.002)
                     continue
 
-                if frame is None:   # sentinel — video exhausted
+                if item is None:   # sentinel — video exhausted
                     break
 
-                ts_ms = int(frame_id / self._source_fps * 1000)
+                frame, frame_id, proc_id, ts_ms, detections = item
 
-                # Heavy sync pipeline runs off the event loop
+                # Heavy sync pipeline (ByteTrack + OCR + stats) runs off the
+                # event loop. Detection is already done — GPU was running while
+                # the previous frame's CPU work was executing.
                 frame_data = await loop.run_in_executor(
-                    self._executor, self._process_frame, frame, proc_id, ts_ms
+                    self._executor, self._process_frame,
+                    frame, proc_id, ts_ms, detections
                 )
 
                 # Store compact bbox snapshot — used by frontend for time-based replay lookup
@@ -723,10 +736,7 @@ class VideoProcessor:
                                 except Exception as e:
                                     logger.debug("WS jersey_confirmed error: %s", e)
 
-                # Advance source frame index by one stride (grabber already skipped
-                # the in-between frames without decoding them)
-                frame_id += PROCESS_STRIDE
-                proc_id  += 1
+                # frame_id / proc_id come from _detect_queue — already correct
                 self._frame_count = frame_id
                 elapsed = time.perf_counter() - self._start_time
                 self._fps_actual = frame_id / elapsed if elapsed > 0 else 0.0
@@ -756,6 +766,7 @@ class VideoProcessor:
         finally:
             self._stop_signal.set()
             grab_thread.join(timeout=5.0)
+            detect_thread.join(timeout=5.0)
             await self._finalize(match_id)
             logger.info("Processing complete: match=%s  frames=%d  status=%s",
                         match_id, frame_id, self._status)
@@ -830,13 +841,72 @@ class VideoProcessor:
                 except queue.Full:
                     pass
 
+    # ── GPU detection thread ──────────────────────────────────────────────────
+
+    def _detection_worker(self) -> None:
+        """
+        Dedicated GPU detection thread.
+
+        Reads raw frames from _frame_queue, runs YOLO inference, then puts
+        (frame, frame_id, proc_id, ts_ms, detections) into _detect_queue.
+
+        Running detection here lets GPU work on frame N while the main loop
+        runs CPU ByteTrack for frame N-1 — eliminating the sequential GPU→CPU
+        bubble that currently stalls the pipeline between every frame.
+        """
+        frame_id = 0
+        proc_id  = 0
+        try:
+            while not self._stop_signal.is_set():
+                try:
+                    frame = self._frame_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+                if frame is None:   # sentinel from grabber — video exhausted
+                    try:
+                        self._detect_queue.put(None, block=True, timeout=5.0)
+                    except queue.Full:
+                        pass
+                    return
+
+                ts_ms = int(frame_id / max(self._source_fps, 1.0) * 1000)
+
+                detections: dict = {}
+                if self._detector:
+                    try:
+                        detections = self._detector.detect(frame)
+                    except Exception as e:
+                        logger.debug("Detection worker frame %d: %s", frame_id, e)
+
+                try:
+                    self._detect_queue.put(
+                        (frame, frame_id, proc_id, ts_ms, detections),
+                        block=True, timeout=5.0,
+                    )
+                except queue.Full:
+                    self._frames_dropped += 1
+                    logger.debug("detect_queue full — dropped frame %d", frame_id)
+
+                frame_id += PROCESS_STRIDE
+                proc_id  += 1
+
+        except Exception as e:
+            logger.warning("Detection worker crashed: %s", e)
+        finally:
+            try:
+                self._detect_queue.put(None, timeout=2.0)
+            except queue.Full:
+                pass
+
     # ── Per-frame pipeline ────────────────────────────────────────────────────
 
     def _process_frame(
         self,
-        frame:        np.ndarray,
-        frame_id:     int,
-        timestamp_ms: int,
+        frame:                 np.ndarray,
+        frame_id:              int,
+        timestamp_ms:          int,
+        precomputed_detections: Optional[dict] = None,
     ) -> dict:
         """
         Run all pipeline steps synchronously (called via run_in_executor).
@@ -866,12 +936,17 @@ class VideoProcessor:
         _t0 = time.perf_counter()
 
         # ── 1. Detection ──────────────────────────────────────────────────
-        if self._detector:
+        # Normally pre-computed by _detection_worker (GPU ran in parallel while
+        # the previous frame's ByteTrack ran on CPU). Fall back to inline if
+        # the worker is unavailable (e.g. detector not loaded).
+        if precomputed_detections is not None:
+            detections = precomputed_detections
+        elif self._detector:
             try:
                 detections = self._detector.detect(frame)
-                frame_data["detections"] = detections
             except Exception as e:
                 logger.debug("Detector frame %d: %s", frame_id, e)
+        frame_data["detections"] = detections
         _t1 = time.perf_counter()
 
         # ── 2. Tracking ───────────────────────────────────────────────────

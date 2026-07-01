@@ -532,9 +532,12 @@ class VideoProcessor:
                 self._jersey.set_team_reference("A", _hex_to_hsv(jersey_color_a))
                 self._jersey.set_team_reference("B", _hex_to_hsv(jersey_color_b))
                 self._kmeans_calibrated    = True   # skip K-Means, colors already known
-                self._kmeans_disambiguated = False  # still allow roster to swap A↔B if user picked wrong order
+                self._kmeans_disambiguated = True   # trust user-preset colors, no A↔B swap
+                # Swap was previously allowed here but caused wrong flips: single-frame
+                # color read during disambiguation is unreliable (motion blur, occlusion).
+                # User explicitly set A/B colors → trust them as ground truth.
                 logger.info(
-                    "Jersey colors preset from UI — A=%s B=%s → K-Means skipped, swap still enabled",
+                    "Jersey colors preset from UI — A=%s B=%s → K-Means skipped, colors trusted",
                     jersey_color_a, jersey_color_b,
                 )
             except Exception as _e:
@@ -1034,6 +1037,7 @@ class VideoProcessor:
                                             colors = self._jersey._team_colors
                                             colors["A"], colors["B"] = colors["B"], colors["A"]
                                             self._jersey._track_team.clear()
+                                            self._jersey._track_team_votes.clear()
                                             logger.info(
                                                 "Team-color A↔B swapped: jersey #%d belongs to "
                                                 "team %s but color said %s → colors swapped",

@@ -53,8 +53,11 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
         setTotalFrames(total_frames)
         setFps(fps_actual)
 
-        const pct = total_frames > 0 ? Math.round((frames_processed / total_frames) * 100) : 0
-        setProgress(pct)
+        // Frame processing = 0–95%; finalization (DB save, score patch) = 95–99%; done = 100%
+        const framePct = total_frames > 0
+          ? Math.min(95, Math.round((frames_processed / total_frames) * 95))
+          : 0
+        setProgress(framePct)
 
         if (status === 'done') {
           setProgress(100)
@@ -127,11 +130,16 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
   const isError = phase === 'error'
   const isConnecting = phase === 'connecting'
   const isDevMode = phase === 'dev_mode'
+  const isFinalizing = phase === 'scanning' && totalFrames > 0 && framesProcessed >= totalFrames
 
   const etaSeconds =
-    fps > 0 && totalFrames > 0 ? Math.round((totalFrames - framesProcessed) / fps) : null
+    fps > 0 && totalFrames > 0 && !isFinalizing
+      ? Math.round((totalFrames - framesProcessed) / fps)
+      : null
   const etaLabel =
-    etaSeconds !== null
+    isFinalizing
+      ? 'Finalisasi & menyimpan data...'
+      : etaSeconds !== null
       ? etaSeconds > 60
         ? `~${Math.round(etaSeconds / 60)} mnt tersisa`
         : `~${etaSeconds} dtk tersisa`
@@ -181,7 +189,7 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
             <Loader2 size={16} className="text-primary animate-spin" />
           )}
           <span className="text-sm font-bold text-white">
-            {isDone ? 'Analisis Selesai' : 'AI Sedang Menganalisis Video...'}
+            {isDone ? 'Analisis Selesai' : isFinalizing ? 'Menyimpan Hasil Analisis...' : 'AI Sedang Menganalisis Video...'}
           </span>
           {isDevMode && (
             <span className="text-xs px-2 py-0.5 bg-yellow-400/20 text-yellow-300 rounded-full border border-yellow-400/30">
@@ -275,6 +283,8 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
               ? 'Selesai'
               : isDevMode
               ? 'Deteksi jersey + OCR (simulasi)'
+              : isFinalizing
+              ? 'Menyimpan statistik & event ke database...'
               : 'Deteksi YOLO · jersey OCR · tracking · statistik'}
           </span>
           <span className="text-xs font-bold font-mono text-primary">{progress}%</span>

@@ -45,9 +45,10 @@ export const useVideoUpload = () => {
         formData.append('quarter', String(quarter))
       }
 
-      // Jersey colors preset from roster setup — bypass K-Means calibration
-      if (jerseyColorA) formData.append('jersey_color_a', jerseyColorA)
-      if (jerseyColorB) formData.append('jersey_color_b', jerseyColorB)
+      // Jersey colors preset from roster setup — bypass K-Means calibration.
+      // Always send (with fallback to UI defaults) so backend never falls through to K-Means.
+      formData.append('jersey_color_a', jerseyColorA || '#FFFFFF')
+      formData.append('jersey_color_b', jerseyColorB || '#EF4444')
 
       const response = await axios.post(
         `${import.meta.env.VITE_API_URL}/api/upload-video`,

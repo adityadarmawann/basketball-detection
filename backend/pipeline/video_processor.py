@@ -478,10 +478,10 @@ class VideoProcessor:
             try:
                 self._jersey.set_team_reference("A", _hex_to_hsv(jersey_color_a))
                 self._jersey.set_team_reference("B", _hex_to_hsv(jersey_color_b))
-                self._kmeans_calibrated    = True
-                self._kmeans_disambiguated = True  # preset = user already declared A/B, never swap
+                self._kmeans_calibrated    = True   # skip K-Means, colors already known
+                self._kmeans_disambiguated = False  # still allow roster to swap A↔B if user picked wrong order
                 logger.info(
-                    "Jersey colors preset from UI — A=%s B=%s → K-Means + disambiguation skipped",
+                    "Jersey colors preset from UI — A=%s B=%s → K-Means skipped, swap still enabled",
                     jersey_color_a, jersey_color_b,
                 )
             except Exception as _e:
@@ -917,7 +917,9 @@ class VideoProcessor:
                         if self._stats:
                             self._stats.confirm_player_team(tid, confirmed_team)
 
-                        # Disambiguate K-Means clusters using first UNIQUE-team jersey.
+                        # Verify color-to-team assignment using first UNIQUE jersey confirmed
+                        # by the roster. Works for both K-Means clusters and user-preset colors:
+                        # if the color reference maps jersey to the wrong team, swap A↔B.
                         # Only use jersey numbers worn by exactly ONE team — shared
                         # numbers (e.g. #11 in both rosters) give ambiguous signal.
                         if (self._jersey and self._kmeans_calibrated
@@ -927,7 +929,7 @@ class VideoProcessor:
                             jersey_is_unique = other_key not in self._roster
                             if not jersey_is_unique:
                                 logger.debug(
-                                    "K-Means disambiguation skipped: jersey #%d exists in "
+                                    "Team-color disambiguation skipped: jersey #%d exists in "
                                     "both teams — waiting for unique jersey", jersey_num,
                                 )
                             else:
@@ -937,20 +939,20 @@ class VideoProcessor:
                                                  max(0, x1):min(frame.shape[1], x2)]
                                     if crop.size > 0:
                                         self._jersey._track_team.pop(tid, None)
-                                        kmeans_team = self._jersey._classify_team(crop, tid)
-                                        if kmeans_team and kmeans_team != confirmed_team:
+                                        color_team = self._jersey._classify_team(crop, tid)
+                                        if color_team and color_team != confirmed_team:
                                             colors = self._jersey._team_colors
                                             colors["A"], colors["B"] = colors["B"], colors["A"]
                                             self._jersey._track_team.clear()
                                             logger.info(
-                                                "K-Means clusters swapped: jersey #%d unique "
-                                                "to team %s but K-Means said %s → swapped A↔B",
-                                                jersey_num, confirmed_team, kmeans_team,
+                                                "Team-color A↔B swapped: jersey #%d belongs to "
+                                                "team %s but color said %s → colors swapped",
+                                                jersey_num, confirmed_team, color_team,
                                             )
                                         else:
                                             logger.info(
-                                                "K-Means verified: jersey #%d unique to "
-                                                "team %s ✓", jersey_num, confirmed_team,
+                                                "Team-color verified: jersey #%d → team %s ✓",
+                                                jersey_num, confirmed_team,
                                             )
                                         self._kmeans_disambiguated = True
                                         self._team_color_ready.update(("A", "B"))

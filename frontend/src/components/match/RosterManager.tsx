@@ -1,4 +1,4 @@
-import { ChangeEvent, useRef, useState } from 'react'
+import { ChangeEvent, useEffect, useRef, useState } from 'react'
 import { Trash2, Plus, Pencil, Check, X, Camera, Upload } from 'lucide-react'
 import axios, { isAxiosError } from 'axios'
 import { useMatchStore } from '../../store/matchStore'
@@ -73,7 +73,7 @@ function JerseyStrip({ color, onColor, onFile }: JerseyStripProps) {
   const isPreset = JERSEY_SWATCHES.some((s) => s.hex.toLowerCase() === color.toLowerCase())
   return (
     <div className="flex items-center gap-2 flex-wrap py-1.5 px-0.5">
-      <span className="text-[11px] text-text-secondary font-medium shrink-0">Warna jersey:</span>
+      <span className="text-[11px] text-text-secondary font-medium shrink-0">Warna jersey pemain:</span>
       <button type="button" onClick={() => fileRef.current?.click()} title="Upload foto jersey untuk deteksi warna otomatis"
         className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-primary transition-colors">
         <Upload size={12} />
@@ -159,6 +159,14 @@ export default function RosterManager({ matchId, teamA, teamB, onComplete }: Ros
     })
     return map
   })
+
+  // Ensure store always has a color so backend receives it on upload.
+  // Defaults match the visual fallback shown in JerseyStrip.
+  useEffect(() => {
+    if (!jerseyColorA) setJerseyColorA('#FFFFFF')
+    if (!jerseyColorB) setJerseyColorB('#EF4444')
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [uploadingFor, setUploadingFor] = useState<string | null>(null)

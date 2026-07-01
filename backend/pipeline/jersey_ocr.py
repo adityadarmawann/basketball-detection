@@ -275,10 +275,13 @@ class JerseyOCR:
             else:
                 load_path = Path(self.model_path)
 
-            self.model = YOLO(str(load_path))
             if load_path.suffix == ".engine":
-                self._use_half = False  # TRT: precision baked in, half=True reloads engine per call
+                # task="detect" required: manually-built TRT engines have no embedded metadata.
+                # Without it, Ultralytics cannot cache the predictor → engine reload per call.
+                self.model = YOLO(str(load_path), task="detect")
+                self._use_half = False
             else:
+                self.model = YOLO(str(load_path))
                 self.model.to(target)
                 if target.startswith("cuda"):
                     self.model.half()
@@ -362,10 +365,11 @@ class JerseyOCR:
             else:
                 load_path = path
 
-            self._digit_model = YOLO(str(load_path))
             if load_path.suffix == ".engine":
-                self._digit_use_half = False  # TRT: precision baked in, half=True reloads engine per call
+                self._digit_model = YOLO(str(load_path), task="detect")
+                self._digit_use_half = False
             else:
+                self._digit_model = YOLO(str(load_path))
                 self._digit_model.to(target)
                 if target.startswith("cuda"):
                     self._digit_model.half()

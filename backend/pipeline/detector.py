@@ -76,13 +76,14 @@ class BasketballDetector:
             else:
                 load_path = path
 
-            self.model = YOLO(str(load_path))
             if load_path.suffix == ".engine":
-                # TRT engine: precision is baked in at export time.
-                # Passing half=True to predict() causes Ultralytics to reset
-                # the predictor on every call, reloading the engine each time.
+                # TRT engine: engines built via raw TRT API have no embedded metadata
+                # (task, imgsz, names). Without task="detect", Ultralytics cannot cache
+                # the predictor and recreates it on every call → engine reload per frame.
+                self.model = YOLO(str(load_path), task="detect")
                 self._use_half = False
             else:
+                self.model = YOLO(str(load_path))
                 self.model.to(target_device)
                 if target_device.startswith("cuda"):
                     self.model.half()

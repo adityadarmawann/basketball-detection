@@ -422,7 +422,6 @@ class JerseyOCR:
                 # hits a FP16/float32 dtype mismatch on the unfused model.
                 self.model.predict(
                     dummy_frame, verbose=False,
-                    half=getattr(self, "_use_half", False),
                 )
                 self._detect_numbers_fullframe(dummy_frame)
                 logger.info("jersey_no.pt warmup done (%dx%d dummy frame)", width, height)
@@ -717,8 +716,7 @@ class JerseyOCR:
         if self.model is None or frame is None or frame.size == 0:
             return []
         try:
-            det = self.model(frame, conf=0.10, verbose=False,
-                             half=getattr(self, "_use_half", False))
+            det = self.model(frame, conf=0.10, verbose=False)
             boxes = []
             for r in det:
                 for box in r.boxes:
@@ -784,8 +782,7 @@ class JerseyOCR:
             )
 
         try:
-            det = self._digit_model(number_crop, conf=DIGIT_CONF_THRESHOLD, verbose=False,
-                                    half=getattr(self, "_digit_use_half", False))
+            det = self._digit_model(number_crop, conf=DIGIT_CONF_THRESHOLD, verbose=False)
         except Exception as exc:
             logger.debug("YOLO digit model inference error: %s", exc)
             return None
@@ -867,7 +864,6 @@ class JerseyOCR:
                 valid_crops,
                 conf=DIGIT_CONF_THRESHOLD,
                 verbose=False,
-                half=getattr(self, "_digit_use_half", False),
             )
         except Exception as exc:
             logger.debug("Batch digit model inference error: %s", exc)

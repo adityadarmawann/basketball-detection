@@ -149,7 +149,6 @@ class BasketballDetector:
             iou=self.iou_threshold,
             max_det=self.max_det,
             verbose=False,
-            half=getattr(self, "_use_half", False),
         )
 
         parsed = self._parse_results(results)

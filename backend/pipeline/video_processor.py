@@ -16,7 +16,15 @@ import bisect
 import colorsys
 import concurrent.futures
 import csv
-import json
+try:
+    import orjson as _json_lib   # Rust-backed JSON: ~3-5× faster than stdlib
+    def _json_dumps(obj, **kw) -> str:
+        return _json_lib.dumps(obj, default=str).decode()
+except ImportError:
+    import json as _json_lib     # fallback: stdlib json
+    def _json_dumps(obj, **kw) -> str:
+        return _json_lib.dumps(obj, default=str, **kw)
+import json  # still needed for json.loads in a few places
 import logging
 import os
 import queue
@@ -211,6 +219,36 @@ _ACTION_WS_MAP: dict[str, str] = {
 
 def _norm_action(action_str: str) -> str:
     return _ACTION_WS_MAP.get((action_str or "stand").lower(), (action_str or "STAND").upper())
+
+
+def _open_video_cap(video_path: str):
+    """
+    Open a video file preferring NVDEC hardware decode when available.
+
+    NVDEC (h264_cuvid) runs on a dedicated hardware block on NVIDIA GPUs —
+    completely separate from CUDA cores — and decodes H.264 at ~0.5ms/frame
+    vs ~5ms/frame for CPU software decode (10× faster).
+
+    Returns a cap object with a `._nvdec` attribute flag so _frame_grabber
+    knows which code path to use.
+    """
+    try:
+        import ffmpegcv
+        import torch
+        if torch.cuda.is_available():
+            nvdec_cap = ffmpegcv.VideoCapture(
+                video_path, codec="h264_cuvid", pix_fmt="bgr24"
+            )
+            if nvdec_cap.isOpened():
+                nvdec_cap._nvdec = True
+                logger.info("NVDEC hardware decode enabled (ffmpegcv h264_cuvid)")
+                return nvdec_cap
+    except Exception as _e:
+        logger.debug("NVDEC unavailable (%s) — using CPU decode", _e)
+
+    cap = cv2.VideoCapture(video_path)
+    cap._nvdec = False
+    return cap
 
 
 def _hex_to_hsv(hex_color: str) -> list:
@@ -499,7 +537,9 @@ class VideoProcessor:
             except Exception as _e:
                 logger.warning("Failed to apply jersey_color_b '%s': %s", jersey_color_b, _e)
 
-        cap = cv2.VideoCapture(str(video_path))
+        # Try NVDEC hardware decode first (GPU dedicated engine, ~10× faster than CPU).
+        # Falls back to cv2 software decode when ffmpegcv is not installed or GPU unavailable.
+        cap = _open_video_cap(str(video_path))
         if not cap.isOpened():
             self._status = "error"
             logger.error("Cannot open video: %s", video_path)
@@ -705,38 +745,67 @@ class VideoProcessor:
 
     def _frame_grabber(self, cap: cv2.VideoCapture) -> None:
         """
-        Read frames from cv2.VideoCapture.
+        Read frames from the video source.
 
-        Uses cap.grab() (no H.264 decode, ~0.05ms) for stride-skipped frames
-        instead of cap.read() (~3–8ms per frame). For PROCESS_STRIDE=4 this
-        eliminates 75% of video decode cost — the single biggest remaining
-        CPU bottleneck after GPU model optimisation.
+        Two paths:
+        A) ffmpegcv NVDEC (preferred on CUDA) — hardware H.264 decode via GPU
+           NVDEC engine. Decodes every frame at ~0.5ms each vs ~5ms CPU.
+           No grab() optimisation needed; hardware decode is already faster
+           than software grab+skip.
+        B) cv2.VideoCapture (fallback) — uses cap.grab() (no H.264 decode,
+           ~0.05ms) for stride-skipped frames to avoid full software decode
+           on every source frame.
         """
-        # Total grabs before each decode = fps_skip×PROCESS_STRIDE - 1 decoded frame.
-        # fps_skip>1 when source fps > MAX_FPS_PROCESS (e.g. 60fps source → skip=2).
-        _grabs_before_read = self._fps_skip * PROCESS_STRIDE - 1
-        try:
-            while not self._stop_signal.is_set():
-                for _ in range(_grabs_before_read):
-                    if not cap.grab():
-                        self._frame_queue.put(None, block=True, timeout=2.0)
-                        return
+        nvdec_cap = getattr(cap, "_nvdec", False)
 
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                try:
-                    self._frame_queue.put(frame, block=True, timeout=10.0)
-                except queue.Full:
-                    self._frames_dropped += 1
-        except Exception as e:
-            logger.warning("Frame grabber error: %s", e)
-        finally:
-            cap.release()
+        if nvdec_cap:
+            # ── Path A: ffmpegcv NVDEC ───────────────────────────────────────
+            frame_idx = 0
             try:
-                self._frame_queue.put(None, timeout=2.0)
-            except queue.Full:
-                pass
+                while not self._stop_signal.is_set():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    # Only queue every PROCESS_STRIDE-th frame
+                    if frame_idx % PROCESS_STRIDE == 0:
+                        try:
+                            self._frame_queue.put(frame, block=True, timeout=10.0)
+                        except queue.Full:
+                            self._frames_dropped += 1
+                    frame_idx += 1
+            except Exception as e:
+                logger.warning("NVDEC frame grabber error: %s", e)
+            finally:
+                cap.release()
+                try:
+                    self._frame_queue.put(None, timeout=2.0)
+                except queue.Full:
+                    pass
+        else:
+            # ── Path B: cv2 software decode with grab() optimisation ─────────
+            _grabs_before_read = self._fps_skip * PROCESS_STRIDE - 1
+            try:
+                while not self._stop_signal.is_set():
+                    for _ in range(_grabs_before_read):
+                        if not cap.grab():
+                            self._frame_queue.put(None, block=True, timeout=2.0)
+                            return
+
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    try:
+                        self._frame_queue.put(frame, block=True, timeout=10.0)
+                    except queue.Full:
+                        self._frames_dropped += 1
+            except Exception as e:
+                logger.warning("Frame grabber error: %s", e)
+            finally:
+                cap.release()
+                try:
+                    self._frame_queue.put(None, timeout=2.0)
+                except queue.Full:
+                    pass
 
     # ── Per-frame pipeline ────────────────────────────────────────────────────
 
@@ -1154,7 +1223,7 @@ class VideoProcessor:
         if not self._frames_jsonl_path:
             return
         try:
-            line = json.dumps(entry, separators=(',', ':')) + '\n'
+            line = _json_dumps(entry) + '\n'
             with self._jsonl_lock:
                 with open(self._frames_jsonl_path, 'a') as f:
                     f.write(line)
@@ -1359,7 +1428,7 @@ class VideoProcessor:
         if self._redis is None:
             return
         try:
-            payload = json.dumps(data, default=str)
+            payload = _json_dumps(data)
             result = self._redis.publish(f"match:{match_id}", payload)
             # redis.asyncio returns a coroutine; plain redis returns an int
             if asyncio.iscoroutine(result):
@@ -1380,7 +1449,7 @@ class VideoProcessor:
                 "team_a": ts.get("A", {}).get("pts", 0),
                 "team_b": ts.get("B", {}).get("pts", 0),
             }
-            payload = json.dumps(enriched, default=str)
+            payload = _json_dumps(enriched)
             result = self._redis.set(f"stats:{match_id}", payload, ex=ttl)
             if asyncio.iscoroutine(result):
                 await result
@@ -1578,7 +1647,7 @@ class VideoProcessor:
                 with self._jsonl_lock:
                     with open(self._frames_jsonl_path, 'w') as _jfp:
                         for _entry in self._frame_store:
-                            _jfp.write(json.dumps(_entry, separators=(',', ':')) + '\n')
+                            _jfp.write(_json_dumps(_entry) + '\n')
                 logger.info("JSONL stream rewritten with patched scores (%d frames)",
                             len(self._frame_store))
             except Exception as _je:
@@ -1590,7 +1659,7 @@ class VideoProcessor:
             frames_path = os.path.splitext(self._video_path)[0] + f"_q{self._start_quarter}_frames.json"
             try:
                 with open(frames_path, "w") as fp:
-                    fp.write(json.dumps(self._frame_store, separators=(',', ':')))
+                    fp.write(_json_dumps(self._frame_store))
                 self._frames_json_path = frames_path
                 logger.info("Frame store written: %s  entries=%d",
                             frames_path, len(self._frame_store))
@@ -1651,7 +1720,7 @@ class VideoProcessor:
                 # This is the source of truth for "which quarters are done" and
                 # enables cross-quarter stat merging without losing Q1 when Q2 runs.
                 q_key = f"stats:{match_id}:q{self._start_quarter}"
-                result = self._redis.set(q_key, json.dumps(final_stats, default=str),
+                result = self._redis.set(q_key, _json_dumps(final_stats),
                                          ex=86400 * 7)
                 if asyncio.iscoroutine(result):
                     await result

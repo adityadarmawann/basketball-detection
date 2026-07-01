@@ -240,6 +240,21 @@ def _open_video_cap(video_path: str):
                 video_path, codec="h264_cuvid", pix_fmt="bgr24"
             )
             if nvdec_cap.isOpened():
+                # ffmpegcv uses .fps/.width/.height/.count instead of .get().
+                # Patch in a cv2-compatible .get() so the rest of the pipeline
+                # works without changes.
+                _fps    = getattr(nvdec_cap, "fps",    30.0) or 30.0
+                _width  = getattr(nvdec_cap, "width",  1920) or 1920
+                _height = getattr(nvdec_cap, "height", 1080) or 1080
+                _count  = getattr(nvdec_cap, "count",  0)   or 0
+                def _get(prop_id, _f=_fps, _w=_width, _h=_height, _c=_count):
+                    return {
+                        cv2.CAP_PROP_FPS:          _f,
+                        cv2.CAP_PROP_FRAME_WIDTH:  _w,
+                        cv2.CAP_PROP_FRAME_HEIGHT: _h,
+                        cv2.CAP_PROP_FRAME_COUNT:  _c,
+                    }.get(prop_id, 0.0)
+                nvdec_cap.get   = _get
                 nvdec_cap._nvdec = True
                 logger.info("NVDEC hardware decode enabled (ffmpegcv h264_cuvid)")
                 return nvdec_cap

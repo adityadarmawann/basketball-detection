@@ -84,9 +84,16 @@ def export_onnx_to_engine(trt, onnx_path: Path, engine_path: Path, workspace_gb:
             trt.MemoryPoolType.WORKSPACE,
             workspace_gb * (1 << 30),
         )
-        config.set_flag(trt.BuilderFlag.FP16)
 
-        print(f"    Compiling engine (FP16, workspace={workspace_gb}GB) — may take a few minutes ...")
+        # BuilderFlag.FP16 was reorganised in TRT 10/11 — check before setting
+        fp16_flag = getattr(trt.BuilderFlag, "FP16", None)
+        if fp16_flag is not None:
+            config.set_flag(fp16_flag)
+            precision_label = "FP16"
+        else:
+            precision_label = "FP32 (FP16 flag removed in this TRT version)"
+
+        print(f"    Compiling engine ({precision_label}, workspace={workspace_gb}GB) — may take a few minutes ...")
         serialized = builder.build_serialized_network(network, config)
         if serialized is None:
             print("    ✗  Engine build returned None")

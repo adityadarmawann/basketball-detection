@@ -1,12 +1,14 @@
 """
 TensorRT engine export — run ONCE on paul-higo before starting the backend.
 
-  conda activate cl
-  cd ~/Documents/vision-computer/.../smart-vision-cl
+  conda activate cl-gpu
+  cd ~/computer-vision/.../smart-vision-cl/basketball-detection
   python backend/export_tensorrt.py
 
-Exports .pt → .engine for the three YOLO models used in the pipeline.
+Exports .pt → .onnx → .engine for the three YOLO models used in the pipeline.
 Engines are device-specific (RTX 3060 Ti); re-run after driver/TRT updates.
+
+Compatible with TensorRT 10 and 11 (EXPLICIT_BATCH flag removed in TRT 10+).
 """
 
 import os
@@ -16,7 +18,6 @@ from pathlib import Path
 MODELS_DIR = Path(__file__).parent / "models"
 
 # Models to export: (filename, workspace_GB)
-# basketball detector needs more workspace for larger input resolution
 TARGETS = [
     ("jersey_no.pt",              2),
     ("best-detect-num-v2.pt",    2),
@@ -24,48 +25,114 @@ TARGETS = [
 ]
 
 
-def check_tensorrt() -> bool:
+def check_tensorrt():
     try:
-        import tensorrt as trt  # noqa: F401
+        import tensorrt as trt
         print(f"TensorRT found: {trt.__version__}")
-        return True
+        return trt
     except ImportError:
-        print("TensorRT not installed. Run:")
-        print("  pip install tensorrt")
-        print("  # or: pip install nvidia-tensorrt")
-        return False
+        print("TensorRT not installed. Run:  pip install tensorrt")
+        return None
 
 
-def export_model(name: str, workspace_gb: int) -> bool:
-    pt_path   = MODELS_DIR / name
-    eng_path  = MODELS_DIR / name.replace(".pt", ".engine")
-
-    if not pt_path.exists():
-        print(f"  SKIP (not found): {pt_path}")
-        return False
-
-    if eng_path.exists():
-        size_mb = eng_path.stat().st_size / 1e6
-        print(f"  SKIP (already exists, {size_mb:.1f} MB): {eng_path.name}")
+def export_pt_to_onnx(pt_path: Path, onnx_path: Path) -> bool:
+    """Export .pt → .onnx using ultralytics (only the ONNX step, no TRT)."""
+    if onnx_path.exists():
+        size_mb = onnx_path.stat().st_size / 1e6
+        print(f"    ONNX already exists ({size_mb:.1f} MB), skipping export")
         return True
 
-    print(f"  Exporting {name} → {eng_path.name} ...")
+    print(f"    Exporting {pt_path.name} → {onnx_path.name} ...")
     try:
         from ultralytics import YOLO
         model = YOLO(str(pt_path))
-        result = model.export(
-            format="engine",
-            half=True,          # FP16 — matches runtime inference mode
-            device=0,           # GPU 0 (RTX 3060 Ti)
-            workspace=workspace_gb,
-            verbose=False,
-        )
-        size_mb = Path(str(result)).stat().st_size / 1e6
-        print(f"  ✓  {eng_path.name}  ({size_mb:.1f} MB)")
+        result = model.export(format="onnx", half=False, device="cpu", verbose=False)
+        exported = Path(str(result))
+        if not exported.exists():
+            print(f"    ✗  ONNX not found at expected path: {exported}")
+            return False
+        if exported != onnx_path:
+            exported.rename(onnx_path)
+        size_mb = onnx_path.stat().st_size / 1e6
+        print(f"    ✓  {onnx_path.name}  ({size_mb:.1f} MB)")
         return True
     except Exception as exc:
-        print(f"  ✗  Export failed: {exc}")
+        print(f"    ✗  ONNX export failed: {exc}")
         return False
+
+
+def export_onnx_to_engine(trt, onnx_path: Path, engine_path: Path, workspace_gb: int) -> bool:
+    """Convert .onnx → .engine using TensorRT Python API (TRT 10/11 compatible)."""
+    print(f"    Building TRT engine from {onnx_path.name} ...")
+    try:
+        logger  = trt.Logger(trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+
+        # TRT 10+: EXPLICIT_BATCH is always on, no flag needed
+        network = builder.create_network()
+
+        parser = trt.OnnxParser(network, logger)
+        with open(onnx_path, "rb") as f:
+            data = f.read()
+        if not parser.parse(data):
+            errors = [str(parser.get_error(i)) for i in range(parser.num_errors)]
+            print(f"    ✗  ONNX parse failed: {errors}")
+            return False
+
+        config = builder.create_builder_config()
+        config.set_memory_pool_limit(
+            trt.MemoryPoolType.WORKSPACE,
+            workspace_gb * (1 << 30),
+        )
+        config.set_flag(trt.BuilderFlag.FP16)
+
+        print(f"    Compiling engine (FP16, workspace={workspace_gb}GB) — may take a few minutes ...")
+        serialized = builder.build_serialized_network(network, config)
+        if serialized is None:
+            print("    ✗  Engine build returned None")
+            return False
+
+        with open(engine_path, "wb") as f:
+            f.write(serialized)
+
+        size_mb = engine_path.stat().st_size / 1e6
+        print(f"    ✓  {engine_path.name}  ({size_mb:.1f} MB)")
+        return True
+
+    except Exception as exc:
+        print(f"    ✗  TRT engine build failed: {exc}")
+        return False
+
+
+def export_model(trt, name: str, workspace_gb: int) -> bool:
+    pt_path     = MODELS_DIR / name
+    onnx_path   = MODELS_DIR / name.replace(".pt", ".onnx")
+    engine_path = MODELS_DIR / name.replace(".pt", ".engine")
+
+    if engine_path.exists():
+        size_mb = engine_path.stat().st_size / 1e6
+        print(f"  SKIP (engine already exists, {size_mb:.1f} MB): {engine_path.name}")
+        return True
+
+    if not pt_path.exists():
+        print(f"  SKIP (model not found): {pt_path}")
+        return False
+
+    print(f"  [{name}]")
+
+    # Step 1: .pt → .onnx
+    if not export_pt_to_onnx(pt_path, onnx_path):
+        return False
+
+    # Step 2: .onnx → .engine  (TRT 10/11 Python API — no EXPLICIT_BATCH)
+    ok = export_onnx_to_engine(trt, onnx_path, engine_path, workspace_gb)
+
+    # Clean up intermediate .onnx to save disk space
+    if ok and onnx_path.exists():
+        onnx_path.unlink()
+        print(f"    Removed intermediate {onnx_path.name}")
+
+    return ok
 
 
 def main():
@@ -78,14 +145,14 @@ def main():
     print(f"GPU: {gpu_name}")
     print(f"Models dir: {MODELS_DIR.resolve()}\n")
 
-    if not check_tensorrt():
+    trt = check_tensorrt()
+    if trt is None:
         sys.exit(1)
 
     print()
     ok = 0
     for name, ws in TARGETS:
-        print(f"[{name}]")
-        ok += export_model(name, ws)
+        ok += export_model(trt, name, ws)
 
     print(f"\nDone: {ok}/{len(TARGETS)} models exported.")
     if ok == len(TARGETS):

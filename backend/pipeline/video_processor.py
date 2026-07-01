@@ -596,11 +596,12 @@ class VideoProcessor:
         # FPS-aware OCR interval: target per-player OCR every ~8 source frames (~0.27s at 30fps).
         # jersey.process() is called every _ocr_interval processed frames; each player
         # fires OCR on every process() call (OCR_SAMPLE_EVERY=1).
-        # Divisor 6 gives _raw=5 at 30fps; aligned to PROCESS_STRIDE=2 → _ocr_interval=4
-        # → OCR every 4×2=8 source frames = 0.27s at 30fps.
+        # Divisor 8 gives _raw=3 at 30fps; aligned to PROCESS_STRIDE=2 → _ocr_interval=2
+        # → OCR every 2×2=4 source frames = 0.13s at 30fps.
+        # VOTE_THRESHOLD=2 → confirmation in 2×0.13s ≈ 0.27s (fast-moving players).
         # Aligning to PROCESS_STRIDE prevents the lcm-doubling bug where an odd
         # interval combined with PROCESS_STRIDE makes the modulo never fire.
-        _raw = max(PROCESS_STRIDE, int(self._source_fps / 6))
+        _raw = max(PROCESS_STRIDE, int(self._source_fps / 8))
         self._ocr_interval = (_raw // PROCESS_STRIDE) * PROCESS_STRIDE or PROCESS_STRIDE
 
         logger.info("Video: %s  frames=%d  src_fps=%.1f  ocr_interval=%d",

@@ -276,11 +276,13 @@ class JerseyOCR:
                 load_path = Path(self.model_path)
 
             self.model = YOLO(str(load_path))
-            if load_path.suffix != ".engine":
+            if load_path.suffix == ".engine":
+                self._use_half = False  # TRT: precision baked in, half=True reloads engine per call
+            else:
                 self.model.to(target)
                 if target.startswith("cuda"):
                     self.model.half()
-            self._use_half = target.startswith("cuda")
+                self._use_half = target.startswith("cuda")
 
             # Find "number" class index in the loaded model
             for idx, name in self.model.names.items():
@@ -361,11 +363,13 @@ class JerseyOCR:
                 load_path = path
 
             self._digit_model = YOLO(str(load_path))
-            if load_path.suffix != ".engine":
+            if load_path.suffix == ".engine":
+                self._digit_use_half = False  # TRT: precision baked in, half=True reloads engine per call
+            else:
                 self._digit_model.to(target)
                 if target.startswith("cuda"):
                     self._digit_model.half()
-            self._digit_use_half = target.startswith("cuda")
+                self._digit_use_half = target.startswith("cuda")
             logger.info(
                 "best-detect-num-v2.pt loaded on %s (classes: %s)",
                 target,

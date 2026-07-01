@@ -77,11 +77,16 @@ class BasketballDetector:
                 load_path = path
 
             self.model = YOLO(str(load_path))
-            if not load_path.suffix == ".engine":
+            if load_path.suffix == ".engine":
+                # TRT engine: precision is baked in at export time.
+                # Passing half=True to predict() causes Ultralytics to reset
+                # the predictor on every call, reloading the engine each time.
+                self._use_half = False
+            else:
                 self.model.to(target_device)
                 if target_device.startswith("cuda"):
                     self.model.half()
-            self._use_half = target_device.startswith("cuda")
+                self._use_half = target_device.startswith("cuda")
 
             # Sync class name list from model metadata when available
             if hasattr(self.model, "names") and self.model.names:

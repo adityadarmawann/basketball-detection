@@ -775,14 +775,18 @@ class VideoProcessor:
 
         if nvdec_cap:
             # ── Path A: ffmpegcv NVDEC ───────────────────────────────────────
+            # Match cv2 path frame selection: skip (PROCESS_STRIDE-1) frames,
+            # then queue the next — so both paths process the same source frames.
             frame_idx = 0
             try:
                 while not self._stop_signal.is_set():
                     ret, frame = cap.read()
                     if not ret:
                         break
-                    # Only queue every PROCESS_STRIDE-th frame
-                    if frame_idx % PROCESS_STRIDE == 0:
+                    # Queue every PROCESS_STRIDE-th frame starting from index
+                    # (PROCESS_STRIDE-1), matching cv2 path which grabs
+                    # PROCESS_STRIDE-1 frames then reads the next.
+                    if frame_idx % PROCESS_STRIDE == (PROCESS_STRIDE - 1):
                         try:
                             self._frame_queue.put(frame, block=True, timeout=10.0)
                         except queue.Full:

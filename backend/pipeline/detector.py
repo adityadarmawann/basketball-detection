@@ -68,10 +68,19 @@ class BasketballDetector:
                 target_device = "cpu"
                 logger.info("No GPU — running detector on CPU")
 
-            self.model = YOLO(str(path))
-            self.model.to(target_device)
-            if target_device.startswith("cuda"):
-                self.model.half()   # FP16 weights → Tensor Core acceleration
+            # Prefer TensorRT engine when on CUDA (2-4× faster than FP16 PyTorch)
+            engine_path = path.with_suffix(".engine")
+            if target_device.startswith("cuda") and engine_path.exists():
+                load_path = engine_path
+                logger.info("TensorRT engine found — loading %s", engine_path.name)
+            else:
+                load_path = path
+
+            self.model = YOLO(str(load_path))
+            if not load_path.suffix == ".engine":
+                self.model.to(target_device)
+                if target_device.startswith("cuda"):
+                    self.model.half()
             self._use_half = target_device.startswith("cuda")
 
             # Sync class name list from model metadata when available
@@ -82,7 +91,7 @@ class BasketballDetector:
                 ]
 
             logger.info("Loaded detector model: %s (device=%s, fp16=%s)",
-                        path.name, target_device, self._use_half)
+                        load_path.name, target_device, self._use_half)
 
         except ImportError as exc:
             raise ImportError(

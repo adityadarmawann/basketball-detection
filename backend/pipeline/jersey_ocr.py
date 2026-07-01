@@ -266,10 +266,20 @@ class JerseyOCR:
             from ultralytics import YOLO
 
             target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
-            self.model = YOLO(str(path))
-            self.model.to(target)
-            if target.startswith("cuda"):
-                self.model.half()   # FP16 on Tensor Cores → ~2x faster on RTX
+
+            # Prefer TensorRT engine when on CUDA (2-4× faster than FP16 PyTorch)
+            engine_path = Path(self.model_path).with_suffix(".engine")
+            if target.startswith("cuda") and engine_path.exists():
+                load_path = engine_path
+                logger.info("TensorRT engine found — loading %s", engine_path.name)
+            else:
+                load_path = Path(self.model_path)
+
+            self.model = YOLO(str(load_path))
+            if load_path.suffix != ".engine":
+                self.model.to(target)
+                if target.startswith("cuda"):
+                    self.model.half()
             self._use_half = target.startswith("cuda")
 
             # Find "number" class index in the loaded model
@@ -341,10 +351,20 @@ class JerseyOCR:
             from ultralytics import YOLO
 
             target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
-            self._digit_model = YOLO(str(path))
-            self._digit_model.to(target)
-            if target.startswith("cuda"):
-                self._digit_model.half()   # FP16 → faster on Tensor Cores
+
+            # Prefer TensorRT engine when on CUDA
+            engine_path = path.with_suffix(".engine")
+            if target.startswith("cuda") and engine_path.exists():
+                load_path = engine_path
+                logger.info("TensorRT engine found — loading %s", engine_path.name)
+            else:
+                load_path = path
+
+            self._digit_model = YOLO(str(load_path))
+            if load_path.suffix != ".engine":
+                self._digit_model.to(target)
+                if target.startswith("cuda"):
+                    self._digit_model.half()
             self._digit_use_half = target.startswith("cuda")
             logger.info(
                 "best-detect-num-v2.pt loaded on %s (classes: %s)",

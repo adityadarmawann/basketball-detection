@@ -19,6 +19,13 @@ const getEventIcon = (eventType: string) => {
 }
 
 function normalizeEvent(e: Record<string, unknown>): GameEvent {
+  // Derive MM:SS from timestamp_ms when game_clock is missing (MongoDB-stored events)
+  const tsMs = Number(e.timestamp_ms ?? 0)
+  const elapsedSec = tsMs / 1000
+  const computedClock = tsMs > 0
+    ? `${String(Math.floor(elapsedSec / 60)).padStart(2, '0')}:${String(Math.floor(elapsedSec % 60)).padStart(2, '0')}`
+    : ''
+
   return {
     type: 'event',
     eventType: (e.event_type ?? e.eventType ?? 'FGA') as GameEvent['eventType'],
@@ -28,7 +35,7 @@ function normalizeEvent(e: Record<string, unknown>): GameEvent {
     team: (e.team ?? '') as 'A' | 'B' | '',
     points: e.points as number | undefined,
     quarter: Number(e.quarter ?? 1),
-    gameClock: String(e.game_clock ?? e.gameClock ?? ''),
+    gameClock: String(e.game_clock ?? e.gameClock ?? computedClock),
     courtPos: (e.court_pos ?? e.courtPos ?? [0, 0]) as [number, number],
   }
 }

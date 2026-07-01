@@ -88,9 +88,11 @@ export const useWebSocket = () => {
 
   const handleFrameUpdate = useCallback((frame: FrameUpdate) => {
     const s = useMatchStore.getState()
-    // When video is the source of truth (frameData binary search drives score/time),
-    // skip WS overrides so clock/score freeze correctly when video is paused.
-    if (!s.isVideoMode) {
+    // Block WS score/quarter/clock only when video replay is actively driving them
+    // (analysis done, step='live', frameData loaded). During analysis (isLive=true)
+    // or on the 'analyzing' step, always update from WS even when isVideoMode=true.
+    const videoIsLeading = s.isVideoMode && !s.isLive && s.matchStep === 'live'
+    if (!videoIsLeading) {
       s.setScore(frame.score.teamA, frame.score.teamB)
       s.setQuarter(frame.quarter)
       s.setGameClock(frame.gameClock)

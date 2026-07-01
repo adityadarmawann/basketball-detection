@@ -252,10 +252,15 @@ export function useMatchStats(
         .filter((p) => p.team === 'B')
         .reduce((s, p) => s + p.pts, 0)
       const cur = useMatchStore.getState()
-      // In replay mode (isLive=false) score is driven by video position via
-      // handleVideoTimeUpdate — don't let the stats poll override it.
-      if (cur.isLive && (ptsA > cur.teamA.score || ptsB > cur.teamB.score)) {
-        setScore(Math.max(ptsA, cur.teamA.score), Math.max(ptsB, cur.teamB.score))
+      if (cur.isLive) {
+        // Live: score can only go up (never decrease mid-match).
+        if (ptsA > cur.teamA.score || ptsB > cur.teamB.score) {
+          setScore(Math.max(ptsA, cur.teamA.score), Math.max(ptsB, cur.teamB.score))
+        }
+      } else if (!cur.isVideoMode && (ptsA > 0 || ptsB > 0)) {
+        // Post-analysis (not live, video not actively driving score): update from API
+        // so the scoreboard shows the correct final score when user reloads the page.
+        setScore(ptsA, ptsB)
       }
     } else {
       // Non-fatal — fall through to store data

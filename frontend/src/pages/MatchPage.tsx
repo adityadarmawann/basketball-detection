@@ -215,8 +215,6 @@ export default function MatchPage() {
 
   const handleAnalysisComplete = useCallback(async () => {
     disconnect()              // stop WS & mock — analysis is done, no more live frames
-    store.setScore(0, 0)      // reset so video playback drives score from 0
-    store.setQuarter(1)
     setStep('live')
     setOverlayLoading(true)
     const { matchId } = useMatchStore.getState()
@@ -228,7 +226,13 @@ export default function MatchPage() {
         fetchUploadedQuarters(matchId),
       ])
       if (framesRes.status === 'fulfilled' && Array.isArray(framesRes.value.data) && framesRes.value.data.length > 0) {
-        setFrameData(framesRes.value.data)
+        const frames = framesRes.value.data
+        setFrameData(frames)
+        // Show final score from last analyzed frame — video playback will update
+        // score as user scrubs/plays, but scoreboard starts at the correct final value.
+        const last = frames[frames.length - 1]
+        if (last?.sc) store.setScore(last.sc[0], last.sc[1])
+        if (last?.q != null) store.setQuarter(last.q)
       }
     } catch {
       // Expected in dev mode or when backend is unavailable

@@ -1522,7 +1522,11 @@ class VideoProcessor:
         if self._mongo_db is None:
             return
         try:
-            doc = {**event, "match_id": match_id, "saved_at": time.time()}
+            ts_ms     = event.get("timestamp_ms", 0)
+            elapsed_s = ts_ms / 1000.0
+            game_clock = f"{int(elapsed_s // 60):02d}:{int(elapsed_s % 60):02d}"
+            doc = {**event, "match_id": match_id, "saved_at": time.time(),
+                   "game_clock": game_clock}
             self._mongo_db["events"].insert_one(doc)   # pymongo is sync — no await
         except Exception as e:
             logger.warning("MongoDB write error: %s", e)

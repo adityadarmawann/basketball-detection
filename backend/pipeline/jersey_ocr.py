@@ -34,8 +34,8 @@ DIGIT_CONF_THRESHOLD   = 0.15   # minimum per-digit detection confidence
                                  # voting + roster whitelist handle noise; low threshold
                                  # catches distant/angled digits that would otherwise be missed
 
-VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
-                             # at ocr_interval=4 (0.27s), 2 votes ≈ 0.54s — faster for fast-moving players
+VOTE_THRESHOLD        = 3    # OCR reads required to confirm a jersey number
+                             # at ocr_interval=2 (0.13s), 3 votes ≈ 0.4s — fast enough, reduces misread lock
                              # to 1-2 stray misreads from fast player movement
 MAX_VOTE_HISTORY      = 20   # rolling window — 20 reads per player (OCR_SAMPLE_EVERY=1)
                              # smaller window lets wrong reads be forgotten faster
@@ -553,7 +553,7 @@ class JerseyOCR:
                         if ratio > best_ratio:
                             best_ratio = ratio
                             best_match = (nx1f, ny1f, nx2f, ny2f)
-                if best_match and best_ratio >= 0.35:
+                if best_match and best_ratio >= 0.25:
                     nx1f, ny1f, nx2f, ny2f = best_match
                     pad = 10
                     nc  = frame[

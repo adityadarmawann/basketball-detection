@@ -864,6 +864,11 @@ class VideoProcessor:
                     continue
 
                 if frame is None:   # sentinel from grabber — video exhausted
+                    # frame_id now equals the actual total source frames decoded.
+                    # NVDEC container metadata often under-reports; update so that
+                    # get_progress() reports 100% correctly when processing finishes.
+                    if frame_id > self._total_frames:
+                        self._total_frames = frame_id
                     try:
                         self._detect_queue.put(None, block=True, timeout=5.0)
                     except queue.Full:
@@ -2251,9 +2256,13 @@ class VideoProcessor:
         return self._current_quarter
 
     def get_progress(self) -> dict:
+        # NVDEC container metadata can under-report frame count; cap display
+        # so progress never exceeds 100% and ETA never goes negative.
+        total = self._total_frames
+        count = min(self._frame_count, total) if total > 0 else self._frame_count
         return {
-            "frames_processed": self._frame_count,
-            "total_frames":     self._total_frames,
+            "frames_processed": count,
+            "total_frames":     total,
             "fps_actual":       round(self._fps_actual, 2),
             "fps_dropped":      self._frames_dropped,
             "status":           self._status,

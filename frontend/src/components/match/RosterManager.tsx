@@ -160,13 +160,9 @@ export default function RosterManager({ matchId, teamA, teamB, onComplete }: Ros
     return map
   })
 
-  // Ensure store always has a color so backend receives it on upload.
-  // Defaults match the visual fallback shown in JerseyStrip.
-  useEffect(() => {
-    if (!jerseyColorA) setJerseyColorA('#FFFFFF')
-    if (!jerseyColorB) setJerseyColorB('#EF4444')
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // NOTE: jersey colors are intentionally NOT auto-initialized here.
+  // Store stays '' until user explicitly picks a color. Visual placeholder
+  // (#FFFFFF / #EF4444) is handled via the color prop fallback in JerseyStrip.
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [uploadingFor, setUploadingFor] = useState<string | null>(null)

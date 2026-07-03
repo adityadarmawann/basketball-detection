@@ -114,7 +114,13 @@ class PlayerTracker:
             from boxmot.trackers.botsort.bot_sort import BoTSORT
 
             if self.tracker_type == "bytetrack":
-                return BYTETracker(track_buffer=100, frame_rate=self.frame_rate, match_thresh=0.6)
+                # match_thresh is an IoU DISTANCE threshold (1 - IoU), not similarity.
+                # 0.8 → match when IoU ≥ 0.2 (very lenient — fast-moving players survive).
+                # Default was 0.6 → IoU ≥ 0.4; lowering to 0.3 was wrong (IoU ≥ 0.7, stricter).
+                #
+                # buffer_size = int(frame_rate / 30 * track_buffer). At 15fps effective:
+                # track_buffer=450 → buffer_size = int(15/30*450) = 225 frames = 15 s of memory.
+                return BYTETracker(track_buffer=450, frame_rate=self.frame_rate, match_thresh=0.8)
             else:  # botsort
                 return BoTSORT(
                     model_weights=None, device="cpu", fp16=False,

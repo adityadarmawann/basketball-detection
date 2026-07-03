@@ -54,6 +54,9 @@ REBOUND_COOLDOWN_F     = 20
 
 BLOCK_DIST_PX          = 60
 BLOCK_DIST_M           = 1.0
+BLK_COOLDOWN_F         = 45     # frames before another BLK can fire (same as FG)
+BLK_SHOT_WINDOW_F      = 20     # Path-1 BLK only fires when shot attempt ≤ 20 frames ago
+BLK_PATH2_WINDOW_F     = 12     # Path-2 proximity check extends to 12 frames after shot
 
 STEAL_DIST_PX          = 150    # generous — needs 2-player proximity
 STEAL_DIST_M           = 2.5
@@ -133,6 +136,7 @@ class EventEngine:
 
         # ── Block state ───────────────────────────────────────────────────
         self._shot_defender: Optional[int] = None
+        self._blk_cooldown:  int           = 0
 
         # ── Steal / TOV state ─────────────────────────────────────────────
         self._prev_poss_player: Optional[int] = None
@@ -202,6 +206,7 @@ class EventEngine:
         # ── Tick cooldowns ────────────────────────────────────────────────
         self._fg_cooldown      = max(0, self._fg_cooldown - 1)
         self._rebound_cooldown = max(0, self._rebound_cooldown - 1)
+        self._blk_cooldown     = max(0, self._blk_cooldown - 1)
 
         # ── Record ball trajectory ────────────────────────────────────────
         ball_pos = self._ball_pos(ball, is_court)
@@ -263,6 +268,16 @@ class EventEngine:
                     if near:
                         is_shoot = True
             if is_shoot:
+                # Don't overwrite an already-active shot within its TTL window.
+                # Two players jumping near the basket in the same frame (e.g. tip-off,
+                # contested rebound) would otherwise mis-attribute the FG to the second
+                # player processed in the loop instead of the actual shooter.
+                active_shot = (
+                    self._last_shooter_id is not None
+                    and self.frame_count - self._shot_attempt_frame <= FG_SHOOTER_TTL_F
+                )
+                if active_shot:
+                    continue
                 self._last_shooter_id    = tid
                 self._shot_attempt_frame = self.frame_count
                 self._fg_miss_emitted    = False
@@ -789,24 +804,30 @@ class EventEngine:
           1. Action classifier returns BLOCK label directly.
           2. A SHOOT fires and an opposing player is within block-distance.
         """
-        # Path 1 — direct from classifier
-        for act in actions:
-            if act.get("action", "").upper() == "BLOCK":
-                tid = act["track_id"]
-                p   = next((x for x in players if x["track_id"] == tid), None)
-                if p:
-                    return {
-                        "type":      "BLK",
-                        "track_id":  tid,
-                        "quarter":   quarter,
-                        "team":      p.get("team", ""),
-                        "timestamp_ms": ts_ms,
-                    }
+        # Path 1 — action classifier says "Block".
+        # Gate: cooldown + active shot attempt within BLK_SHOT_WINDOW_F frames.
+        # Without the gate, any dribble direction-change + 5% bbox overlap fires a BLK.
+        if self._blk_cooldown == 0:
+            frames_since_shot = self.frame_count - self._shot_attempt_frame
+            if self._last_shooter_id is not None and frames_since_shot <= BLK_SHOT_WINDOW_F:
+                for act in actions:
+                    if act.get("action", "").upper() == "BLOCK":
+                        tid = act["track_id"]
+                        p   = next((x for x in players if x["track_id"] == tid), None)
+                        if p and p.get("team") != self._last_shooter_team:
+                            self._blk_cooldown = BLK_COOLDOWN_F
+                            return {
+                                "type":      "BLK",
+                                "track_id":  tid,
+                                "quarter":   quarter,
+                                "team":      p.get("team", ""),
+                                "timestamp_ms": ts_ms,
+                            }
 
-        # Path 2 — proximity at shot moment
+        # Path 2 — proximity at shot moment (extended to BLK_PATH2_WINDOW_F frames).
         if (
             self._last_shooter_id is not None
-            and self.frame_count - self._shot_attempt_frame <= 3
+            and self.frame_count - self._shot_attempt_frame <= BLK_PATH2_WINDOW_F
         ):
             shooter = next(
                 (p for p in players if p["track_id"] == self._last_shooter_id),
@@ -1001,6 +1022,7 @@ class EventEngine:
         self._last_shooter_team  = None
         self._pass_frame         = -999
         self._shot_defender      = None
+        self._blk_cooldown       = 0
         self._prev_poss_player   = None
         self._prev_poss_team     = None
         self._contact_frames     = {}

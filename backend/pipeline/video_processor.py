@@ -1184,6 +1184,31 @@ class VideoProcessor:
             if synthetic_hoops:
                 frame_data.setdefault("detections", {})["hoops"] = synthetic_hoops
 
+        # When court is NOT calibrated and exactly 1 hoop was detected this frame,
+        # add a pixel-space mirror so the opposite basket is also covered.
+        # Full-court cameras often only reliably detect the near hoop; the far hoop
+        # (where the other team attacks) stays invisible → near-zero SHOT_ATTEMPs
+        # for the away team. Mirroring (x → frame_width - x) is a good approximation
+        # when the camera captures both ends roughly symmetrically.
+        if (
+            self._frame_width > 0
+            and not frame_data.get("court", {}).get("is_calibrated")
+        ):
+            cur_hoops = frame_data.get("detections", {}).get("hoops", [])
+            if len(cur_hoops) == 1:
+                h = cur_hoops[0]
+                cx = cy = None
+                if h.get("center") and len(h["center"]) >= 2:
+                    cx, cy = h["center"][0], h["center"][1]
+                elif h.get("bbox") and len(h["bbox"]) == 4:
+                    b = h["bbox"]
+                    cx = (b[0] + b[2]) / 2
+                    cy = (b[1] + b[3]) / 2
+                if cx is not None and cy is not None:
+                    frame_data["detections"]["hoops"].append(
+                        {"center": [self._frame_width - cx, cy], "confidence": 0.0}
+                    )
+
         if self._events_engine:
             try:
                 events = self._events_engine.process(frame_data)

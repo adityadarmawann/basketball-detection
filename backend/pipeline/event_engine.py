@@ -237,8 +237,12 @@ class EventEngine:
         # classifies shooting as jump_action instead of Shoot.
         SHOT_AREA_M  = 5.5   # metres from hoop to count a jump as shot attempt
         SHOT_AREA_PX = 200   # pixels from hoop (pixel mode)
-        # Pixel-space hoop candidates: detected this frame + last-seen cache
-        px_hoops = hoops or self._last_hoops_px
+        # Pixel-space hoop candidates: detected this frame + last-seen cache.
+        # Apply same staleness gate as FG detection so dead-camera hoop positions
+        # don't silently inflate JUMP→SHOOT promotions after a camera pan.
+        px_hoops = hoops or (
+            self._last_hoops_px if self._hoop_cache_age <= FG_HOOP_CACHE_TTL else []
+        )
         for act in actions:
             raw_act = act.get("action", "").upper()
             is_shoot = raw_act in ("SHOOT", "SHOOTING")

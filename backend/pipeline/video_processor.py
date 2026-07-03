@@ -19,7 +19,13 @@ import csv
 try:
     import orjson as _json_lib   # Rust-backed JSON: ~3-5× faster than stdlib
     def _json_dumps(obj, **kw) -> str:
-        return _json_lib.dumps(obj, default=str).decode()
+        # OPT_NON_STR_KEYS: player_stats uses int track_id as dict keys;
+        # without this orjson raises TypeError and silently kills Redis writes.
+        return _json_lib.dumps(
+            obj,
+            option=_json_lib.OPT_NON_STR_KEYS,
+            default=str,
+        ).decode()
 except ImportError:
     import json as _json_lib     # fallback: stdlib json
     def _json_dumps(obj, **kw) -> str:
@@ -1051,7 +1057,7 @@ class VideoProcessor:
                 )
                 frame_data["jersey"] = jersey
             except Exception as e:
-                logger.debug("Jersey OCR frame %d: %s", frame_id, e)
+                logger.error("Jersey OCR frame %d: %s", frame_id, e)
         _t5 = time.perf_counter()
 
         # ── Annotate tracked_players with team ───────────────────────────────────
@@ -1542,7 +1548,7 @@ class VideoProcessor:
             if asyncio.iscoroutine(result):
                 await result
         except Exception as e:
-            logger.debug("Redis publish error: %s", e)
+            logger.error("Redis publish error: %s", e)
 
     async def _set_redis_stats(self, match_id: str, stats: dict, ttl: int = 3600) -> None:
         """Write stats snapshot to Redis key stats:{match_id} for REST polling (no-op if redis absent)."""
@@ -1562,7 +1568,7 @@ class VideoProcessor:
             if asyncio.iscoroutine(result):
                 await result
         except Exception as e:
-            logger.debug("Redis stats set error: %s", e)
+            logger.error("Redis stats set error: %s", e)
 
     async def _merge_all_quarters(self, match_id: str) -> dict:
         """
@@ -1605,7 +1611,7 @@ class VideoProcessor:
                                     entry.get("total_stats", {}).get(field, 0) + val
                                 )
             except Exception as exc:
-                logger.debug("Merge q%d error: %s", q, exc)
+                logger.error("Merge q%d error: %s", q, exc)
 
         if not by_player:
             return latest_blob or {}
@@ -1846,7 +1852,7 @@ class VideoProcessor:
                     "output_csv_path":   self._output_csv_path   or None,
                 })
             except Exception as e:
-                logger.debug("Redis finalize error: %s", e)
+                logger.error("Redis finalize error: %s", e)
 
         self._executor.shutdown(wait=False)
 

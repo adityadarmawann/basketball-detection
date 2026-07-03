@@ -1172,10 +1172,15 @@ class VideoProcessor:
                     # K-Means jersey-color classification is the primary signal.
                     # Jersey number is used ONLY to look up the player's NAME within
                     # the already-color-determined team — it NEVER overrides the team.
-                    # Priority: in-dict value → sticky cache → current-frame color map
-                    color_team = (player.get("team")
-                                  or self._last_known_team.get(tid, "")
-                                  or jersey_color_map.get(tid, ""))
+                    # Priority after K-Means calibrated: current K-Means result wins over
+                    # stale pre-calibration cache (cache may be wrong when same jersey
+                    # number exists on both teams and roster fallback guessed wrong team).
+                    # Before K-Means: sticky cache → color map → nothing.
+                    if self._kmeans_calibrated and jersey_color_map.get(tid):
+                        color_team = jersey_color_map[tid]
+                    else:
+                        color_team = (self._last_known_team.get(tid, "")
+                                      or jersey_color_map.get(tid, ""))
 
                     # ── K-Means orientation via unique jerseys (no user hints) ───
                     # Fires only until _kmeans_disambiguated is set.

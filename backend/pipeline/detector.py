@@ -228,7 +228,7 @@ class BasketballDetector:
 
 def create_detector(
     models_path: Optional[str] = None,
-    conf_threshold: float = 0.5,
+    conf_threshold: float = float(os.getenv("DETECTOR_CONF", "0.4")),
     iou_threshold: float = 0.45,
 ) -> BasketballDetector:
     """Factory — create and load a BasketballDetector in one call."""

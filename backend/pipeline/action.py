@@ -43,6 +43,8 @@ ACTION_NAMES: dict[int, str] = {
     3: "Catch",
     4: "Steal",
     5: "jump_action",   # raw model output — resolved by resolve_jump_action()
+    6: "Walk",          # rule-based only (model has no walk class)
+    7: "Run",           # rule-based only (model has no run class)
 }
 ACTION_IDS: dict[str, int] = {v: k for k, v in ACTION_NAMES.items()}
 STAND = "Stand"
@@ -55,6 +57,7 @@ BALL_PROXIMITY_NEAR       = 150.0  # pixels — dribble/catch/possession zone (w
 BALL_PROXIMITY_FAR        = 250.0  # pixels — rebound zone (was 150)
 PASS_BALL_SPEED           = 3.5    # pixels/frame — minimum speed to call pass (was 5)
 PLAYER_SPEED_THRESHOLD    = 0.8    # pixels/frame — "player is moving" (was 1.5)
+RUN_SPEED_THRESHOLD       = 5.0    # pixels/frame — "player is running" (walk: 0.8–5.0)
 BLOCK_IOU_THRESHOLD       = 0.20   # bounding-box IoU — physical overlap for block (0.05 was too low: any proximity triggered it)
 STEAL_IOU_THRESHOLD       = 0.05   # bounding-box IoU — overlap for steal
 HOOP_PROXIMITY_THRESHOLD  = 200.0  # pixels — ball near ring/backboard (was 120)
@@ -64,8 +67,8 @@ RULE_CONFIDENCE  = 0.6    # all rule-based outputs flagged as estimates
 SHOOT_CONFIDENCE = 0.85   # from pose.py shooting detection
 
 MODEL_BUFFER_MIN = 16  # minimum frames before model runs
-MODEL_CONF_MIN   = 0.15  # minimum softmax confidence to accept model prediction; below → rule-based
-                         # 6 classes → uniform baseline ≈ 0.167, so 0.15 accepts most model outputs
+MODEL_CONF_MIN   = 0.25  # minimum softmax confidence to accept model prediction; below → rule-based
+                         # 6 classes → uniform baseline ≈ 0.167; 0.25 = ~1.5× baseline (meaningful signal)
 _INPUT_SIZE      = 224   # spatial resize for model input
 
 # ── VideoMAE constants ───────────────────────────────────────────────────────
@@ -519,6 +522,11 @@ class ActionClassifier:
         if jump_h or is_reb or is_block:
             return "jump_action", 5, RULE_CONFIDENCE
 
+        player_speed = self._player_speeds.get(track_id, 0.0)
+        if player_speed >= RUN_SPEED_THRESHOLD:
+            return "Run", 7, RULE_CONFIDENCE
+        elif player_speed >= PLAYER_SPEED_THRESHOLD:
+            return "Walk", 6, RULE_CONFIDENCE
         return STAND, -1, 0.5
 
     def _is_ball_moving_away(self, player_center: list, ball_center: list) -> bool:
@@ -702,6 +710,31 @@ class ActionClassifier:
                     self._tracked_players, self._ball_direction_history,
                 )
 
+            # ── Stand / Walk / Run gate ──────────────────────────────────────
+            # The model has no stand/walk/run class — walking and running
+            # players often get classified as jump_action → "Jump".
+            # Gate: if resolved action is "Jump" but no pose jump signal and
+            # ball is far, override to Stand/Walk/Run based on player speed.
+            if action_str == "Jump":
+                ball_info_now = getattr(self, "_last_ball_info", None)
+                ball_center   = ball_info_now.get("center") if ball_info_now else None
+                player_center = player.get("center", [0, 0])
+                ball_far = (ball_center is None or
+                            _dist(player_center, ball_center) > BALL_PROXIMITY_FAR)
+                pose_d   = self._get_pose_data(track_id, {}) or {}
+                jump_h   = pose_d.get("jump_height_px", 0.0)
+                if ball_far and jump_h < JUMP_HEIGHT_THRESHOLD:
+                    player_speed = self._player_speeds.get(track_id, 0.0)
+                    if player_speed >= RUN_SPEED_THRESHOLD:
+                        action_str = "Run"
+                        action_id  = 7
+                    elif player_speed >= PLAYER_SPEED_THRESHOLD:
+                        action_str = "Walk"
+                        action_id  = 6
+                    else:
+                        action_str = STAND
+                        action_id  = -1
+
             actions.append({
                 "track_id":   track_id,
                 "action":     action_str,
@@ -804,6 +837,9 @@ class ActionClassifier:
             "block":       ("jump_action", 5),
             "jump":        ("jump_action", 5),
             "rebound":     ("jump_action", 5),
+            # Rule-based-only labels (model never produces these)
+            "walk":        ("Walk", 6),
+            "run":         ("Run",  7),
         }
         return _aliases.get(name.lower(), (STAND, -1))
 

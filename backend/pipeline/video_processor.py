@@ -210,7 +210,7 @@ PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every 2nd 
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
 POSE_EVERY_N_FRAMES   = int(os.getenv("POSE_EVERY_N",     "2"))   # player pose estimation stride
 OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "15"))   # fallback default; overridden at runtime
-ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "20"))   # SlowFast action
+ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "10"))   # action classifier interval
 
 # ── Action label normalisation ────────────────────────────────────────────────
 # Backend action.py returns Title-case ("Shoot", "Dribble", "Rebound_attempt").
@@ -221,6 +221,7 @@ _ACTION_WS_MAP: dict[str, str] = {
     "catch": "CATCH", "steal": "STEAL", "block": "BLOCK",
     "rebound_attempt": "REBOUND", "rebound": "REBOUND",
     "jump": "JUMP", "stand": "STAND", "jump_action": "JUMP",
+    "walk": "WALK", "run": "RUN",
 }
 
 def _norm_action(action_str: str) -> str:

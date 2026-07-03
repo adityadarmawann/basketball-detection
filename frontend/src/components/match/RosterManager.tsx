@@ -70,39 +70,46 @@ interface JerseyStripProps {
 function JerseyStrip({ color, onColor, onFile }: JerseyStripProps) {
   const fileRef  = useRef<HTMLInputElement>(null)
   const colorRef = useRef<HTMLInputElement>(null)
-  const isPreset = JERSEY_SWATCHES.some((s) => s.hex.toLowerCase() === color.toLowerCase())
+  const isSet    = color !== ''
+  const isPreset = isSet && JERSEY_SWATCHES.some((s) => s.hex.toLowerCase() === color.toLowerCase())
   return (
     <div className="flex items-center gap-2 flex-wrap py-1.5 px-0.5">
-      <span className="text-[11px] text-text-secondary font-medium shrink-0">Warna jersey pemain:</span>
+      <span className="text-[11px] text-text-secondary font-medium shrink-0">Warna jersey:</span>
       <button type="button" onClick={() => fileRef.current?.click()} title="Upload foto jersey untuk deteksi warna otomatis"
         className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-primary transition-colors">
         <Upload size={12} />
       </button>
-      <div className="w-4 h-4 rounded border border-gray-300 flex-shrink-0" style={{ backgroundColor: color }} />
-      <span className="text-[11px] font-mono text-text-secondary">{color.toUpperCase()}</span>
+      {isSet ? (
+        <>
+          <div className="w-4 h-4 rounded border border-gray-300 flex-shrink-0" style={{ backgroundColor: color }} />
+          <span className="text-[11px] font-mono text-text-secondary">{color.toUpperCase()}</span>
+        </>
+      ) : (
+        <span className="text-[11px] text-text-secondary italic">Belum diatur — pilih warna jersey</span>
+      )}
       <div className="flex gap-1 flex-wrap">
         {JERSEY_SWATCHES.map(({ hex, label: sl }) => (
           <button key={hex} type="button" title={sl} onClick={() => onColor(hex)}
             style={{ backgroundColor: hex }}
             className={`w-5 h-5 rounded-full transition-transform hover:scale-110 flex items-center justify-center
-              ${color.toUpperCase() === hex
+              ${isSet && color.toUpperCase() === hex
                 ? 'ring-2 ring-offset-1 ring-primary scale-110 border-2 border-primary'
                 : 'border border-gray-300'}`}>
-            {color.toUpperCase() === hex && (
+            {isSet && color.toUpperCase() === hex && (
               <span style={{ color: isLightColor(hex) ? '#1F2937' : '#FFFFFF' }}
                 className="text-[8px] font-bold leading-none">✓</span>
             )}
           </button>
         ))}
         <button type="button" title="Warna kustom" onClick={() => colorRef.current?.click()}
-          style={!isPreset ? { backgroundColor: color, borderColor: '#6366f1', borderWidth: 2 } : {}}
+          style={isSet && !isPreset ? { backgroundColor: color, borderColor: '#6366f1', borderWidth: 2 } : {}}
           className={`w-5 h-5 rounded-full border-2 border-dashed flex items-center justify-center transition-transform hover:scale-110
-            ${!isPreset ? 'scale-110' : 'border-gray-400 bg-white'}`}>
+            ${isSet && !isPreset ? 'scale-110' : 'border-gray-400 bg-white'}`}>
           <span className="text-gray-400 text-[9px] font-bold leading-none">+</span>
         </button>
       </div>
       <input ref={fileRef}  type="file" accept="image/jpeg,image/png,image/webp" onChange={onFile} className="sr-only" />
-      <input ref={colorRef} type="color" value={color} onChange={(e) => onColor(e.target.value)} className="sr-only" />
+      <input ref={colorRef} type="color" value={color || '#000000'} onChange={(e) => onColor(e.target.value)} className="sr-only" />
     </div>
   )
 }
@@ -394,7 +401,7 @@ export default function RosterManager({ matchId, teamA, teamB, onComplete }: Ros
                   </button>
                 </div>
                 <JerseyStrip
-                  color={(slot === 'A' ? jerseyColorA : jerseyColorB) || (slot === 'A' ? '#FFFFFF' : '#EF4444')}
+                  color={slot === 'A' ? jerseyColorA : jerseyColorB}
                   onColor={slot === 'A' ? setJerseyColorA : setJerseyColorB}
                   onFile={handleJerseyFile(slot === 'A' ? setJerseyColorA : setJerseyColorB)}
                 />

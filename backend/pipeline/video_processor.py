@@ -731,7 +731,7 @@ class VideoProcessor:
                                 _known_team = self._last_known_team.get(_tid, "")
                                 _entry = _roster_entry(self._roster, _jn, _known_team)
                                 _name  = _entry.get("name", f"#{_jn}")
-                                _team  = _entry.get("team", _known_team)
+                                _team  = _known_team or _entry.get("team", "")
                                 _conf_msg = {
                                     "type":        "jersey_confirmed",
                                     "trackId":     _tid,
@@ -1095,85 +1095,148 @@ class VideoProcessor:
                 # between user hints and K-Means centers (Hungarian-style, 2×2 case).
                 # OCR-based verification (line below) still runs afterward and can swap
                 # again if the hints turn out to be brand colors rather than jersey colors.
-                if (self._jersey_hint_a is not None
-                        and self._jersey_hint_b is not None
-                        and not self._kmeans_disambiguated):
+                if not self._kmeans_disambiguated:
                     c_a, c_b = colors["A"], colors["B"]
-                    d_keep = _hsv_dist(self._jersey_hint_a, c_a) + _hsv_dist(self._jersey_hint_b, c_b)
-                    d_swap = _hsv_dist(self._jersey_hint_a, c_b) + _hsv_dist(self._jersey_hint_b, c_a)
-                    if d_swap < d_keep:
+                    hint_a, hint_b = self._jersey_hint_a, self._jersey_hint_b
+
+                    if hint_a is not None and hint_b is not None:
+                        # Both hints available: use Hungarian 2×2 — pick the
+                        # permutation with minimum total HSV distance to K-Means centers.
+                        d_keep = _hsv_dist(hint_a, c_a) + _hsv_dist(hint_b, c_b)
+                        d_swap = _hsv_dist(hint_a, c_b) + _hsv_dist(hint_b, c_a)
+                        need_swap = d_swap < d_keep
+                        _d_winner, _d_loser = (d_swap, d_keep) if need_swap else (d_keep, d_swap)
+                        confident = _d_winner > 0 and _d_loser / _d_winner >= 2.0
+                        logger.info(
+                            "K-Means hint (both): keep=%.1f  swap=%.1f  %s  confident=%s",
+                            d_keep, d_swap,
+                            "→ SWAP" if need_swap else "→ KEEP",
+                            confident,
+                        )
+                    elif hint_a is not None:
+                        # Only Team A hint: the cluster closer to hint_a becomes Team A.
+                        da = _hsv_dist(hint_a, c_a)
+                        db = _hsv_dist(hint_a, c_b)
+                        need_swap = db < da          # hint_a matches cluster B → swap
+                        _d_winner, _d_loser = (db, da) if need_swap else (da, db)
+                        confident = _d_winner > 0 and _d_loser / _d_winner >= 2.0
+                        logger.info(
+                            "K-Means hint (A only): da=%.1f  db=%.1f  %s  confident=%s",
+                            da, db,
+                            "→ SWAP" if need_swap else "→ KEEP",
+                            confident,
+                        )
+                    elif hint_b is not None:
+                        # Only Team B hint: the cluster closer to hint_b becomes Team B.
+                        da = _hsv_dist(hint_b, c_a)
+                        db = _hsv_dist(hint_b, c_b)
+                        need_swap = da < db          # hint_b matches cluster A → swap
+                        _d_winner, _d_loser = (da, db) if need_swap else (db, da)
+                        confident = _d_winner > 0 and _d_loser / _d_winner >= 2.0
+                        logger.info(
+                            "K-Means hint (B only): da=%.1f  db=%.1f  %s  confident=%s",
+                            da, db,
+                            "→ SWAP" if need_swap else "→ KEEP",
+                            confident,
+                        )
+                    else:
+                        need_swap = False
+                        confident = False
+
+                    if need_swap and (hint_a is not None or hint_b is not None):
                         colors["A"], colors["B"] = colors["B"], colors["A"]
                         self._jersey._track_team.clear()
                         self._jersey._track_team_votes.clear()
+
+                    # When orientation is confident (winner ≥2× loser), lock now so
+                    # a poor-quality unique-jersey crop cannot accidentally flip back.
+                    # Brand colors (not actual jersey colors) produce large similar
+                    # distances → ratio ≈ 1.0 → not confident → OCR fallback still runs.
+                    if confident and (hint_a is not None or hint_b is not None):
+                        self._kmeans_disambiguated = True
+                        self._team_color_ready.update(("A", "B"))
                         logger.info(
-                            "K-Means A↔B pre-oriented by user color hint "
-                            "(swap d=%.1f < keep d=%.1f)", d_swap, d_keep,
+                            "K-Means orientation locked by confident hint "
+                            "(ratio=%.1f ≥ 2.0)", _d_loser / _d_winner,
                         )
-                    else:
-                        logger.info(
-                            "K-Means orientation confirmed by user color hint "
-                            "(keep d=%.1f ≤ swap d=%.1f)", d_keep, d_swap,
-                        )
-                    # _kmeans_disambiguated stays False → OCR verification still runs
-                    # and will swap again if the hint orientation was wrong.
 
         if self._tracker:
             for player in tracked_players:
                 tid = player["track_id"]
                 jersey_num = self._tracker.get_jersey_number(tid)
                 if jersey_num is not None and self._roster:
-                    kmeans_team = player.get("team") or self._last_known_team.get(tid, "")
-                    entry = _roster_entry(self._roster, jersey_num, kmeans_team)
-                    if entry.get("team"):
-                        confirmed_team = entry["team"]
-                        player["team"] = confirmed_team
-                        self._last_known_team[tid] = confirmed_team
-                        if self._stats:
-                            self._stats.confirm_player_team(tid, confirmed_team)
+                    # ── Team from COLOR is the authority ─────────────────────────
+                    # Jersey numbers appear on BOTH teams (e.g. #8 in Team A AND B),
+                    # so the number alone is ambiguous for team determination.
+                    # K-Means jersey-color classification is the primary signal.
+                    # Jersey number is used ONLY to look up the player's NAME within
+                    # the already-color-determined team — it NEVER overrides the team.
+                    # Priority: in-dict value → sticky cache → current-frame color map
+                    color_team = (player.get("team")
+                                  or self._last_known_team.get(tid, "")
+                                  or jersey_color_map.get(tid, ""))
 
-                        # Verify color-to-team assignment using first UNIQUE jersey confirmed
-                        # by the roster. Works for both K-Means clusters and user-preset colors:
-                        # if the color reference maps jersey to the wrong team, swap A↔B.
-                        # Only use jersey numbers worn by exactly ONE team — shared
-                        # numbers (e.g. #11 in both rosters) give ambiguous signal.
-                        if (self._jersey and self._kmeans_calibrated
-                                and not self._kmeans_disambiguated):
-                            other_team = "B" if confirmed_team == "A" else "A"
-                            other_key  = f"{jersey_num}_{other_team}"
-                            jersey_is_unique = other_key not in self._roster
-                            if not jersey_is_unique:
-                                logger.debug(
-                                    "Team-color disambiguation skipped: jersey #%d exists in "
-                                    "both teams — waiting for unique jersey", jersey_num,
-                                )
-                            else:
-                                try:
-                                    x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
-                                    crop = frame[max(0, y1):min(frame.shape[0], y2),
-                                                 max(0, x1):min(frame.shape[1], x2)]
-                                    if crop.size > 0:
-                                        self._jersey._track_team.pop(tid, None)
-                                        color_team = self._jersey._classify_team(crop, tid)
-                                        if color_team and color_team != confirmed_team:
-                                            colors = self._jersey._team_colors
-                                            colors["A"], colors["B"] = colors["B"], colors["A"]
+                    # ── K-Means orientation via unique jerseys (no user hints) ───
+                    # Fires only until _kmeans_disambiguated is set.
+                    # A unique jersey (worn by exactly one team) lets us verify which
+                    # K-Means cluster is Team A by comparing color vs. roster.
+                    if (self._jersey and self._kmeans_calibrated
+                            and not self._kmeans_disambiguated):
+                        has_a = bool(self._roster.get(f"{jersey_num}_A"))
+                        has_b = bool(self._roster.get(f"{jersey_num}_B"))
+                        if has_a != has_b:   # XOR = unique to one team
+                            expected = "A" if has_a else "B"
+                            try:
+                                x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
+                                crop = frame[max(0, y1):min(frame.shape[0], y2),
+                                             max(0, x1):min(frame.shape[1], x2)]
+                                if crop.size > 0:
+                                    self._jersey._track_team.pop(tid, None)
+                                    raw_color = self._jersey._classify_team(crop, tid)
+                                    if raw_color is not None:
+                                        if raw_color != expected:
+                                            tc = self._jersey._team_colors
+                                            tc["A"], tc["B"] = tc["B"], tc["A"]
                                             self._jersey._track_team.clear()
                                             self._jersey._track_team_votes.clear()
                                             logger.info(
-                                                "Team-color A↔B swapped: jersey #%d belongs to "
-                                                "team %s but color said %s → colors swapped",
-                                                jersey_num, confirmed_team, color_team,
+                                                "Team-color A↔B swapped: jersey #%d unique to "
+                                                "team %s but color said %s → clusters swapped",
+                                                jersey_num, expected, raw_color,
                                             )
                                         else:
                                             logger.info(
-                                                "Team-color verified: jersey #%d → team %s ✓",
-                                                jersey_num, confirmed_team,
+                                                "Team-color verified: jersey #%d unique to team %s ✓",
+                                                jersey_num, expected,
                                             )
                                         self._kmeans_disambiguated = True
                                         self._team_color_ready.update(("A", "B"))
-                                except Exception as e:
-                                    logger.debug("K-Means disambiguation error: %s", e)
-                        continue
+                                        color_team = expected
+                            except Exception as e:
+                                logger.debug("K-Means disambiguation error: %s", e)
+
+                    # ── Name lookup in color-team's roster ────────────────────────
+                    # Look up the player name using the color-determined team.
+                    # This handles shared numbers correctly (#8 Team A → Syahmi,
+                    # #8 Team B → Dylan) without ever changing the team assignment.
+                    if color_team:
+                        entry = _roster_entry(self._roster, jersey_num, color_team)
+                        player["team"] = color_team          # color always wins
+                        self._last_known_team[tid] = color_team
+                        if self._stats:
+                            self._stats.confirm_player_team(tid, color_team)
+                    else:
+                        # Color not yet determined (K-Means not calibrated yet).
+                        # Fall back to unqualified roster lookup as a temporary hint;
+                        # this will be corrected once K-Means fires.
+                        entry = _roster_entry(self._roster, jersey_num, "")
+                        if entry.get("team"):
+                            color_team = entry["team"]
+                            player["team"] = color_team
+                            self._last_known_team[tid] = color_team
+                            if self._stats:
+                                self._stats.confirm_player_team(tid, color_team)
+                    continue
                 if tid in self._last_known_team:
                     player["team"] = self._last_known_team[tid]
                 elif tid in jersey_color_map:
@@ -1273,7 +1336,9 @@ class VideoProcessor:
                     known_team = self._last_known_team.get(tid, "")
                     entry = _roster_entry(self._roster, jersey, known_team)
                     name = entry.get("name", f"#{jersey}")
-                    team = entry.get("team", known_team)
+                    # Color-determined known_team is authoritative; roster's team
+                    # field is only a fallback for players not yet color-classified.
+                    team = known_team or entry.get("team", "")
                     stats_roster[tid] = {
                         "name":         name,
                         "jersey_number": jersey,
@@ -1512,6 +1577,13 @@ class VideoProcessor:
         events       = frame_data.get("events", [])
         latest_event = self._map_event_for_ws(events[-1]) if events else None
 
+        # K-Means detected jersey colors — only populated after calibration fires.
+        # HSV [0-180, 0-255, 0-255] → null before first calibration.
+        team_colors_raw = (self._jersey._team_colors
+                           if self._jersey and self._kmeans_calibrated else {})
+        team_colors_ws  = {k: [round(v, 1) for v in vals]
+                           for k, vals in team_colors_raw.items()} if team_colors_raw else None
+
         return {
             "type":         "frame_update",
             "timestamp":    frame_data.get("timestamp_ms", 0),
@@ -1529,6 +1601,7 @@ class VideoProcessor:
             "event":        latest_event,
             "fps":          round(self._fps_actual, 1),
             "gpuMetrics":   _query_gpu_metrics(),
+            "teamColors":   team_colors_ws,   # {"A": [H,S,V], "B": [H,S,V]} or null
         }
 
     # ── Event format mapper ───────────────────────────────────────────────────

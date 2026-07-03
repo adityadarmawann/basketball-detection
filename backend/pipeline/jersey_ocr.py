@@ -1095,6 +1095,7 @@ class JerseyOCR:
         """
         self._votes.clear()
         self._track_team.clear()
+        self._track_team_votes.clear()
         self._frame_counter = 0
         self._last_ocr_frame.clear()
         logger.info("JerseyOCR reset (quarter boundary)")

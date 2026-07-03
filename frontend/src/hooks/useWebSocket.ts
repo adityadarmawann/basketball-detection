@@ -73,6 +73,30 @@ const calcEff = (p: PlayerStats): number =>
   (p.pts + p.totReb + p.ast + p.stl + p.blocks) -
   (p.twoPointAtt + p.threePointAtt - p.twoPointMade - p.threePointMade + p.tov)
 
+/** Convert OpenCV HSV [H:0-180, S:0-255, V:0-255] → CSS hex color */
+const hsvToHex = (hsv: number[]): string => {
+  if (!hsv || hsv.length < 3) return ''
+  const h = (hsv[0] * 2) / 360  // OpenCV H [0-180] → [0-1]
+  const s = hsv[1] / 255
+  const v = hsv[2] / 255
+  const i = Math.floor(h * 6)
+  const f = h * 6 - i
+  const p = v * (1 - s)
+  const q = v * (1 - f * s)
+  const t = v * (1 - (1 - f) * s)
+  let r = 0, g = 0, b = 0
+  switch (i % 6) {
+    case 0: r = v; g = t; b = p; break
+    case 1: r = q; g = v; b = p; break
+    case 2: r = p; g = v; b = t; break
+    case 3: r = p; g = q; b = v; break
+    case 4: r = t; g = p; b = v; break
+    case 5: r = v; g = p; b = q; break
+  }
+  const hex = (x: number) => Math.round(x * 255).toString(16).padStart(2, '0')
+  return `#${hex(r)}${hex(g)}${hex(b)}`
+}
+
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export const useWebSocket = () => {
@@ -148,6 +172,13 @@ export const useWebSocket = () => {
 
     s.setStats(updatedStats)
     s.setMpi(updatedMpi)
+
+    // K-Means detected colors — update only when backend has calibrated
+    if (frame.teamColors) {
+      const hexA = frame.teamColors.A ? hsvToHex(frame.teamColors.A) : ''
+      const hexB = frame.teamColors.B ? hsvToHex(frame.teamColors.B) : ''
+      if (hexA || hexB) s.setDetectedColors(hexA, hexB)
+    }
   }, [])
 
   const handleJerseyConfirmed = useCallback((msg: JerseyConfirmedMessage) => {

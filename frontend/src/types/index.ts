@@ -27,6 +27,8 @@ export interface FrameUpdate {
   event: GameEvent | null;
   fps?: number;
   gpuMetrics?: { gpu: number; vramUsed: number; vramTotal: number };
+  /** HSV [H:0-180, S:0-255, V:0-255] for each team, populated after K-Means calibration */
+  teamColors?: { A?: number[]; B?: number[] } | null;
 }
 
 export interface GameEvent {
@@ -169,4 +171,7 @@ export interface MatchState {
   quarterScoreB: number;
   jerseyColorA: string;
   jerseyColorB: string;
+  /** K-Means detected jersey color in hex, populated after pipeline calibration */
+  detectedColorA: string;
+  detectedColorB: string;
 }

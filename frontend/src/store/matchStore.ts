@@ -29,6 +29,8 @@ const initialState: MatchState = {
   quarterScoreB: 0,
   jerseyColorA: '',
   jerseyColorB: '',
+  detectedColorA: '',
+  detectedColorB: '',
 }
 
 export const useMatchStore = create<MatchState & {
@@ -59,6 +61,7 @@ export const useMatchStore = create<MatchState & {
   setQuarterScore: (a: number, b: number) => void
   setJerseyColorA: (color: string) => void
   setJerseyColorB: (color: string) => void
+  setDetectedColors: (colorA: string, colorB: string) => void
   patchEventsByTrackId: (trackId: number, jerseyNumber: number, playerName: string, team: string) => void
   reset: () => void
 }>()(
@@ -114,6 +117,7 @@ export const useMatchStore = create<MatchState & {
       setQuarterScore: (a, b) => set({ quarterScoreA: a, quarterScoreB: b }),
       setJerseyColorA: (color) => set({ jerseyColorA: color }),
       setJerseyColorB: (color) => set({ jerseyColorB: color }),
+      setDetectedColors: (colorA, colorB) => set({ detectedColorA: colorA, detectedColorB: colorB }),
       patchEventsByTrackId: (trackId, jerseyNumber, playerName, team) =>
         set((state) => ({
           events: state.events.map((e) =>

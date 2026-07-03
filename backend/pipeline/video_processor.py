@@ -280,6 +280,14 @@ def _hex_to_hsv(hex_color: str) -> list:
     return [hh * 180.0, s * 255.0, v * 255.0]
 
 
+def _hsv_dist(a: list, b: list) -> float:
+    """Hue-aware HSV distance — mirrors JerseyOCR._hsv_distance."""
+    dh = abs(a[0] - b[0])
+    dh = min(dh, 180.0 - dh)
+    hue_weight = 2.0 * min(a[1], b[1]) / 255.0
+    return float(hue_weight * dh + abs(a[1] - b[1]) + abs(a[2] - b[2]) * 0.25)
+
+
 # ── Main class ────────────────────────────────────────────────────────────────
 
 class VideoProcessor:
@@ -346,6 +354,8 @@ class VideoProcessor:
         self._team_color_ready:   set  = set()   # tracks which teams are calibrated
         self._kmeans_calibrated:  bool = False   # True after first calibrate_teams() call
         self._kmeans_disambiguated: bool = False # True after first roster-confirmed jersey
+        self._jersey_hint_a: Optional[list] = None  # user-supplied Team A HSV hint
+        self._jersey_hint_b: Optional[list] = None  # user-supplied Team B HSV hint
 
         # Per-frame bbox store — written to JSON at finalize for frontend time-lookup
         self._frame_store:        list = []   # [{ts, p:[{i,j,t,b}], bl}]
@@ -536,34 +546,30 @@ class VideoProcessor:
         if self._stats is None:
             self._init_pipeline(self._models_path)
 
-        # Apply user-preset jersey colors — bypasses K-Means entirely when both are set.
-        if jersey_color_a and jersey_color_b:
+        # Store user-supplied jersey colors as K-Means orientation hints.
+        # K-Means ALWAYS runs to detect the ACTUAL jersey colors from the video pixels.
+        # User hints are used only AFTER K-Means to determine which detected cluster
+        # corresponds to Team A vs Team B (semantic labeling, not pixel reference).
+        # This handles the common case where users enter brand colors (#00BCD4 teal)
+        # instead of actual jersey colors (#FFFFFF white) — K-Means detects white/red
+        # correctly from video; hints guide the A↔B orientation decision.
+        # OCR-based confirmation still runs afterward to catch any hint errors.
+        if jersey_color_a:
             try:
-                self._jersey.set_team_reference("A", _hex_to_hsv(jersey_color_a))
-                self._jersey.set_team_reference("B", _hex_to_hsv(jersey_color_b))
-                self._kmeans_calibrated    = True   # skip K-Means, colors already known
-                self._kmeans_disambiguated = True   # trust user-preset colors, no A↔B swap
-                # Swap was previously allowed here but caused wrong flips: single-frame
-                # color read during disambiguation is unreliable (motion blur, occlusion).
-                # User explicitly set A/B colors → trust them as ground truth.
-                logger.info(
-                    "Jersey colors preset from UI — A=%s B=%s → K-Means skipped, colors trusted",
-                    jersey_color_a, jersey_color_b,
-                )
+                self._jersey_hint_a = _hex_to_hsv(jersey_color_a)
             except Exception as _e:
-                logger.warning("Failed to apply preset jersey colors: %s", _e)
-        elif jersey_color_a:
+                logger.warning("Failed to parse jersey_color_a '%s': %s", jersey_color_a, _e)
+        if jersey_color_b:
             try:
-                self._jersey.set_team_reference("A", _hex_to_hsv(jersey_color_a))
-                logger.info("Team A jersey color preset: %s", jersey_color_a)
+                self._jersey_hint_b = _hex_to_hsv(jersey_color_b)
             except Exception as _e:
-                logger.warning("Failed to apply jersey_color_a '%s': %s", jersey_color_a, _e)
-        elif jersey_color_b:
-            try:
-                self._jersey.set_team_reference("B", _hex_to_hsv(jersey_color_b))
-                logger.info("Team B jersey color preset: %s", jersey_color_b)
-            except Exception as _e:
-                logger.warning("Failed to apply jersey_color_b '%s': %s", jersey_color_b, _e)
+                logger.warning("Failed to parse jersey_color_b '%s': %s", jersey_color_b, _e)
+        if jersey_color_a or jersey_color_b:
+            logger.info(
+                "Jersey color hints stored (A=%s  B=%s) — "
+                "K-Means runs from video pixels, hints guide cluster orientation",
+                jersey_color_a or "none", jersey_color_b or "none",
+            )
 
         # Try NVDEC hardware decode first (GPU dedicated engine, ~10× faster than CPU).
         # Falls back to cv2 software decode when ffmpegcv is not installed or GPU unavailable.
@@ -1081,6 +1087,35 @@ class VideoProcessor:
             if "A" in colors and "B" in colors:
                 self._kmeans_calibrated = True
                 logger.info("Early K-Means calibration done (%d players visible)", len(tracked_players))
+
+                # If user supplied both color hints, orient clusters immediately so
+                # every player gets a sensible team guess from the very first frame —
+                # no need to wait for OCR to confirm a jersey number.
+                # Assignment: pick the permutation that minimises total HSV distance
+                # between user hints and K-Means centers (Hungarian-style, 2×2 case).
+                # OCR-based verification (line below) still runs afterward and can swap
+                # again if the hints turn out to be brand colors rather than jersey colors.
+                if (self._jersey_hint_a is not None
+                        and self._jersey_hint_b is not None
+                        and not self._kmeans_disambiguated):
+                    c_a, c_b = colors["A"], colors["B"]
+                    d_keep = _hsv_dist(self._jersey_hint_a, c_a) + _hsv_dist(self._jersey_hint_b, c_b)
+                    d_swap = _hsv_dist(self._jersey_hint_a, c_b) + _hsv_dist(self._jersey_hint_b, c_a)
+                    if d_swap < d_keep:
+                        colors["A"], colors["B"] = colors["B"], colors["A"]
+                        self._jersey._track_team.clear()
+                        self._jersey._track_team_votes.clear()
+                        logger.info(
+                            "K-Means A↔B pre-oriented by user color hint "
+                            "(swap d=%.1f < keep d=%.1f)", d_swap, d_keep,
+                        )
+                    else:
+                        logger.info(
+                            "K-Means orientation confirmed by user color hint "
+                            "(keep d=%.1f ≤ swap d=%.1f)", d_keep, d_swap,
+                        )
+                    # _kmeans_disambiguated stays False → OCR verification still runs
+                    # and will swap again if the hint orientation was wrong.
 
         if self._tracker:
             for player in tracked_players:

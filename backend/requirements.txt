@@ -10,41 +10,48 @@ pymongo==4.16.0
 redis>=5.0.0            # redis.asyncio untuk pub/sub; jalankan: pip install redis
 
 # ── PyTorch ───────────────────────────────────────────────────────────────────
-# WAJIB install torch GPU dulu sebelum pip install -r requirements.txt:
+# MESIN PAUL (RTX 3060 Ti, CUDA 13, TensorRT 11) — cl-gpu env:
+#   torch 2.12.0+cu130 dan numpy 2.2.6 sudah terinstall via conda.
+#   JANGAN jalankan pip install torch/numpy dari sini — akan downgrade.
+#   Engine .engine dikompil untuk TRT 11.1 + CUDA 13 + RTX 3060 Ti.
+#
+# MESIN DEV (GTX 1050 Ti, CUDA 12.1) — venv:
 #   pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu121
-# Baris di bawah hanya sebagai marker versi — jangan install langsung dari PyPI
-# karena akan install versi CPU-only.
-torch==2.2.2
-torchvision==0.17.2
+#
+# Baris di bawah hanya marker versi minimum — pip tidak akan upgrade jika
+# versi lebih baru sudah terinstall (torch sudah 2.12.0 di paul).
+torch>=2.2.2
+torchvision>=0.17.2
 
 # ── Computer Vision / ML ──────────────────────────────────────────────────────
-# opencv-python 4.9.0.80: numpy>=1.23.5 (Python 3.11) — kompatibel dengan 1.26.4.
-# Jangan upgrade ke 4.11+ karena mulai dari sana metadata declare numpy>=2,
-# yang membuat pip resolver menolak numpy==1.26.4 meski runtime-nya fine.
+# opencv-python 4.9.0.80 untuk mesin dev (numpy 1.x).
+# Mesin paul: opencv-python-headless 4.13.0.92 sudah terinstall — aman, skip.
 opencv-python==4.9.0.80
-ultralytics==8.4.33        # YOLOv8: player detection, ball detection, jersey_no.pt
+ultralytics==8.4.84        # YOLOv8: player detection, ball detection, jersey_no
 pytorchvideo==0.1.5        # SlowFast-R50 action recognition (action_best_v1.pt)
 
 # ── Tracking ──────────────────────────────────────────────────────────────────
 # boxmot dan lapx TIDAK boleh ada di sini — metadata-nya declare numpy==1.23.1
-# sehingga pip resolver akan konflik dengan numpy==1.26.4 di atas.
+# sehingga pip resolver akan konflik dengan numpy di atas.
 # Install TERPISAH setelah pip install -r requirements.txt selesai:
 #   pip install boxmot==10.0.43 lapx==0.9.4 --no-deps
 
 # ── OCR (jersey number reading) ───────────────────────────────────────────────
-paddlepaddle==3.0.0     # paddleocr 3.x requires paddlepaddle 3.x
+# Mesin paul: gunakan paddlepaddle-GPU (bukan CPU).
+#   pip install paddlepaddle-gpu==3.0.0  (jangan install paddlepaddle CPU di sini)
+# Mesin dev (tanpa GPU paddle):
+#   paddlepaddle==3.0.0
 paddleocr==3.5.0
 
 # ── Numerics / Signal processing ──────────────────────────────────────────────
-# WAJIB numpy==1.26.4 — torch 2.2.2 dikompil dengan numpy 1.x ABI.
-# numpy 2.x menyebabkan RuntimeError: Numpy is not available di torch.from_numpy()
-# yang membuat detector.detect() gagal diam-diam setiap frame → nol bbox di output.
-# opencv-python 4.13 dan boxmot deklarasi numpy>=2 / ==1.23.1 tapi keduanya
-# berjalan baik dengan 1.26.4 (konflik hanya di metadata resolver, bukan runtime).
-numpy==1.26.4
-scipy==1.17.1
+# Mesin paul (torch 2.12.0+cu130): numpy 2.2.6 sudah aman — torch 2.12 support numpy 2.x.
+# Mesin dev (torch 2.2.2): WAJIB numpy==1.26.4 — torch 2.2.2 dikompil dengan numpy 1.x ABI.
+#   numpy 2.x di torch 2.2.2 → RuntimeError: Numpy is not available di torch.from_numpy()
+# Gunakan numpy>=1.26.4,<2 untuk mesin dev; numpy>=1.26.4 untuk mesin paul.
+numpy>=1.26.4
+scipy>=1.13.0
 filterpy==1.4.5         # Kalman filter used by tracker fallback
-scikit-learn==1.8.0     # K-Means untuk kalibrasi warna tim
+scikit-learn>=1.7.0     # K-Means untuk kalibrasi warna tim
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 Pillow==12.2.0

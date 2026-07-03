@@ -455,9 +455,9 @@ class JerseyOCR:
         """
         For each tracked player: localise number → OCR → vote → classify team.
 
-        GPU optimisation: all digit-model inferences are batched into a single
-        model.predict() call instead of N sequential calls (one per player).
-        With 10 players this reduces jersey OCR from ~150 ms to ~25 ms on CUDA.
+        Digit-model inferences run sequentially (one crop per call) because the
+        TRT engine is exported with static batch_size=1. Batching N crops raises
+        a silent AssertionError that returns all-None, skipping every jersey vote.
 
         Players whose jersey number is already confirmed by the tracker skip digit
         OCR entirely — team classification still runs for new track_ids.
@@ -859,20 +859,21 @@ class JerseyOCR:
         if not valid_crops:
             return [None] * len(crops)
 
-        try:
-            batch_det = self._digit_model(
-                valid_crops,
-                conf=DIGIT_CONF_THRESHOLD,
-                verbose=False,
-            )
-        except Exception as exc:
-            logger.debug("Batch digit model inference error: %s", exc)
-            return [None] * len(crops)
-
+        # TRT engine compiled with static batch_size=1 — process sequentially.
+        # Batching N crops at once raises AssertionError from ultralytics when
+        # the engine max-batch != N; the exception is silent at DEBUG level and
+        # returns all-None, causing every jersey number vote to be skipped.
         out = [None] * len(crops)
         for j, orig_idx in enumerate(valid_idx):
-            if j < len(batch_det):
-                out[orig_idx] = self._parse_digit_result(batch_det[j])
+            try:
+                det = self._digit_model(
+                    valid_crops[j],
+                    conf=DIGIT_CONF_THRESHOLD,
+                    verbose=False,
+                )
+                out[orig_idx] = self._parse_digit_result(det[0])
+            except Exception as exc:
+                logger.debug("Digit model inference error (crop %d): %s", j, exc)
         return out
 
     def _parse_digit_result(self, det_result) -> Optional[int]:

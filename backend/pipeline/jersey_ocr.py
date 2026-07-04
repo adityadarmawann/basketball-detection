@@ -37,6 +37,8 @@ DIGIT_CONF_THRESHOLD   = 0.15   # minimum per-digit detection confidence
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
                              # at ocr_interval=2 (0.13s), 2 votes ≈ 0.27s — faster confirmation;
                              # roster whitelist + MAX_VOTE_HISTORY absorb stray misreads
+CONF_UPGRADE_MIN      = 0.60 # absolute digit-model confidence floor to trigger a flush
+CONF_UPGRADE_DELTA    = 0.25 # new read must beat _best_read_conf by this margin to flush
 MAX_VOTE_HISTORY      = 20   # rolling window — 20 reads per player (OCR_SAMPLE_EVERY=1)
                              # smaller window lets wrong reads be forgotten faster
 TRANSFER_MIN_LONG_VOTES = 3  # 2-digit candidate needs this many reads before 1-digit votes
@@ -248,6 +250,8 @@ class JerseyOCR:
         # Default -OCR_SAMPLE_EVERY so the first appearance always triggers OCR.
         self._frame_counter: int = 0
         self._last_ocr_frame: dict[int, int] = {}
+        # Best digit-model confidence seen per track — used to detect zoom-in upgrades.
+        self._best_read_conf: dict[int, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -514,22 +518,11 @@ class JerseyOCR:
                 }
                 continue
 
-            # Fast path B: jersey already confirmed by tracker AND team known →
-            # skip digit OCR, no new information to extract
-            if run_ocr and tracker is not None:
-                confirmed_jersey = tracker.get_jersey_number(track_id)
-                if confirmed_jersey is not None and track_id in self._track_team:
-                    self._last_ocr_frame[track_id] = self._frame_counter
-                    confirmed_num, conf = self._vote_status(track_id)
-                    results[i] = {
-                        "track_id":       track_id,
-                        "jersey_number":  confirmed_num,
-                        "confidence":     conf,
-                        "team":           self._track_team[track_id],
-                        "team_color_hsv": self._team_colors.get(self._track_team[track_id], []),
-                        "blur_skipped":   False,
-                    }
-                    continue
+            # Fast path B removed: OCR always continues even after jersey confirmation.
+            # The rolling vote deque (maxlen=MAX_VOTE_HISTORY) naturally updates the
+            # confirmed number when the camera zooms in and a higher-confidence read
+            # arrives. Confidence-upgrade logic in Pass 2 flushes stale votes when a
+            # significantly better read is detected (CONF_UPGRADE_MIN + CONF_UPGRADE_DELTA).
 
             # Extract player crop
             x1, y1, x2, y2 = [int(v) for v in player["bbox"]]
@@ -647,11 +640,17 @@ class JerseyOCR:
                 len(slot_indices), n,
             )
 
-            # ── Pass 2: vote, team classify, build results ────────────────────
+            # ── Pass 2: vote, confidence upgrade, team classify, build results ──
             for j, slot_i in enumerate(slot_indices):
                 player, player_crop, _ = pending[slot_i]
                 track_id  = player["track_id"]
-                candidate = tight_cands[j]
+
+                # Unpack (number, mean_conf) from digit model; default to no read.
+                raw_result = tight_cands[j]
+                candidate  = None
+                read_conf  = 0.0
+                if raw_result is not None:
+                    candidate, read_conf = raw_result
 
                 # Roster whitelist: drop candidates not worn by any player
                 if candidate is not None and roster:
@@ -664,7 +663,26 @@ class JerseyOCR:
                             "track %d: OCR candidate %d rejected — not in roster",
                             track_id, candidate,
                         )
-                        candidate = None
+                        candidate  = None
+                        read_conf  = 0.0
+
+                # ── Confidence-upgrade flush ──────────────────────────────────
+                # When the camera zooms in and produces a significantly more
+                # confident read than anything seen before, flush the stale vote
+                # deque so the new reading takes over quickly (VOTE_THRESHOLD
+                # re-confirmation in ~0.27s) rather than being diluted by old votes.
+                if candidate is not None and read_conf >= CONF_UPGRADE_MIN:
+                    prev_best = self._best_read_conf.get(track_id, 0.0)
+                    if read_conf > prev_best + CONF_UPGRADE_DELTA:
+                        current_confirmed, _ = self._vote_status(track_id)
+                        if current_confirmed is not None and candidate != current_confirmed:
+                            self._votes.pop(track_id, None)
+                            logger.info(
+                                "track %d: confidence upgrade %.2f→%.2f %s→%d — flushing votes",
+                                track_id, prev_best, read_conf, current_confirmed, candidate,
+                            )
+                    if read_conf > self._best_read_conf.get(track_id, 0.0):
+                        self._best_read_conf[track_id] = read_conf
 
                 self._last_ocr_frame[track_id] = self._frame_counter
                 self._vote_number(track_id, candidate)
@@ -829,7 +847,8 @@ class JerseyOCR:
         model.predict() — roughly N× faster on CUDA.
         Example: 10 players → 10 × 15 ms = 150 ms  →  1 × 25 ms = 25 ms.
 
-        Returns list[Optional[int]] index-aligned with the input crops list.
+        Returns list[Optional[tuple[int, float]]] index-aligned with crops.
+        Each element is (jersey_number, mean_digit_confidence) or None.
         """
         if not crops or self._digit_model is None:
             return [None] * len(crops)
@@ -876,10 +895,11 @@ class JerseyOCR:
                 logger.debug("Digit model inference error (crop %d): %s", j, exc)
         return out
 
-    def _parse_digit_result(self, det_result) -> Optional[int]:
+    def _parse_digit_result(self, det_result) -> Optional[tuple[int, float]]:
         """
-        Parse one YOLO digit-model Result object into jersey number (0-99) or None.
-        Extracted from _run_yolo_digit_ocr so _batch_digit_ocr can reuse the logic.
+        Parse one YOLO digit-model Result object into (jersey_number, mean_confidence)
+        or None. mean_confidence is the average per-digit detection confidence — used
+        by the confidence-upgrade logic in Pass 2 to detect zoom-in upgrades.
         """
         digit_boxes: list[tuple[float, str, float]] = []
         for box in det_result.boxes:
@@ -900,13 +920,14 @@ class JerseyOCR:
             digit_boxes.sort(key=lambda b: -b[2])
             digit_boxes = digit_boxes[:2]
         digit_boxes.sort(key=lambda b: b[0])
-        number_str = "".join(b[1] for b in digit_boxes)
+        number_str  = "".join(b[1] for b in digit_boxes)
+        mean_conf   = sum(b[2] for b in digit_boxes) / len(digit_boxes)
 
         try:
             number = int(number_str)
             if 0 <= number <= 99:
-                logger.debug("YOLO digit OCR → jersey %d", number)
-                return number
+                logger.debug("YOLO digit OCR → jersey %d (conf=%.2f)", number, mean_conf)
+                return number, mean_conf
         except ValueError:
             pass
         return None
@@ -1098,6 +1119,7 @@ class JerseyOCR:
         self._track_team_votes.clear()
         self._frame_counter = 0
         self._last_ocr_frame.clear()
+        self._best_read_conf.clear()
         logger.info("JerseyOCR reset (quarter boundary)")
 
     def reset_votes(self, track_id: Optional[int] = None) -> None:

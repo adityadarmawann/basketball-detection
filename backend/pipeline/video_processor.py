@@ -1551,6 +1551,35 @@ class VideoProcessor:
                 "keypoints":    keypoints,
             })
 
+        # ── Dedup: last-resort identity uniqueness guard ───────────────────
+        # jersey_ocr._team_number_owner handles this in the pipeline, but if
+        # a ghost track slips through (e.g. inherited jersey before OCR runs),
+        # prevent the frontend from showing two boxes with the same name/number.
+        # Keep the player with the larger bbox (more prominent detection).
+        seen_ids: dict[tuple, int] = {}   # (team, jersey_number) → index in players
+        dedup_players = []
+        for p in players:
+            jn   = p.get("jerseyNumber")
+            team = p.get("team", "")
+            if jn is None or not team:
+                dedup_players.append(p)  # unconfirmed — always include
+                continue
+            key = (team, jn)
+            if key not in seen_ids:
+                seen_ids[key] = len(dedup_players)
+                dedup_players.append(p)
+            else:
+                existing_idx = seen_ids[key]
+                existing_bbox = dedup_players[existing_idx].get("bbox", [0, 0, 0, 0])
+                new_bbox      = p.get("bbox", [0, 0, 0, 0])
+                ex_area = ((existing_bbox[2] - existing_bbox[0]) *
+                           (existing_bbox[3] - existing_bbox[1])) if len(existing_bbox) == 4 else 0
+                new_area = ((new_bbox[2] - new_bbox[0]) *
+                            (new_bbox[3] - new_bbox[1])) if len(new_bbox) == 4 else 0
+                if new_area > ex_area:
+                    dedup_players[existing_idx] = p
+        players = dedup_players
+
         # ── Ball ───────────────────────────────────────────────────────────
         ball_court_pos = None
         if ball_raw:

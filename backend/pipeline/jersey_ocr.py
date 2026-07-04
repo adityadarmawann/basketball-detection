@@ -255,6 +255,12 @@ class JerseyOCR:
         # Best digit-model confidence seen per track — used to detect zoom-in upgrades.
         self._best_read_conf: dict[int, float] = {}
 
+        # Uniqueness guard: (team, jersey_number) → canonical track_id.
+        # When two live tracks both read the same (team, number), only the first
+        # claimant keeps the confirmed identity; duplicates are suppressed until
+        # the owner track disappears (then the duplicate can claim ownership).
+        self._team_number_owner: dict[tuple, int] = {}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -485,6 +491,11 @@ class JerseyOCR:
         h_frame, w_frame = frame.shape[:2]
         n = len(tracked_players)
 
+        # Set of track IDs visible this frame — used by identity uniqueness guard.
+        current_track_ids: set[int] = {
+            p["track_id"] for p in tracked_players if p.get("track_id") is not None
+        }
+
         # ── Layer 1: full-frame jersey_no.pt (1 GPU call shared by all players) ──
         _frame_num_boxes = self._detect_numbers_fullframe(frame)
         logger.info(
@@ -510,12 +521,22 @@ class JerseyOCR:
             # Fast path A: timer hasn't fired AND team already known
             if not run_ocr and track_id in self._track_team:
                 confirmed_num, conf = self._vote_status(track_id)
+                cached_team = self._track_team[track_id]
+                # Uniqueness guard: suppress if another live track owns this identity
+                if confirmed_num is not None and cached_team:
+                    key   = (cached_team, confirmed_num)
+                    owner = self._team_number_owner.get(key)
+                    if owner is not None and owner != track_id and owner in current_track_ids:
+                        confirmed_num = None
+                        conf          = 0.0
+                    else:
+                        self._team_number_owner[key] = track_id
                 results[i] = {
                     "track_id":       track_id,
                     "jersey_number":  confirmed_num,
                     "confidence":     conf,
-                    "team":           self._track_team[track_id],
-                    "team_color_hsv": self._team_colors.get(self._track_team[track_id], []),
+                    "team":           cached_team,
+                    "team_color_hsv": self._team_colors.get(cached_team, []),
                     "blur_skipped":   False,
                 }
                 continue
@@ -709,11 +730,30 @@ class JerseyOCR:
                     confirmed,
                 )
 
+                # Classify team first so uniqueness check can use (team, number) key.
+                team     = self._classify_team(player_crop, track_id)
+                team_hsv = self._team_colors.get(team, []) if team else []
+
+                # Uniqueness guard: suppress identity if another live track is the
+                # canonical owner of (team, jersey_number). Votes still accumulate
+                # so this track can take over instantly when the owner disappears.
+                if confirmed is not None and team:
+                    key   = (team, confirmed)
+                    owner = self._team_number_owner.get(key)
+                    if owner is not None and owner != track_id and owner in current_track_ids:
+                        logger.debug(
+                            "track %d: identity (%s, #%d) already owned by active "
+                            "track %d — suppressing duplicate",
+                            track_id, team, confirmed, owner,
+                        )
+                        confirmed = None
+                        conf      = 0.0
+                    else:
+                        self._team_number_owner[key] = track_id
+
                 if confirmed is not None and tracker is not None:
                     tracker.update_jersey(track_id, confirmed)
 
-                team     = self._classify_team(player_crop, track_id)
-                team_hsv = self._team_colors.get(team, []) if team else []
                 results[slot_i] = {
                     "track_id":       track_id,
                     "jersey_number":  confirmed,
@@ -1146,6 +1186,7 @@ class JerseyOCR:
         self._frame_counter = 0
         self._last_ocr_frame.clear()
         self._best_read_conf.clear()
+        self._team_number_owner.clear()
         logger.info("JerseyOCR reset (quarter boundary)")
 
     def reset_votes(self, track_id: Optional[int] = None) -> None:

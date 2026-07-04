@@ -654,16 +654,28 @@ class JerseyOCR:
                 if raw_result is not None:
                     candidate, read_conf = raw_result
 
-                # Roster whitelist: drop candidates not worn by any player
+                # Roster whitelist: drop candidates not worn by any player.
+                # When team is already known from color rolling-vote, only accept
+                # numbers on that team's side of the roster — this blocks
+                # cross-team number ambiguity (e.g. both teams wearing #7).
                 if candidate is not None and roster:
                     js = str(candidate)
-                    in_roster = (js in roster or
-                                 f"{js}_A" in roster or
-                                 f"{js}_B" in roster)
+                    known_team = self._track_team.get(track_id)
+                    if known_team:
+                        team_key  = f"{js}_{known_team}"
+                        in_roster = (team_key in roster or
+                                     (js in roster and
+                                      f"{js}_A" not in roster and
+                                      f"{js}_B" not in roster))
+                    else:
+                        in_roster = (js in roster or
+                                     f"{js}_A" in roster or
+                                     f"{js}_B" in roster)
                     if not in_roster:
                         logger.debug(
-                            "track %d: OCR candidate %d rejected — not in roster",
-                            track_id, candidate,
+                            "track %d: OCR candidate %d rejected — not in roster"
+                            " (team=%s)",
+                            track_id, candidate, known_team or "unknown",
                         )
                         candidate  = None
                         read_conf  = 0.0
@@ -855,7 +867,9 @@ class JerseyOCR:
         if not crops or self._digit_model is None:
             return [None] * len(crops)
 
-        # Upscale small crops (mirrors _run_yolo_digit_ocr's resize step)
+        # Upscale small crops (mirrors _run_yolo_digit_ocr's resize step).
+        # Also apply CLAHE on the LAB luminance channel — improves digit contrast
+        # for dark jerseys and distant players without discarding color information.
         processed: list = []
         for crop in crops:
             if crop is None or crop.size == 0:
@@ -865,6 +879,16 @@ class JerseyOCR:
             if h < 8 or w < 4:
                 processed.append(None)
                 continue
+            try:
+                lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                tile_h = max(1, min(4, h // 2))
+                tile_w = max(1, min(4, w // 2))
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(tile_w, tile_h))
+                l = clahe.apply(l)
+                crop = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+            except Exception:
+                pass  # fall through with raw crop if LAB conversion fails
             if h < OCR_HEIGHT_PX:
                 scale = OCR_HEIGHT_PX / h
                 crop = cv2.resize(

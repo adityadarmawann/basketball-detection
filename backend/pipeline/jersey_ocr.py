@@ -242,9 +242,11 @@ class JerseyOCR:
         self._votes: dict[int, deque] = {}
 
         # Team classification
-        self._team_colors:       dict[str, list[float]]  = {}   # "A"/"B" → [H, S, V]
-        self._track_team:        dict[int, str]          = {}   # track_id → "A"/"B" (locked)
-        self._track_team_votes:  dict[int, dict[str, int]] = {} # track_id → {"A":n,"B":n}
+        # _track_team: current best team per track — updated every frame, NOT a permanent lock.
+        # _track_team_votes: rolling deque["A"|"B"] per track — old reads fall off naturally.
+        self._team_colors:       dict[str, list[float]] = {}   # "A"/"B" → [H, S, V]
+        self._track_team:        dict[int, str]         = {}   # track_id → current best team
+        self._track_team_votes:  dict[int, deque]       = {}   # track_id → deque["A"|"B"]
 
         # Per-track OCR scheduling: frame number of last OCR run per track_id.
         # Default -OCR_SAMPLE_EVERY so the first appearance always triggers OCR.
@@ -1133,45 +1135,51 @@ class JerseyOCR:
     # Team classification (K-Means HSV)
     # ------------------------------------------------------------------
 
-    _TEAM_VOTE_LOCK   = 3   # votes needed to lock classification
-    _TEAM_VOTE_MARGIN = 2   # winning side must lead by this many votes to lock
+    _TEAM_VOTE_HISTORY = 20   # rolling window — votes older than this are forgotten
 
     def _classify_team(
         self, player_crop: np.ndarray, track_id: int
     ) -> Optional[str]:
         """
-        Assign track to "A" or "B" using majority voting over multiple frames.
+        Assign track to "A" or "B" by comparing jersey chest color to calibrated
+        team color library. Re-runs every frame — no permanent lock.
 
-        Locks permanently after _TEAM_VOTE_LOCK votes with a clear majority.
-        This prevents a single bad crop (white number dominating the chest region,
-        player partially occluded) from mis-classifying a player forever.
+        Pipeline:
+          1. Compute median HSV of player chest crop (20-50% height, 15-85% width).
+          2. Measure HSV distance to each team center (_team_colors["A"/"B"]).
+          3. Append winner to a rolling deque (max _TEAM_VOTE_HISTORY reads).
+          4. Return current majority of the rolling window.
+
+        Rolling window (not permanent lock) means:
+          - A zoom-in that gives clearer color overrides stale wrong votes.
+          - Lighting/angle changes are absorbed within ~20 frames (~1.3s at 15fps).
+          - If a crop fails (partial occlusion), _track_team holds the last known
+            result so the player's team doesn't flicker to None.
         """
-        if track_id in self._track_team:
-            return self._track_team[track_id]
-
         if "A" not in self._team_colors or "B" not in self._team_colors:
-            return None
+            return self._track_team.get(track_id)   # no calibration yet — last known
 
         dominant_hsv = self._dominant_hsv(player_crop)
         if dominant_hsv is None:
-            return None
+            return self._track_team.get(track_id)   # crop failed — last known, no new vote
 
         dist_a = self._hsv_distance(dominant_hsv, self._team_colors["A"])
         dist_b = self._hsv_distance(dominant_hsv, self._team_colors["B"])
         vote   = "A" if dist_a <= dist_b else "B"
 
-        votes = self._track_team_votes.setdefault(track_id, {"A": 0, "B": 0})
-        votes[vote] += 1
-        total = votes["A"] + votes["B"]
+        # Rolling deque: append vote; old reads fall off after _TEAM_VOTE_HISTORY entries
+        if track_id not in self._track_team_votes:
+            self._track_team_votes[track_id] = deque(maxlen=self._TEAM_VOTE_HISTORY)
+        self._track_team_votes[track_id].append(vote)
 
-        # Lock once we have enough votes with a clear margin
-        if total >= self._TEAM_VOTE_LOCK and abs(votes["A"] - votes["B"]) >= self._TEAM_VOTE_MARGIN:
-            winner = "A" if votes["A"] > votes["B"] else "B"
-            self._track_team[track_id] = winner
-            return winner
+        votes     = self._track_team_votes[track_id]
+        count_a   = votes.count("A")
+        count_b   = votes.count("B")
+        result    = "A" if count_a >= count_b else "B"
 
-        # Tentative: return current best guess without locking
-        return vote
+        # Update current-best cache (used by Fast Path A and inherit_team)
+        self._track_team[track_id] = result
+        return result
 
     def calibrate_teams(
         self, frame: np.ndarray, tracked_players: list[dict]
@@ -1266,8 +1274,11 @@ class JerseyOCR:
         """
         if old_tid in self._track_team:
             self._track_team[new_tid] = self._track_team[old_tid]
-        elif old_tid in self._track_team_votes:
-            self._track_team_votes[new_tid] = dict(self._track_team_votes[old_tid])
+        if old_tid in self._track_team_votes:
+            self._track_team_votes[new_tid] = deque(
+                self._track_team_votes[old_tid],
+                maxlen=self._TEAM_VOTE_HISTORY,
+            )
 
     # ------------------------------------------------------------------
     # Colour helpers

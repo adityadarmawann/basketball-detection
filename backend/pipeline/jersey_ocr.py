@@ -45,8 +45,11 @@ MAX_VOTE_HISTORY      = 20   # rolling window — 20 reads per player (OCR_SAMPL
 TRANSFER_MIN_LONG_VOTES = 3  # 2-digit candidate needs this many reads before 1-digit votes
                              # are reinterpreted as partial reads; raised to 3 so "10→1"
                              # partial reads accumulate enough evidence before reassigning
-OCR_SAMPLE_EVERY      = 1    # run OCR on every process() call per player
+OCR_SAMPLE_EVERY      = 1    # unconfirmed players: OCR on every process() call
                              # roster whitelist removes false positives; voting absorbs noise
+CONFIRMED_OCR_EVERY   = 6    # confirmed players: re-OCR only every N calls (Fix #4) —
+                             # enough to catch a zoom-in confidence upgrade without
+                             # spending GPU re-reading already-known numbers
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 CONF_THRESHOLD    = 0.30  # jersey_no.pt detection confidence (lowered from 0.40 — distant/small numbers)
 OCR_HEIGHT_PX     = 160   # larger resize → OCR reads small/distant jersey numbers better
@@ -541,11 +544,22 @@ class JerseyOCR:
         for i, player in enumerate(tracked_players):
             track_id = player["track_id"]
 
-            # Per-track OCR timer — same logic as original
+            # Per-track OCR schedule (Fix #4): a player whose number is NOT yet
+            # confirmed is OCR'd on every call to grab the brief window where the
+            # number is readable under fast camera motion; an already-confirmed
+            # player is only re-read every CONFIRMED_OCR_EVERY calls (enough to
+            # catch a zoom-in confidence upgrade) so GPU isn't spent re-reading
+            # known numbers. Default seeds a first-appearance OCR regardless.
             frames_since_ocr = self._frame_counter - self._last_ocr_frame.get(
-                track_id, self._frame_counter - OCR_SAMPLE_EVERY
+                track_id, self._frame_counter - CONFIRMED_OCR_EVERY
             )
-            run_ocr = frames_since_ocr >= OCR_SAMPLE_EVERY
+            _is_confirmed = (
+                self._current_confirmed(track_id) is not None
+                or (tracker is not None
+                    and tracker.get_jersey_number(track_id) is not None)
+            )
+            _interval = CONFIRMED_OCR_EVERY if _is_confirmed else OCR_SAMPLE_EVERY
+            run_ocr = frames_since_ocr >= _interval
 
             # Fast path A: timer hasn't fired AND team already known
             if not run_ocr and track_id in self._track_team:

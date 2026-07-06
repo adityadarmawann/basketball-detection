@@ -1103,8 +1103,22 @@ class VideoProcessor:
                 logger.debug("Pose frame %d: %s", frame_id, e)
         _t4 = time.perf_counter()
 
-        # ── 5. Jersey OCR — run every self._ocr_interval (FPS-aware, stride-aligned) ──
-        if self._jersey and tracked_players and frame_id % self._ocr_interval == 0:
+        # ── 5. Jersey OCR ─────────────────────────────────────────────────────
+        # Fix #4: run every frame while ANY tracked player is still unidentified,
+        # to maximise sampling in the short window where a number is readable under
+        # fast camera motion. Once everyone on screen is confirmed, fall back to
+        # _ocr_interval (FPS-aware) to save GPU. Per-track scheduling inside
+        # process() then throttles the confirmed players individually.
+        _jersey_due = False
+        if self._jersey and tracked_players:
+            if frame_id % self._ocr_interval == 0:
+                _jersey_due = True
+            elif self._tracker and any(
+                self._tracker.get_jersey_number(p["track_id"]) is None
+                for p in tracked_players
+            ):
+                _jersey_due = True
+        if _jersey_due:
             try:
                 jersey = self._jersey.process(
                     frame, tracked_players, self._tracker,

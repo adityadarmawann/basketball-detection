@@ -27,6 +27,10 @@ _CLS_REFEREE = 2
 
 
 _LOST_TRACK_MAX_AGE = 60  # processed frames to keep lost-track jersey cache
+# IoU required to associate a brand-new track with a recently-lost UNCONFIRMED
+# track for partial-vote pooling (Fix #2). Higher than the confirmed-jersey
+# inheritance threshold (0.25) because pooling wrong votes corrupts a number.
+_PARTIAL_INHERIT_IOU = 0.35
 
 
 def _center(x1: float, y1: float, x2: float, y2: float) -> list[float]:
@@ -101,6 +105,10 @@ class PlayerTracker:
         self._player_last_seen: dict[int, list] = {}    # track_id → bbox (last frame)
         self._lost_jersey_cache: dict[int, tuple] = {}  # track_id → (bbox, jersey, age)
         self._newly_inherited: dict[int, int] = {}      # new_tid → old_tid (current frame only)
+        # Fix #2: ALL recently-lost tracks (confirmed or not) for partial-vote
+        # pooling — lets jersey_ocr carry unconfirmed number votes across a
+        # camera-cut re-ID instead of restarting from zero.
+        self._lost_track_cache: dict[int, tuple] = {}   # track_id → (bbox, age)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -266,6 +274,45 @@ class PlayerTracker:
                         "Jersey inherited: new tid=%d ← old tid=%d #%d (IoU=%.2f)",
                         tid, best_ltid, best_jersey, best_iou,
                     )
+
+        # ── Partial-vote inheritance (Fix #2): recover UNCONFIRMED fragments ──
+        # The block above only re-links tracks whose jersey was already confirmed.
+        # A player still mid-voting when the camera cuts gets a fresh track_id and
+        # loses the partial votes. Register every disappeared track and map new IDs
+        # to them spatially so jersey_ocr can POOL the partial votes. We only add to
+        # _newly_inherited (team + votes carry via inherit_team); track_jersey_map is
+        # left untouched — no number is asserted, just voting momentum preserved.
+        self._lost_track_cache = {
+            tid: (bbox, age + 1)
+            for tid, (bbox, age) in self._lost_track_cache.items()
+            if age < _LOST_TRACK_MAX_AGE
+        }
+        for tid, prev_bbox in self._player_last_seen.items():
+            if tid not in current_player_ids:
+                self._lost_track_cache.setdefault(tid, (prev_bbox, 0))
+
+        for player in tracked_players:
+            tid = player["track_id"]
+            # Only brand-new tracks not already handled by confirmed inheritance
+            # and not carrying a confirmed jersey.
+            if (tid not in new_track_ids
+                    or tid in self._newly_inherited
+                    or tid in self.track_jersey_map):
+                continue
+            best_iou, best_old = 0.0, None
+            for _ltid, (lost_bbox, _age) in self._lost_track_cache.items():
+                if _ltid in current_player_ids:
+                    continue
+                iou = _box_iou(player["bbox"], lost_bbox)
+                if iou > best_iou:
+                    best_iou, best_old = iou, _ltid
+            if best_iou >= _PARTIAL_INHERIT_IOU and best_old is not None:
+                self._newly_inherited[tid] = best_old
+                self._lost_track_cache.pop(best_old, None)
+                logger.debug(
+                    "Partial-vote assoc: new tid=%d ← old tid=%d (IoU=%.2f)",
+                    tid, best_old, best_iou,
+                )
 
         # Update last-seen positions for next frame's inheritance check
         self._player_last_seen = {p["track_id"]: p["bbox"] for p in tracked_players}

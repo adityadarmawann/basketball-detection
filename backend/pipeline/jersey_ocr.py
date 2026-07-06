@@ -1332,10 +1332,16 @@ class JerseyOCR:
         self._track_team_votes.clear()
 
     def inherit_team(self, new_tid: int, old_tid: int) -> None:
-        """Copy locked team or accumulated votes from old_tid to new_tid.
+        """Carry team AND accumulated OCR votes from old_tid to new_tid.
 
         Called when ByteTrack drops a track and re-assigns a new ID to the same
-        physical player, so team colour doesn't flicker for 3 tentative frames.
+        physical player (frequent under fast camera pans / angle switches).
+
+        Team transfer keeps the bbox colour stable. Vote transfer (Fix #2) is the
+        important part: without it, a player who was mid-confirmation before a
+        camera cut restarts number voting from zero on the new ID, so the 2-3
+        good reads needed to cross VOTE_THRESHOLD scatter across fragments and a
+        number is never confirmed. Pooling the votes preserves that momentum.
         """
         if old_tid in self._track_team:
             self._track_team[new_tid] = self._track_team[old_tid]
@@ -1343,6 +1349,25 @@ class JerseyOCR:
             self._track_team_votes[new_tid] = deque(
                 self._track_team_votes[old_tid],
                 maxlen=self._TEAM_VOTE_HISTORY,
+            )
+
+        # ── Fix #2: pool OCR number votes across the fragment ────────────────
+        old_votes = self._votes.get(old_tid)
+        if old_votes:
+            existing = self._votes.get(new_tid)
+            if existing:
+                # New ID already gathered some reads this life — merge old in
+                # (deque maxlen keeps only the most recent MAX_VOTE_HISTORY).
+                for v in old_votes:
+                    existing.append(v)
+            else:
+                self._votes[new_tid] = deque(old_votes, maxlen=MAX_VOTE_HISTORY)
+        # Carry the best digit-model confidence so the confidence-upgrade logic
+        # doesn't treat the re-ID'd player as brand new.
+        if old_tid in self._best_read_conf:
+            self._best_read_conf[new_tid] = max(
+                self._best_read_conf.get(new_tid, 0.0),
+                self._best_read_conf[old_tid],
             )
 
     # ------------------------------------------------------------------

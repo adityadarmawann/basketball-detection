@@ -8,6 +8,7 @@ import logging
 import os
 from typing import Optional
 
+import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,106 @@ def _box_iou(a: list, b: list) -> float:
     inter = (ix2 - ix1) * (iy2 - iy1)
     union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
     return inter / union if union > 0 else 0.0
+
+
+# ── Global Motion Compensation (workflow fix B) ──────────────────────────────
+# The camera pans continuously, so ByteTrack's camera-uncompensated Kalman
+# prediction drifts a track's box onto a different nearby player (the root cause).
+# GMC estimates the frame-to-frame global affine from STATIC background (moving
+# players masked out) and warps every track's Kalman state so predictions follow
+# the pan. Env-gated DEFAULT-OFF (needs validation) and every call is guarded so
+# it can NEVER break the default path.
+_GMC_ENABLED = os.getenv("GMC_ENABLED", "0") == "1"
+_GMC_SCALE   = float(os.getenv("GMC_SCALE", "0.2"))     # downscale for cheap optical flow
+
+
+def _apply_gmc(stracks, H) -> None:
+    """Warp each track's 8-dim xyah Kalman state (+velocities) by affine H (2x3).
+    Ported from BoT-SORT multi_gmc; safe no-op on empty/None."""
+    if H is None or not stracks:
+        return
+    R = H[:2, :2]
+    R8x8 = np.kron(np.eye(4, dtype=float), R)
+    t = H[:2, 2]
+    for st in stracks:
+        if getattr(st, "mean", None) is None:
+            continue
+        mean = R8x8.dot(st.mean)
+        mean[:2] += t
+        st.mean = mean
+        st.covariance = R8x8.dot(st.covariance).dot(R8x8.T)
+
+
+class _GMC:
+    """Masked sparse-optical-flow global motion compensation.
+
+    Self-contained (does NOT use boxmot's SparseOptFlow, which has a
+    keypoint-refresh bug that produces plausible-but-wrong affines over long
+    pans — workflow trap #1). Fix: re-detect features EVERY frame. Returns a 2x3
+    affine (full-res coords) mapping prev→cur; identity on any failure.
+    """
+
+    def __init__(self, scale: float = 0.2, max_corners: int = 200, min_inliers: int = 20):
+        self.scale = float(scale)
+        self.max_corners = int(max_corners)
+        self.min_inliers = int(min_inliers)
+        self.prev_gray = None
+        self.prev_pts = None
+
+    def _detect(self, gray, mask):
+        return cv2.goodFeaturesToTrack(
+            gray, maxCorners=self.max_corners, qualityLevel=0.01,
+            minDistance=max(2, int(8 * self.scale)), mask=mask, blockSize=3,
+        )
+
+    def _mask(self, shape, det_boxes):
+        m = np.full(shape, 255, dtype=np.uint8)
+        if det_boxes is not None and len(det_boxes):
+            for b in det_boxes:
+                x1, y1, x2, y2 = (np.asarray(b[:4], dtype=float) * self.scale).astype(int)
+                m[max(0, y1):max(0, y2), max(0, x1):max(0, x2)] = 0
+        return m
+
+    def apply(self, frame, det_boxes):
+        H = np.eye(2, 3, dtype=np.float64)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+        gray = cv2.resize(gray, (max(1, int(w * self.scale)), max(1, int(h * self.scale))))
+        mask = self._mask(gray.shape, det_boxes)
+
+        if self.prev_gray is None or self.prev_pts is None or len(self.prev_pts) < 8:
+            self.prev_gray = gray
+            self.prev_pts = self._detect(gray, mask)
+            return H
+
+        cur_pts, status, _ = cv2.calcOpticalFlowPyrLK(
+            self.prev_gray, gray, self.prev_pts, None)
+        if cur_pts is not None and status is not None:
+            good_prev = self.prev_pts[status.ravel() == 1]
+            good_cur = cur_pts[status.ravel() == 1]
+            if len(good_prev) >= self.min_inliers:
+                A, inl = cv2.estimateAffinePartial2D(good_prev, good_cur, method=cv2.RANSAC)
+                if A is not None and inl is not None and int(inl.sum()) >= self.min_inliers:
+                    A = A.astype(np.float64)
+                    A[0, 2] /= self.scale          # rescale translation to full-res
+                    A[1, 2] /= self.scale
+                    # Sanity gate (workflow trap #1): a real camera pan is a SMALL,
+                    # near-rigid per-frame motion. A low-texture court yields noisy
+                    # estimates that would jump tracks and SHATTER ids, so reject any
+                    # affine that is not ~unit-scale with a plausible translation.
+                    sc   = float(np.sqrt(abs(A[0, 0] * A[1, 1] - A[0, 1] * A[1, 0])))
+                    tmag = float(np.hypot(A[0, 2], A[1, 2]))
+                    if 0.9 <= sc <= 1.1 and tmag <= 0.3 * w:
+                        H = A
+
+        # ALWAYS refresh features (the bug fix) so keypoints don't deplete over a long pan.
+        self.prev_gray = gray
+        self.prev_pts = self._detect(gray, mask)
+        return H
+
+    def reset(self):
+        self.prev_gray = None
+        self.prev_pts = None
 
 
 class PlayerTracker:
@@ -117,6 +218,9 @@ class PlayerTracker:
         # pooling — lets jersey_ocr carry unconfirmed number votes across a
         # camera-cut re-ID instead of restarting from zero.
         self._lost_track_cache: dict[int, tuple] = {}   # track_id → (bbox, age)
+        # GMC (fix B, env-gated default-off): per-frame camera-motion affine.
+        self._gmc = None
+        self._gmc_H = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -165,6 +269,9 @@ class PlayerTracker:
             frame_shape: (H, W, C) from frame.shape.
         """
         self._frame_shape = frame_shape
+        if _GMC_ENABLED and self._gmc is None:
+            self._gmc = _GMC(scale=_GMC_SCALE)
+            logger.info("GMC (camera-motion compensation) ENABLED (scale=%.2f)", _GMC_SCALE)
         try:
             self._player_tracker  = self._build_tracker()
             self._referee_tracker = self._build_tracker()
@@ -193,6 +300,10 @@ class PlayerTracker:
         self.track_jersey_map.clear()
         self._player_last_seen.clear()
         self._lost_jersey_cache.clear()
+        self._lost_track_cache.clear()
+        if self._gmc is not None:
+            self._gmc.reset()          # new clip → drop previous-frame features
+            self._gmc_H = None
         logger.info("PlayerTracker reset (quarter boundary or new clip)")
 
     # ------------------------------------------------------------------
@@ -244,6 +355,15 @@ class PlayerTracker:
         player_arr = self._detections_to_array(
             detections_dict.get("players", []), _CLS_PLAYER
         )
+        # GMC: estimate this frame's camera motion ONCE (players masked as moving),
+        # then _run_tracker warps each tracker's Kalman states before association.
+        self._gmc_H = None
+        if self._gmc is not None:
+            try:
+                self._gmc_H = self._gmc.apply(frame, player_arr)
+            except Exception as _e:
+                logger.debug("GMC apply failed: %s", _e)
+                self._gmc_H = None
         tracked_players = self._run_tracker(
             self._player_tracker, player_arr, frame, "player"
         )
@@ -366,6 +486,18 @@ class PlayerTracker:
             # BoxMOT still expects a call each frame to advance its Kalman
             # filters for lost tracks. Use the canonical empty array shape.
             dets = np.empty((0, 6), dtype=np.float32)
+
+        # GMC (fix B): warp this tracker's Kalman states by the camera-motion affine
+        # BEFORE its internal multi_predict/association, so predictions follow the pan.
+        if getattr(self, "_gmc_H", None) is not None:
+            try:
+                _apply_gmc(
+                    list(getattr(tracker, "tracked_stracks", []))
+                    + list(getattr(tracker, "lost_stracks", [])),
+                    self._gmc_H,
+                )
+            except Exception as _e:
+                logger.debug("GMC warp failed (class=%s): %s", class_label, _e)
 
         try:
             tracks = tracker.update(dets, frame)  # → np.ndarray (N, 8)

@@ -650,16 +650,32 @@ class VideoProcessor:
 
         self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // self._fps_skip
 
+        # Effective processed fps = source_fps / PROCESS_STRIDE. EVERY component
+        # that converts frames↔seconds (tracker Kalman filter, stats speed/minutes)
+        # must use THIS, not the static TARGET_FPS, or its physics is skewed.
+        _eff_fps = max(1, round(self._source_fps / PROCESS_STRIDE))
+        self._target_fps = _eff_fps
+
         # Re-initialise ByteTrack with the actual processed fps so its Kalman filter
-        # predicts position correctly. Processed fps = source_fps / PROCESS_STRIDE.
-        # Without this, ByteTrack is calibrated for TARGET_FPS=25 but receives frames
-        # at ~7.5fps → velocity model overshoots → IoU matching fails on fast players.
+        # predicts position correctly. Without this, ByteTrack is calibrated for
+        # TARGET_FPS but receives frames slower → velocity model overshoots → IoU
+        # matching fails on fast players.
         if self._tracker:
-            _eff_fps = max(1, round(self._source_fps / PROCESS_STRIDE))
             self._tracker.frame_rate = _eff_fps
             if self._frame_width and self._frame_height:
                 self._tracker.initialize((self._frame_height, self._frame_width, 3))
                 logger.info("Tracker re-initialised at effective fps=%d", _eff_fps)
+
+        # Stats convert frames→seconds for speed (km/h), distance and minutes via
+        # self.fps. Created at TARGET_FPS before the source fps was known — resync
+        # now so 60fps→30fps (or any rate) yields correct physical metrics, not a
+        # 25/eff_fps-skewed speed and minutes.
+        if self._stats is not None:
+            try:
+                self._stats.fps = _eff_fps
+                logger.info("StatsCalculator fps synced to effective fps=%d", _eff_fps)
+            except Exception as _e:
+                logger.warning("Could not sync stats fps: %s", _e)
 
         # FPS-aware OCR interval: target per-player OCR every ~8 source frames (~0.27s at 30fps).
         # jersey.process() is called every _ocr_interval processed frames; each player

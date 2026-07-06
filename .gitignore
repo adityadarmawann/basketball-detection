@@ -38,3 +38,8 @@ backend/output/**/*.csv
 backend/output/**/*.json
 backend/output/*/
 !backend/output/.gitkeep
+
+# Dev worktree runtime (basketball-dev)
+backend/output_dev/
+backend/uploads_dev/
+frontend/node_modules

@@ -5,6 +5,7 @@ Ball is a pass-through from detector — not tracked via BoxMOT.
 """
 
 import logging
+import os
 from typing import Optional
 
 import numpy as np
@@ -26,7 +27,14 @@ _CLS_PLAYER  = 0
 _CLS_REFEREE = 2
 
 
-_LOST_TRACK_MAX_AGE = 60  # processed frames to keep lost-track jersey cache
+# processed frames to keep the lost-track pooling cache. CRITICAL (workflow #2):
+# BoxMOT revives lost tracks with the SAME id for the whole buffer_size window
+# (= int(frame_rate/30 * track_buffer)), so tracker.py's partial-vote pooling —
+# which only fires for BRAND-NEW ids — is inert until a new id spawns. This cache
+# MUST outlive buffer_size or pooling never re-stitches the extra fragments that
+# the stricter match_thresh produces. Default 120 > buffer_size 90 (buffer 90 @
+# 30fps). If BYTETRACK_BUFFER is raised, raise this with it.
+_LOST_TRACK_MAX_AGE = int(os.getenv("LOST_TRACK_MAX_AGE", "120"))  # was 60
 # IoU required to associate a brand-new track with a recently-lost UNCONFIRMED
 # track for partial-vote pooling (Fix #2). Higher than the confirmed-jersey
 # inheritance threshold (0.25) because pooling wrong votes corrupts a number.
@@ -122,13 +130,21 @@ class PlayerTracker:
             from boxmot.trackers.botsort.bot_sort import BoTSORT
 
             if self.tracker_type == "bytetrack":
-                # match_thresh is an IoU DISTANCE threshold (1 - IoU), not similarity.
-                # 0.8 → match when IoU ≥ 0.2 (very lenient — fast-moving players survive).
-                # Default was 0.6 → IoU ≥ 0.4; lowering to 0.3 was wrong (IoU ≥ 0.7, stricter).
-                #
-                # buffer_size = int(frame_rate / 30 * track_buffer). At 15fps effective:
-                # track_buffer=450 → buffer_size = int(15/30*450) = 225 frames = 15 s of memory.
-                return BYTETracker(track_buffer=450, frame_rate=self.frame_rate, match_thresh=0.8)
+                # ── Workflow fix A: purer tracks under camera motion ──────────────
+                # match_thresh is an IoU DISTANCE threshold (1 - IoU): 0.8 → match at
+                # IoU≥0.2 (very lenient); 0.5 → IoU≥0.5 (genuine overlap required).
+                # The old 0.8 + track_buffer=450 (15s revival tail) let one track_id
+                # weld onto many players under continuous pan (measured 2.38 distinct
+                # jerseys/track). Stricter match + shorter buffer keep each track PURE
+                # (≈1 player); the extra fragments are re-stitched by the vote-pooling
+                # (needs _LOST_TRACK_MAX_AGE > buffer_size, see above).
+                # Do NOT go below 0.5: the low-score 2nd-assoc (0.5) and unconfirmed
+                # gate (0.7) are hardcoded in byte_tracker; below 0.5 inverts strictness.
+                # Env-gated so 30/0.45 "strict" preset is A/B-testable without redeploy.
+                _mt = float(os.getenv("BYTETRACK_MATCH_THRESH", "0.5"))
+                _tb = int(os.getenv("BYTETRACK_BUFFER", "90"))
+                logger.info("ByteTrack params: match_thresh=%.2f  track_buffer=%d", _mt, _tb)
+                return BYTETracker(track_buffer=_tb, frame_rate=self.frame_rate, match_thresh=_mt)
             else:  # botsort
                 return BoTSORT(
                     model_weights=None, device="cpu", fp16=False,

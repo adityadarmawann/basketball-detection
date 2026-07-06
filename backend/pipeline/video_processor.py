@@ -1521,6 +1521,33 @@ class VideoProcessor:
                 "cp": court_pos,   # [x_m, y_m] or None — for 2D court overlay sync
             })
 
+        # Dedup identical (team, jersey) identities so the REPLAY overlay (which
+        # reads frames.json) never shows two boxes with the same number/name — the
+        # WS live path already does this (_build_ws_message), but the snapshot did
+        # not, so a ghost/inherited-jersey track collided with the real one. Keep
+        # the larger bbox (more prominent). Unconfirmed players are always kept.
+        _seen: dict = {}
+        _dedup = []
+        for _p in players_out:
+            _jn = _p.get("j")
+            _tm = _p.get("t") or ""
+            if _jn is None or not _tm:
+                _dedup.append(_p)
+                continue
+            _key = (_tm, _jn)
+            if _key not in _seen:
+                _seen[_key] = len(_dedup)
+                _dedup.append(_p)
+            else:
+                _ei = _seen[_key]
+                _eb = _dedup[_ei].get("b", [])
+                _nb = _p.get("b", [])
+                _ea = ((_eb[2] - _eb[0]) * (_eb[3] - _eb[1])) if len(_eb) == 4 else 0
+                _na = ((_nb[2] - _nb[0]) * (_nb[3] - _nb[1])) if len(_nb) == 4 else 0
+                if _na > _ea:
+                    _dedup[_ei] = _p
+        players_out = _dedup
+
         ball_raw = tracking.get("tracked_ball")
         ball_out = None
         if ball_raw:

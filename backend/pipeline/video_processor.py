@@ -677,6 +677,18 @@ class VideoProcessor:
             except Exception as _e:
                 logger.warning("Could not sync stats fps: %s", _e)
 
+        # Event engine time-windows (FG/BLK cooldowns, rebound/assist/foul windows)
+        # are frame counts tuned at a reference fps — scale them to the actual
+        # processed fps so score/block/rebound timing stays constant wall-clock
+        # time. Without this, 30fps effective halves every window vs the tuned
+        # 15fps baseline → double-counted baskets and mis-timed rebounds.
+        if self._events_engine is not None:
+            try:
+                self._events_engine.set_fps(_eff_fps)
+                logger.info("EventEngine fps set to effective fps=%d", _eff_fps)
+            except Exception as _e:
+                logger.warning("Could not set event engine fps: %s", _e)
+
         # FPS-aware OCR interval: target per-player OCR every ~8 source frames (~0.27s at 30fps).
         # jersey.process() is called every _ocr_interval processed frames; each player
         # fires OCR on every process() call (OCR_SAMPLE_EVERY=1).

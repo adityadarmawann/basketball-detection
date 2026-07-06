@@ -33,6 +33,13 @@ THREE_PT_STRAIGHT_X  = 2.99    # x where corner straight meets arc (left basket)
 # ── Tunable thresholds ────────────────────────────────────────────────────────
 POSSESSION_DIST_PX     = 80     # pixels  — ball "owned" if player inside this
 POSSESSION_DIST_M      = 1.2    # meters
+# Reference processed fps the frame-windows below were tuned & validated at.
+# EventEngine(fps=…)/set_fps() scale every window by fps/REFERENCE_FPS so event
+# timing stays constant wall-clock time at any processed rate (e.g. 45-frame FG
+# cooldown = 3 s @15fps stays 3 s @30fps → 90 frames). At 15fps scale=1.0 → the
+# behaviour is byte-identical to before this change.
+REFERENCE_FPS          = 15.0
+
 POSSESSION_CONFIRM_F   = 3      # consecutive frames to confirm new possession
 
 FG_HOOP_RADIUS_PX      = 70     # pixels  — ball inside hoop zone (wider → fewer missed baskets)
@@ -102,7 +109,11 @@ class EventEngine:
         possession  : {"team": str|None, "player_id": int|None, "duration_frames": int}
     """
 
-    def __init__(self) -> None:
+    def __init__(self, fps: float = REFERENCE_FPS) -> None:
+        # Scale all frame-windows to the actual processed fps (see REFERENCE_FPS).
+        # Must run first: _ball_px_hist below uses a scaled maxlen.
+        self._configure_fps(fps)
+
         # ── Public state ──────────────────────────────────────────────────
         self.score:           dict  = {"team_a": 0, "team_b": 0}
         self.possession:      dict  = {"team": None, "player_id": None,
@@ -151,7 +162,7 @@ class EventEngine:
         # ── Trajectory-based scoring — pixel-space ball history ───────────
         # Stores recent (ball_x, ball_y) in pixel coords regardless of court calib.
         # Used to check ball came from ABOVE the hoop before counting a score.
-        self._ball_px_hist: deque = deque(maxlen=FG_ABOVE_WINDOW_F)
+        self._ball_px_hist: deque = deque(maxlen=self._fg_above_window_f)
 
         # ── Per-player court-position history for 2PT/3PT estimation ─────
         # When action model doesn't fire (no last_shot_pos), we look back in
@@ -159,6 +170,42 @@ class EventEngine:
         # hoop — that's the best proxy for where they actually released the ball.
         # Only populated when is_court=True (court calibrated).
         self._player_court_hist: dict = {}   # track_id → deque[(x_m, y_m)]
+
+    def _configure_fps(self, fps: float) -> None:
+        """(Re)compute every frame-window for the given processed fps.
+
+        Module constants hold the values validated at REFERENCE_FPS; each is
+        scaled by fps/REFERENCE_FPS and floored at 1 frame. Pure-integer windows
+        so downstream frame comparisons are unchanged in kind, only in span.
+        """
+        self.fps = float(fps)
+        _s = self.fps / REFERENCE_FPS
+
+        def _sc(v: int) -> int:
+            return max(1, int(round(v * _s)))
+
+        self._possession_confirm_f = _sc(POSSESSION_CONFIRM_F)
+        self._fg_cooldown_f        = _sc(FG_COOLDOWN_F)
+        self._fg_above_window_f    = _sc(FG_ABOVE_WINDOW_F)
+        self._fg_miss_timeout_f    = _sc(FG_MISS_TIMEOUT_F)
+        self._fg_ball_lost_reset_f = _sc(FG_BALL_LOST_RESET_F)
+        self._fg_zone_dwell_f      = _sc(FG_ZONE_DWELL_F)
+        self._fg_hoop_cache_ttl    = _sc(FG_HOOP_CACHE_TTL)
+        self._fg_shooter_ttl_f     = _sc(FG_SHOOTER_TTL_F)
+        self._rebound_cooldown_f   = _sc(REBOUND_COOLDOWN_F)
+        self._blk_cooldown_f       = _sc(BLK_COOLDOWN_F)
+        self._blk_shot_window_f    = _sc(BLK_SHOT_WINDOW_F)
+        self._blk_path2_window_f   = _sc(BLK_PATH2_WINDOW_F)
+        self._assist_window_f      = _sc(ASSIST_WINDOW_F)
+        self._foul_confirm_f       = _sc(FOUL_CONFIRM_F)
+
+    def set_fps(self, fps: float) -> None:
+        """Reconfigure frame-windows for the actual processed fps. Call once
+        before processing (after the source fps is known). Safe to call on a
+        fresh engine — _ball_px_hist is empty at that point."""
+        self._configure_fps(fps)
+        # maxlen depends on fps → rebuild the ring buffer (preserve any contents).
+        self._ball_px_hist = deque(self._ball_px_hist, maxlen=self._fg_above_window_f)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -241,7 +288,7 @@ class EventEngine:
         # Apply same staleness gate as FG detection so dead-camera hoop positions
         # don't silently inflate JUMP→SHOOT promotions after a camera pan.
         px_hoops = hoops or (
-            self._last_hoops_px if self._hoop_cache_age <= FG_HOOP_CACHE_TTL else []
+            self._last_hoops_px if self._hoop_cache_age <= self._fg_hoop_cache_ttl else []
         )
         for act in actions:
             raw_act = act.get("action", "").upper()
@@ -278,7 +325,7 @@ class EventEngine:
                 # player processed in the loop instead of the actual shooter.
                 active_shot = (
                     self._last_shooter_id is not None
-                    and self.frame_count - self._shot_attempt_frame <= FG_SHOOTER_TTL_F
+                    and self.frame_count - self._shot_attempt_frame <= self._fg_shooter_ttl_f
                 )
                 if active_shot:
                     continue
@@ -296,7 +343,7 @@ class EventEngine:
         # Expire shooter attribution after TTL (prevents stale attribution when
         # neither MADE_FG nor MISSED_FG fires — e.g. loose ball after a pass).
         if (self._last_shooter_id is not None and
-                self.frame_count - self._shot_attempt_frame > FG_SHOOTER_TTL_F):
+                self.frame_count - self._shot_attempt_frame > self._fg_shooter_ttl_f):
             self._last_shooter_id = None
             self.last_shot_pos    = None
 
@@ -386,13 +433,13 @@ class EventEngine:
             # Small grace window before resetting zone state — 1–2 missing frames
             # are common for fast-moving balls and shouldn't cancel a detection.
             self._ball_lost_frames += 1
-            if self._ball_lost_frames >= FG_BALL_LOST_RESET_F:
+            if self._ball_lost_frames >= self._fg_ball_lost_reset_f:
                 self._ball_in_hoop_frames = 0
             return events
         self._ball_lost_frames = 0
 
         # Reject stale hoop cache — hoops from many seconds ago are unreliable.
-        if self._hoop_cache_age > FG_HOOP_CACHE_TTL:
+        if self._hoop_cache_age > self._fg_hoop_cache_ttl:
             self._ball_in_hoop_frames = 0
             return events
 
@@ -416,7 +463,7 @@ class EventEngine:
         # before scoring.  This eliminates single-frame false positives from
         # dribbles, deflections, and ball-near-rim but not-through-rim moments.
         # Fire exactly on the Nth frame (== not >=) so cooldown prevents re-fire.
-        if self._ball_in_hoop_frames != FG_ZONE_DWELL_F:
+        if self._ball_in_hoop_frames != self._fg_zone_dwell_f:
             return events
 
         # ── 2. "From above" check — pixel space ──────────────────────────
@@ -499,7 +546,7 @@ class EventEngine:
             "timestamp_ms": ts_ms,
         })
 
-        self._fg_cooldown          = FG_COOLDOWN_F
+        self._fg_cooldown          = self._fg_cooldown_f
         self._miss_frame           = -999
         self._last_shooter_id      = None
         self.last_shot_pos         = None
@@ -572,7 +619,7 @@ class EventEngine:
             return None
 
         frames_since_shot = self.frame_count - self._shot_attempt_frame
-        if frames_since_shot < FG_MISS_TIMEOUT_F:
+        if frames_since_shot < self._fg_miss_timeout_f:
             return None
 
         shooter = next(
@@ -623,7 +670,7 @@ class EventEngine:
           3. A player gains possession of the ball.
         """
         frames_since_miss = self.frame_count - self._miss_frame
-        if frames_since_miss > REBOUND_COOLDOWN_F * 3:
+        if frames_since_miss > self._rebound_cooldown_f * 3:
             return None
 
         ball_pos = self._ball_pos(ball, is_court)
@@ -668,7 +715,7 @@ class EventEngine:
         if self._last_shooter_team and reb_team:
             sub_type = "OFF" if reb_team == self._last_shooter_team else "DEF"
 
-        self._rebound_cooldown = REBOUND_COOLDOWN_F
+        self._rebound_cooldown = self._rebound_cooldown_f
         self._miss_frame       = -999
 
         return {
@@ -703,7 +750,7 @@ class EventEngine:
         if fgm is None:
             return None
 
-        if self.frame_count - self._pass_frame > ASSIST_WINDOW_F:
+        if self.frame_count - self._pass_frame > self._assist_window_f:
             self.last_passer = None
             return None
 
@@ -813,13 +860,13 @@ class EventEngine:
         # Without the gate, any dribble direction-change + 5% bbox overlap fires a BLK.
         if self._blk_cooldown == 0:
             frames_since_shot = self.frame_count - self._shot_attempt_frame
-            if self._last_shooter_id is not None and frames_since_shot <= BLK_SHOT_WINDOW_F:
+            if self._last_shooter_id is not None and frames_since_shot <= self._blk_shot_window_f:
                 for act in actions:
                     if act.get("action", "").upper() == "BLOCK":
                         tid = act["track_id"]
                         p   = next((x for x in players if x["track_id"] == tid), None)
                         if p and p.get("team") != self._last_shooter_team:
-                            self._blk_cooldown = BLK_COOLDOWN_F
+                            self._blk_cooldown = self._blk_cooldown_f
                             return {
                                 "type":      "BLK",
                                 "track_id":  tid,
@@ -831,7 +878,7 @@ class EventEngine:
         # Path 2 — proximity at shot moment (extended to BLK_PATH2_WINDOW_F frames).
         if (
             self._last_shooter_id is not None
-            and self.frame_count - self._shot_attempt_frame <= BLK_PATH2_WINDOW_F
+            and self.frame_count - self._shot_attempt_frame <= self._blk_path2_window_f
         ):
             shooter = next(
                 (p for p in players if p["track_id"] == self._last_shooter_id),
@@ -893,7 +940,7 @@ class EventEngine:
                     self._contact_frames[key] = 0
                     continue
 
-                if self._contact_frames[key] == FOUL_CONFIRM_F:
+                if self._contact_frames[key] == self._foul_confirm_f:
                     self._contact_frames[key] = 0
                     # Fouler = player without ball
                     if ball_carrier in (p1["track_id"], p2["track_id"]):
@@ -948,7 +995,7 @@ class EventEngine:
             self._poss_candidate = cand_id
             self._poss_frames    = 1
 
-        if self._poss_frames < POSSESSION_CONFIRM_F:
+        if self._poss_frames < self._possession_confirm_f:
             return None
 
         new_team = closest.get("team", "")
@@ -1031,7 +1078,7 @@ class EventEngine:
         self._prev_poss_team     = None
         self._contact_frames     = {}
         self._last_hoops_px      = []
-        self._ball_px_hist       = deque(maxlen=FG_ABOVE_WINDOW_F)
+        self._ball_px_hist       = deque(maxlen=self._fg_above_window_f)
         self._player_court_hist  = {}
 
     # ── Private helpers ───────────────────────────────────────────────────────

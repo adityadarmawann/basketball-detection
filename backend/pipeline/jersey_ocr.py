@@ -74,6 +74,12 @@ TEAM_LOCK_MIN_VOTES   = 5     # votes before a track's team may lock
 TEAM_LOCK_MAJORITY    = 0.7   # majority fraction required to lock
 TEAM_SPLIT_DISAGREE   = 4     # consecutive CONFIDENT disagreements that split identity
 TEAM_CONFIDENT_MARGIN = 25.0  # min |dist_a - dist_b| for a frame's color vote to count
+# Weight of the brightness (V) term in team-colour distance. Raised 0.25->0.5:
+# measured on real UNESA(white,bright ~V220) vs UBAYA(maroon,dark ~V130) frames,
+# brightness is a strong camera-robust discriminator that 0.25 under-used, so a
+# warm-lit white player (elevated S) mis-flipped to red. 0.5 fixed every measured
+# borderline (6/6) with no regressions. Env-gated for A/B testing.
+TEAM_VALUE_WEIGHT     = float(os.getenv("TEAM_VALUE_WEIGHT", "0.5"))
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 DIGIT_DEDUP_OVERLAP = 0.5  # x-overlap (fraction of narrower box) above which two
                            # digit detections are treated as the SAME physical digit
@@ -1564,7 +1570,7 @@ class JerseyOCR:
         dv = abs(a[2] - b[2])
         # Scale hue weight by saturation — 0 when achromatic, up to 2.0 when fully saturated
         hue_weight = 2.0 * min(a[1], b[1]) / 255.0
-        return float(hue_weight * dh + ds + dv * 0.25)
+        return float(hue_weight * dh + ds + dv * TEAM_VALUE_WEIGHT)
 
     # ------------------------------------------------------------------
     # Helpers

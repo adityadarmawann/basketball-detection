@@ -281,12 +281,19 @@ def _hex_to_hsv(hex_color: str) -> list:
     return [hh * 180.0, s * 255.0, v * 255.0]
 
 
+# Brightness (V) weight in team-colour distance — mirrors jersey_ocr.TEAM_VALUE_WEIGHT
+# (same env var so the anchor-admit guard + K-Means orientation use the same metric
+# as runtime classification). Raised 0.25->0.5: white(bright) vs maroon(dark) is
+# strongly value-separable and 0.25 under-used it.
+_TEAM_VALUE_WEIGHT = float(os.getenv("TEAM_VALUE_WEIGHT", "0.5"))
+
+
 def _hsv_dist(a: list, b: list) -> float:
     """Hue-aware HSV distance — mirrors JerseyOCR._hsv_distance."""
     dh = abs(a[0] - b[0])
     dh = min(dh, 180.0 - dh)
     hue_weight = 2.0 * min(a[1], b[1]) / 255.0
-    return float(hue_weight * dh + abs(a[1] - b[1]) + abs(a[2] - b[2]) * 0.25)
+    return float(hue_weight * dh + abs(a[1] - b[1]) + abs(a[2] - b[2]) * _TEAM_VALUE_WEIGHT)
 
 
 # Minimum _hsv_dist between the two user-supplied team colors required to treat

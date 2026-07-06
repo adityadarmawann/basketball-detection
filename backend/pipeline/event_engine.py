@@ -504,16 +504,35 @@ class EventEngine:
                     self._ball_in_hoop_frames = 0
                     return events
 
-        # ── 3. Identify shooter ──────────────────────────────────────────
-        # Prefer the last player the action model flagged as shooter;
-        # fall back to whoever is closest to the ball right now.
+        # ── 3. Identify shooter + the SCORING (offensive) team ────────────
+        # Team-level correctness holds even when the exact player/number is
+        # unknown: a basket belongs to the ATTACKING team. Prefer the team
+        # captured at the shot attempt (the real shooter, on offense), then the
+        # confirmed possession team; the resolved shooter's colour is last resort.
+        # This stops a contesting DEFENDER near the rim (which the closest-to-ball
+        # fallback can pick) from crediting the WRONG team.
         ball_pos = self._ball_pos(ball, is_court)   # court or pixel — for closest() search
+        offense_team = ""
+        if self._last_shooter_id is not None and self._last_shooter_team:
+            offense_team = self._last_shooter_team
+        elif self.possession.get("team"):
+            offense_team = self.possession["team"]
+
         shooter = None
         if self._last_shooter_id is not None:
             shooter = next(
                 (p for p in players if p["track_id"] == self._last_shooter_id),
                 None,
             )
+        if shooter is None and offense_team:
+            # closest player ON THE OFFENSIVE TEAM — never credit a contesting defender
+            offensive = [p for p in players if p.get("team") == offense_team]
+            if offensive:
+                shooter = self._closest_to(
+                    ball_pos if ball_pos is not None else ball_px,
+                    offensive,
+                    is_court and ball_pos is not None,
+                )
         if shooter is None:
             shooter = self._closest_to(
                 ball_pos if ball_pos is not None else ball_px,
@@ -522,6 +541,10 @@ class EventEngine:
             )
         if shooter is None:
             return events
+
+        # Scoring team: offense signal first (robust without a jersey number),
+        # then the resolved shooter's colour as last resort.
+        made_team = offense_team or shooter.get("team", "")
 
         # ── 4. Determine shot position & 2PT/3PT ────────────────────────
         # Priority: (a) last_shot_pos from action model (most accurate — recorded
@@ -540,7 +563,7 @@ class EventEngine:
             "type":         "MADE_FG",
             "track_id":     shooter["track_id"],
             "quarter":      quarter,
-            "team":         shooter.get("team", ""),
+            "team":         made_team,
             "is_three":     is_three,
             "court_pos":    shot_pos,
             "timestamp_ms": ts_ms,
@@ -559,7 +582,7 @@ class EventEngine:
         pts = 3 if is_three else 2
         logger.info(
             "MADE_FG  +%dPTS  shooter=%s  team=%s  3pt=%s  Q%d  video=%s",
-            pts, shooter["track_id"], shooter.get("team", "?"),
+            pts, shooter["track_id"], made_team or "?",
             is_three, quarter, _fmt_ts(ts_ms),
         )
         return events

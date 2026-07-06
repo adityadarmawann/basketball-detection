@@ -30,9 +30,10 @@ logger = logging.getLogger(__name__)
 MODELS_DIR            = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME         = "jersey_no.pt"
 DIGIT_MODEL_FILENAME   = "best-detect-num-v2.pt"
-DIGIT_CONF_THRESHOLD   = 0.15   # minimum per-digit detection confidence
-                                 # voting + roster whitelist handle noise; low threshold
-                                 # catches distant/angled digits that would otherwise be missed
+DIGIT_CONF_THRESHOLD   = 0.20   # minimum per-digit detection confidence (raised from
+                                 # 0.15 in Fix #3 — confidence-weighted voting already
+                                 # down-weights weak reads, so a slightly higher floor
+                                 # trims the worst noise without hurting recall)
 
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
                              # at ocr_interval=2 (0.13s), 2 votes ≈ 0.27s — faster confirmation;
@@ -50,8 +51,22 @@ HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds thi
 CONF_THRESHOLD    = 0.30  # jersey_no.pt detection confidence (lowered from 0.40 — distant/small numbers)
 OCR_HEIGHT_PX     = 160   # larger resize → OCR reads small/distant jersey numbers better
 OCR_MIN_SCORE     = 0.35  # slightly more permissive — voting absorbs noise
-BLUR_THRESHOLD    = 0.0   # disabled — blur filter skips too many fast-player frames;
-                          # voting window (VOTE_THRESHOLD=2, MAX=40) handles noise instead
+BLUR_THRESHOLD    = 0.0   # legacy hard-skip disabled — replaced by soft blur
+                          # down-weighting in voting (Fix #3), which keeps every frame
+
+# ── Fix #3: confidence-weighted voting ───────────────────────────────────────
+# Votes are stored as (candidate, weight) where weight = digit-model confidence
+# scaled by a blur-quality factor. A sharp, high-confidence read outvotes several
+# blurry/low-confidence ones instead of every read counting equally. This kills
+# the "two 0.15-confidence garbage reads confirm a wrong number" failure while
+# still letting genuine reads accumulate across a fast play.
+MIN_VOTE_WEIGHT    = 0.05  # floor per weighted vote (keeps a read from vanishing)
+MIN_CONFIRM_WEIGHT = 0.6   # leading candidate's summed weight required to confirm
+                           # (with VOTE_THRESHOLD reads also required); ~two 0.3 reads
+# Blur → vote-weight mapping (Laplacian-variance sharpness; see _blur_score):
+BLUR_SHARP_FULL    = 200.0 # >= this = fully sharp, weight 1.0
+BLUR_SHARP_MIN     = 40.0  # <= this = heavily motion-blurred, weight BLUR_MIN_WEIGHT
+BLUR_MIN_WEIGHT    = 0.3    # a very blurry read still votes, but at 0.3× weight
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +109,20 @@ def _blur_score(crop: np.ndarray) -> float:
     """
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def _blur_quality(blur: float) -> float:
+    """Map Laplacian-variance sharpness to a [BLUR_MIN_WEIGHT, 1.0] vote weight.
+
+    Sharp reads (>= BLUR_SHARP_FULL) count fully; motion-smeared reads
+    (<= BLUR_SHARP_MIN) still vote but at reduced weight — never dropped (Fix #3).
+    """
+    if blur >= BLUR_SHARP_FULL:
+        return 1.0
+    if blur <= BLUR_SHARP_MIN:
+        return BLUR_MIN_WEIGHT
+    frac = (blur - BLUR_SHARP_MIN) / (BLUR_SHARP_FULL - BLUR_SHARP_MIN)
+    return BLUR_MIN_WEIGHT + frac * (1.0 - BLUR_MIN_WEIGHT)
 
 
 def _is_too_blurry(crop: np.ndarray, threshold: float = BLUR_THRESHOLD) -> bool:
@@ -597,36 +626,16 @@ class JerseyOCR:
                     results[i] = self._empty_result(track_id)
                     continue
 
-            # Blur guard — same logic as original
+            # Blur → soft vote-weight (Fix #3). We deliberately do NOT hard-skip
+            # blurry crops — under fast camera motion that discards most readable
+            # frames. Instead sharpness scales the vote weight (see Pass 2) so a
+            # crisp read dominates a motion-smeared one while every frame still votes.
             _crop_gray = cv2.cvtColor(number_crop, cv2.COLOR_BGR2GRAY) \
                 if number_crop.ndim == 3 else number_crop
-            _effective_blur_thr = (
-                BLUR_THRESHOLD * 0.40
-                if float(_crop_gray.mean()) > 160
-                else BLUR_THRESHOLD
-            )
-            _blur = _blur_score(_crop_gray)
-            if _blur < _effective_blur_thr:
-                logger.debug(
-                    "track %d: blur score=%.1f < %.1f — OCR skipped",
-                    track_id, _blur, _effective_blur_thr,
-                )
-                self._last_ocr_frame[track_id] = self._frame_counter
-                team     = self._classify_team(player_crop, track_id)
-                team_hsv = self._team_colors.get(team, []) if team else []
-                num, conf = self._vote_status(track_id)
-                results[i] = {
-                    "track_id":       track_id,
-                    "jersey_number":  num,
-                    "confidence":     conf,
-                    "team":           team,
-                    "team_color_hsv": team_hsv,
-                    "blur_skipped":   True,
-                }
-                continue
+            _blur_q = _blur_quality(_blur_score(_crop_gray))
 
             # Schedule for batch digit OCR in Pass 2
-            pending[i] = (player, player_crop, number_crop)
+            pending[i] = (player, player_crop, number_crop, _blur_q)
 
         # ── Batch digit OCR: all pending tight crops in ONE GPU call ─────────
         if pending:
@@ -639,7 +648,7 @@ class JerseyOCR:
             for j, slot_i in enumerate(slot_indices):
                 if tight_cands[j] is not None:
                     continue
-                _, player_crop, _ = pending[slot_i]
+                _, player_crop, _, _ = pending[slot_i]
                 ph, pw = player_crop.shape[:2]
                 fb = player_crop[int(ph * 0.10):int(ph * 0.75),
                                  int(pw * 0.05):int(pw * 0.95)]
@@ -665,7 +674,7 @@ class JerseyOCR:
 
             # ── Pass 2: vote, confidence upgrade, team classify, build results ──
             for j, slot_i in enumerate(slot_indices):
-                player, player_crop, _ = pending[slot_i]
+                player, player_crop, _, _blur_q = pending[slot_i]
                 track_id  = player["track_id"]
 
                 # Unpack (number, mean_conf) from digit model; default to no read.
@@ -720,13 +729,14 @@ class JerseyOCR:
                         self._best_read_conf[track_id] = read_conf
 
                 self._last_ocr_frame[track_id] = self._frame_counter
-                self._vote_number(track_id, candidate)
+                # Vote weight = digit-model confidence scaled by blur quality (Fix #3).
+                self._vote_number(track_id, candidate, read_conf * _blur_q)
                 confirmed, conf = self._vote_status(track_id)
 
                 logger.info(
-                    "track %d: candidate=%s  votes=%s  confirmed=%s",
-                    track_id, candidate,
-                    dict(Counter(self._votes.get(track_id, []))),
+                    "track %d: candidate=%s  conf=%.2f blur_q=%.2f  votes=%s  confirmed=%s",
+                    track_id, candidate, read_conf, _blur_q,
+                    dict(Counter(c for c, _w in self._votes.get(track_id, []))),
                     confirmed,
                 )
 
@@ -1070,105 +1080,109 @@ class JerseyOCR:
     # Voting
     # ------------------------------------------------------------------
 
-    def _vote_number(self, track_id: int, candidate: Optional[int]) -> Optional[int]:
+    def _vote_number(
+        self, track_id: int, candidate: Optional[int], weight: float = 1.0
+    ) -> Optional[int]:
         """
-        Accumulate candidate votes per track_id.
-        - None candidates are ignored (not added to history), preserving existing votes.
+        Accumulate weighted candidate votes per track_id (Fix #3).
+
+        - Each vote is (candidate, weight); weight = digit-model confidence scaled
+          by blur quality. Sharp/high-confidence reads dominate blurry/weak ones.
+        - None candidates are ignored (not added to history), preserving votes.
         - Returns confirmed jersey number (via prefix-aware resolution) once
-          >= VOTE_THRESHOLD votes exist, else None.
+          >= VOTE_THRESHOLD reads AND >= MIN_CONFIRM_WEIGHT summed weight exist.
         """
         if candidate is not None:
             if track_id not in self._votes:
                 self._votes[track_id] = deque(maxlen=MAX_VOTE_HISTORY)
-            self._votes[track_id].append(candidate)
+            self._votes[track_id].append((candidate, max(float(weight), MIN_VOTE_WEIGHT)))
 
         return self._current_confirmed(track_id)
 
-    def _resolve_votes(self, raw_counter: Counter, total: int) -> tuple[Optional[int], float]:
+    def _resolve_votes(self, votes) -> tuple[Optional[int], float]:
         """
-        Prefix/suffix-aware vote resolution for jersey number ambiguity.
+        Confidence-weighted, prefix/suffix-aware vote resolution (Fix #3).
 
-        OCR often produces partial digit reads from fast camera motion:
+        `votes` is an iterable of (candidate, weight). Per candidate we track a
+        read COUNT (evidence it is real) and a summed WEIGHT (how sharp/confident
+        those reads were).
+
+        OCR often produces partial digit reads under fast camera motion:
           "10" → "1"  (right digit clipped when camera pans left)
           "23" → "3"  (left digit clipped when camera pans right)
-        Simple majority voting would lock onto the wrong single digit.
+        Rule: if a 1-digit candidate AND a 2-digit candidate share a digit in the
+        same position (prefix OR suffix), AND the 2-digit candidate has
+        >= TRANSFER_MIN_LONG_VOTES reads, the 1-digit reads are reinterpreted as
+        partial reads and their count+weight transferred to the 2-digit number.
+        True single-digit players (#1–#9) are protected when no such 2-digit
+        candidate has enough evidence.
 
-        Rule: if a 1-digit candidate AND a 2-digit candidate share a digit
-        in the same position (prefix OR suffix), AND the 2-digit candidate
-        has >= TRANSFER_MIN_LONG_VOTES independent reads (enough evidence it
-        is real), then all 1-digit votes are reinterpreted as partial reads
-        and transferred to the 2-digit candidate.
-
-        True single-digit players (#1–#9) are protected: if no matching
-        2-digit candidate has sufficient votes, no transfer occurs and the
-        1-digit reading is kept as-is.
-
-        Multiple 2-digit matches (rare): votes distributed proportionally
-        to each match's existing count.
+        The leading candidate has the highest summed weight; it is confirmed only
+        when it also has >= VOTE_THRESHOLD reads AND weight >= MIN_CONFIRM_WEIGHT.
         """
-        if not raw_counter:
+        count:  dict[int, int]   = {}
+        weight: dict[int, float] = {}
+        for item in votes:
+            # Accept both (candidate, weight) tuples and bare-int votes so legacy
+            # callers / tests that push plain numbers keep working.
+            cand, w = item if isinstance(item, tuple) else (item, 1.0)
+            if cand is None:
+                continue
+            count[cand]  = count.get(cand, 0) + 1
+            weight[cand] = weight.get(cand, 0.0) + w
+        if not count:
             return None, 0.0
 
-        adjusted = dict(raw_counter)
-
-        for short_num, short_count in list(raw_counter.items()):
-            if short_num is None or not (0 <= short_num <= 9):
-                continue  # only process 1-digit candidates
-
+        for short_num in [k for k in list(count) if 0 <= k <= 9]:
             short_str = str(short_num)
-
-            # Collect 2-digit candidates that contain this digit as first or last digit
-            # and have enough reads to be considered genuine (not background contamination).
+            # 2-digit candidates sharing this digit (prefix OR suffix) with enough evidence.
             matching_long = [
-                (long_num, long_count)
-                for long_num, long_count in raw_counter.items()
-                if long_num is not None
-                and 10 <= long_num <= 99
+                (long_num, count[long_num])
+                for long_num in count
+                if 10 <= long_num <= 99
                 and (str(long_num)[0] == short_str or str(long_num)[-1] == short_str)
-                and long_count >= TRANSFER_MIN_LONG_VOTES
+                and count[long_num] >= TRANSFER_MIN_LONG_VOTES
             ]
-
             if not matching_long:
-                continue  # no 2-digit match with enough evidence → keep 1-digit votes
+                continue  # keep the 1-digit reads as-is
 
-            # Distribute 1-digit votes proportionally across matching 2-digit candidates
             total_long = sum(c for _, c in matching_long)
             for long_num, long_count in matching_long:
-                transfer = round(short_count * long_count / total_long)
-                adjusted[long_num] = adjusted.get(long_num, 0) + transfer
-            adjusted[short_num] = 0  # 1-digit votes fully absorbed
+                frac = long_count / total_long
+                count[long_num]  += round(count[short_num] * frac)
+                weight[long_num] += weight[short_num] * frac
+            count[short_num]  = 0   # 1-digit reads fully absorbed
+            weight[short_num] = 0.0
 
-        valid = {k: v for k, v in adjusted.items() if k is not None and v > 0}
+        valid = {k: weight[k] for k in weight if weight[k] > 0 and count.get(k, 0) > 0}
         if not valid:
             return None, 0.0
 
-        best = max(valid, key=valid.get)
-        best_count = valid[best]
-        confirmed = best if best_count >= VOTE_THRESHOLD else None
-        confidence = best_count / total if total > 0 else 0.0
+        best       = max(valid, key=valid.get)
+        total_w    = sum(valid.values())
+        confidence = valid[best] / total_w if total_w > 0 else 0.0
+        confirmed  = (best if count[best] >= VOTE_THRESHOLD
+                      and valid[best] >= MIN_CONFIRM_WEIGHT else None)
         return confirmed, confidence
 
     def _current_confirmed(self, track_id: int) -> Optional[int]:
         if track_id not in self._votes or not self._votes[track_id]:
             return None
-        votes = self._votes[track_id]
-        confirmed, _ = self._resolve_votes(Counter(votes), len(votes))
+        confirmed, _ = self._resolve_votes(self._votes[track_id])
         return confirmed
 
     def _vote_confidence(self, track_id: int) -> float:
-        """Fraction of votes for the leading candidate [0.0, 1.0]."""
+        """Weight share of the leading candidate [0.0, 1.0]."""
         if track_id not in self._votes or not self._votes[track_id]:
             return 0.0
-        votes = self._votes[track_id]
-        _, confidence = self._resolve_votes(Counter(votes), len(votes))
+        _, confidence = self._resolve_votes(self._votes[track_id])
         return confidence
 
     def _vote_status(self, track_id: int) -> tuple[Optional[int], float]:
-        """Return (confirmed_number, confidence) using prefix-aware vote resolution."""
+        """Return (confirmed_number, confidence) using weighted vote resolution."""
         if track_id not in self._votes or not self._votes[track_id]:
             return None, 0.0
-        votes = self._votes[track_id]
-        return self._resolve_votes(Counter(votes), len(votes))
+        return self._resolve_votes(self._votes[track_id])
 
     def reset(self) -> None:
         """

@@ -289,6 +289,13 @@ def _hsv_dist(a: list, b: list) -> float:
     return float(hue_weight * dh + abs(a[1] - b[1]) + abs(a[2] - b[2]) * 0.25)
 
 
+# Minimum _hsv_dist between the two user-supplied team colors required to treat
+# them as an authoritative anchor (Fix #1). Below this the colors are considered
+# indistinguishable and the pipeline falls back to K-Means. White↔black ≈ 160,
+# navy↔black ≈ 110, so 25 safely admits every realistic distinct-jersey pair.
+TEAM_COLOR_MIN_SEPARATION = 25.0
+
+
 # ── Main class ────────────────────────────────────────────────────────────────
 
 class VideoProcessor:
@@ -567,10 +574,51 @@ class VideoProcessor:
                 logger.warning("Failed to parse jersey_color_b '%s': %s", jersey_color_b, _e)
         if jersey_color_a or jersey_color_b:
             logger.info(
-                "Jersey color hints stored (A=%s  B=%s) — "
-                "K-Means runs from video pixels, hints guide cluster orientation",
+                "Jersey color hints stored (A=%s  B=%s)",
                 jersey_color_a or "none", jersey_color_b or "none",
             )
+
+        # ── Fix #1: user jersey colors are the AUTHORITATIVE team anchor ──────────
+        # When the user provides BOTH team colors (picked from the real-jersey
+        # palette or extracted from a jersey photo in RosterManager), trust them
+        # directly as the team-color centers instead of deriving colors from
+        # K-Means on video pixels. K-Means is fragile under fast camera motion,
+        # poor calibration frames, and low-saturation jerseys (navy vs black);
+        # the user's colors are stable ground truth and the intended master key
+        # for A/B separation — which every downstream step (bbox color, roster
+        # name lookup, shared-number disambiguation) depends on.
+        # Guard: only anchor when the two colors are actually distinguishable;
+        # otherwise fall back to K-Means (runs in the per-frame block below).
+        # K-Means also remains the path when one or both colors are missing.
+        if (self._jersey
+                and self._jersey_hint_a is not None
+                and self._jersey_hint_b is not None):
+            sep = _hsv_dist(self._jersey_hint_a, self._jersey_hint_b)
+            if sep >= TEAM_COLOR_MIN_SEPARATION:
+                self._jersey.set_team_reference("A", self._jersey_hint_a)
+                self._jersey.set_team_reference("B", self._jersey_hint_b)
+                # Mark calibration + orientation complete so the per-frame K-Means
+                # block is skipped and the anchored colors are the authority for
+                # team assignment and the WS teamColors payload. These flags are
+                # NOT reset by _handle_quarter_change, and jersey.reset() keeps
+                # _team_colors, so the anchor persists across quarters.
+                self._kmeans_calibrated    = True
+                self._kmeans_disambiguated = True
+                self._team_color_ready.update(("A", "B"))
+                logger.info(
+                    "Team colors ANCHORED to user jersey colors (authoritative, "
+                    "sep=%.1f): A=%s  B=%s — K-Means skipped",
+                    sep,
+                    [round(v, 1) for v in self._jersey_hint_a],
+                    [round(v, 1) for v in self._jersey_hint_b],
+                )
+            else:
+                logger.warning(
+                    "User jersey colors too similar (sep=%.1f < %.1f) — cannot "
+                    "anchor reliably; falling back to K-Means with hints for "
+                    "cluster orientation",
+                    sep, TEAM_COLOR_MIN_SEPARATION,
+                )
 
         # Try NVDEC hardware decode first (GPU dedicated engine, ~10× faster than CPU).
         # Falls back to cv2 software decode when ffmpegcv is not installed or GPU unavailable.

@@ -1238,6 +1238,8 @@ class VideoProcessor:
                         colors["A"], colors["B"] = colors["B"], colors["A"]
                         self._jersey._track_team.clear()
                         self._jersey._track_team_votes.clear()
+                        self._jersey._team_lock.clear()      # A/B swapped → drop locks (fix C)
+                        self._jersey._team_disagree.clear()
 
                     # When orientation is confident (winner ≥2× loser), lock now so
                     # a poor-quality unique-jersey crop cannot accidentally flip back.
@@ -1287,14 +1289,17 @@ class VideoProcessor:
                                 crop = frame[max(0, y1):min(frame.shape[0], y2),
                                              max(0, x1):min(frame.shape[1], x2)]
                                 if crop.size > 0:
-                                    self._jersey._track_team.pop(tid, None)
-                                    raw_color = self._jersey._classify_team(crop, tid)
+                                    # raw_team_vote is stateless — orientation check must
+                                    # see a FRESH read, not the soft lock (fix C).
+                                    raw_color = self._jersey.raw_team_vote(crop)
                                     if raw_color is not None:
                                         if raw_color != expected:
                                             tc = self._jersey._team_colors
                                             tc["A"], tc["B"] = tc["B"], tc["A"]
                                             self._jersey._track_team.clear()
                                             self._jersey._track_team_votes.clear()
+                                            self._jersey._team_lock.clear()      # A/B swapped → drop locks
+                                            self._jersey._team_disagree.clear()
                                             logger.info(
                                                 "Team-color A↔B swapped: jersey #%d unique to "
                                                 "team %s but color said %s → clusters swapped",

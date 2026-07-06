@@ -61,6 +61,19 @@ CONFIRMED_OCR_EVERY   = 3    # confirmed players: re-OCR every N calls (Fix #4).
 # number takes over in ~1-2 frames instead of waiting out MAX_VOTE_HISTORY inertia.
 DISAGREE_WINDOW       = 5    # keep the last N reads per track for disagreement checks
 DISAGREE_N            = 3    # consecutive agreeing reads that override a stale confirmation
+
+# ── Team-color SOFT lock / split (workflow fix C) ────────────────────────────
+# Team is the roster key, so a team flip mislabels the name. Once a track has
+# strong consistent color evidence its team LOCKS (a pan/occlusion can't flip it).
+# The lock breaks only on TEAM_SPLIT_DISAGREE consecutive CONFIDENT disagreements
+# = the physical player under this track changed (ID drift) -> split the whole
+# identity. This gives a SECOND, color-based split trigger complementing the
+# number-based disagreement flush (covers interleaved-read cases the number flush
+# misses). Soft (not hard) + split-sensitive so an early mislock self-heals.
+TEAM_LOCK_MIN_VOTES   = 5     # votes before a track's team may lock
+TEAM_LOCK_MAJORITY    = 0.7   # majority fraction required to lock
+TEAM_SPLIT_DISAGREE   = 4     # consecutive CONFIDENT disagreements that split identity
+TEAM_CONFIDENT_MARGIN = 25.0  # min |dist_a - dist_b| for a frame's color vote to count
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 DIGIT_DEDUP_OVERLAP = 0.5  # x-overlap (fraction of narrower box) above which two
                            # digit detections are treated as the SAME physical digit
@@ -302,6 +315,10 @@ class JerseyOCR:
         self._best_read_conf: dict[int, float] = {}
         # Recent raw reads per track (post-whitelist) for the stale-lock flush.
         self._recent_reads: dict[int, deque] = {}
+        # Team-color soft lock (fix C): track_id → locked team, and consecutive
+        # confident-disagreement counter used to detect a player change under the id.
+        self._team_lock:     dict[int, str] = {}
+        self._team_disagree: dict[int, int] = {}
 
         # Uniqueness guard: (team, jersey_number) → canonical track_id.
         # When two live tracks both read the same (team, number), only the first
@@ -1270,6 +1287,8 @@ class JerseyOCR:
         self._best_read_conf.clear()
         self._recent_reads.clear()
         self._team_number_owner.clear()
+        self._team_lock.clear()
+        self._team_disagree.clear()
         logger.info("JerseyOCR reset (quarter boundary)")
 
     def reset_votes(self, track_id: Optional[int] = None) -> None:
@@ -1298,36 +1317,81 @@ class JerseyOCR:
           3. Append winner to a rolling deque (max _TEAM_VOTE_HISTORY reads).
           4. Return current majority of the rolling window.
 
-        Rolling window (not permanent lock) means:
-          - A zoom-in that gives clearer color overrides stale wrong votes.
-          - Lighting/angle changes are absorbed within ~20 frames (~1.3s at 15fps).
-          - If a crop fails (partial occlusion), _track_team holds the last known
-            result so the player's team doesn't flicker to None.
+        Soft lock (fix C): once evidence is strong the team LOCKS so camera pan /
+        occlusion can't flip it; the lock breaks only on TEAM_SPLIT_DISAGREE
+        consecutive CONFIDENT disagreements (= the player under this id changed).
         """
         if "A" not in self._team_colors or "B" not in self._team_colors:
-            return self._track_team.get(track_id)   # no calibration yet — last known
+            return self._team_lock.get(track_id) or self._track_team.get(track_id)
 
         dominant_hsv = self._dominant_hsv(player_crop)
         if dominant_hsv is None:
-            return self._track_team.get(track_id)   # crop failed — last known, no new vote
+            # crop failed — hold last known (prefer the lock), do NOT count a vote
+            return self._team_lock.get(track_id) or self._track_team.get(track_id)
 
         dist_a = self._hsv_distance(dominant_hsv, self._team_colors["A"])
         dist_b = self._hsv_distance(dominant_hsv, self._team_colors["B"])
-        vote   = "A" if dist_a <= dist_b else "B"
+        vote      = "A" if dist_a <= dist_b else "B"
+        confident = abs(dist_a - dist_b) >= TEAM_CONFIDENT_MARGIN
 
-        # Rolling deque: append vote; old reads fall off after _TEAM_VOTE_HISTORY entries
+        locked = self._team_lock.get(track_id)
+        if locked is not None:
+            # Hold the lock; a sustained CONFIDENT disagreement = player changed.
+            if vote != locked and confident:
+                self._team_disagree[track_id] = self._team_disagree.get(track_id, 0) + 1
+            else:
+                self._team_disagree[track_id] = 0
+            if self._team_disagree[track_id] >= TEAM_SPLIT_DISAGREE:
+                self._split_track_identity(track_id, vote)   # re-locks to `vote`
+                result = vote
+            else:
+                result = locked
+            self._track_team[track_id] = result
+            return result
+
+        # Not locked yet — accumulate rolling votes; lock once evidence is strong.
         if track_id not in self._track_team_votes:
             self._track_team_votes[track_id] = deque(maxlen=self._TEAM_VOTE_HISTORY)
         self._track_team_votes[track_id].append(vote)
-
-        votes     = self._track_team_votes[track_id]
-        count_a   = votes.count("A")
-        count_b   = votes.count("B")
-        result    = "A" if count_a >= count_b else "B"
+        votes   = self._track_team_votes[track_id]
+        count_a = votes.count("A")
+        count_b = votes.count("B")
+        total   = len(votes)
+        result  = "A" if count_a >= count_b else "B"
+        if total >= TEAM_LOCK_MIN_VOTES and max(count_a, count_b) / total >= TEAM_LOCK_MAJORITY:
+            self._team_lock[track_id] = result
+            self._team_disagree[track_id] = 0
 
         # Update current-best cache (used by Fast Path A and inherit_team)
         self._track_team[track_id] = result
         return result
+
+    def _split_track_identity(self, track_id: int, new_team: str) -> None:
+        """The physical player under track_id changed (confirmed by a sustained,
+        confident team-color disagreement). Drop the accumulated NUMBER identity so
+        the new player is read fresh, release any (team,number) ownership, and
+        re-anchor the team lock to the new team."""
+        self._votes.pop(track_id, None)
+        self._best_read_conf.pop(track_id, None)
+        self._recent_reads.pop(track_id, None)
+        for key in [k for k, v in self._team_number_owner.items() if v == track_id]:
+            self._team_number_owner.pop(key, None)
+        self._team_lock[track_id]     = new_team
+        self._team_disagree[track_id] = 0
+        self._track_team_votes[track_id] = deque([new_team], maxlen=self._TEAM_VOTE_HISTORY)
+        logger.info("track %d: identity SPLIT — team→%s (player changed under id)",
+                    track_id, new_team)
+
+    def raw_team_vote(self, player_crop: np.ndarray) -> Optional[str]:
+        """Single-frame team from color with NO state/lock — for A/B orientation
+        checks (video_processor disambiguation) that must see a fresh read."""
+        if "A" not in self._team_colors or "B" not in self._team_colors:
+            return None
+        hsv = self._dominant_hsv(player_crop)
+        if hsv is None:
+            return None
+        return ("A" if self._hsv_distance(hsv, self._team_colors["A"])
+                       <= self._hsv_distance(hsv, self._team_colors["B"]) else "B")
 
     def calibrate_teams(
         self, frame: np.ndarray, tracked_players: list[dict]
@@ -1397,6 +1461,8 @@ class JerseyOCR:
         self._team_colors["B"] = centers[1].tolist()
         self._track_team.clear()
         self._track_team_votes.clear()
+        self._team_lock.clear()          # colors recomputed → invalidate locks (fix C)
+        self._team_disagree.clear()
 
         logger.info(
             "Team colors calibrated (%d players, clusters %d+%d): A=%s  B=%s",
@@ -1413,6 +1479,8 @@ class JerseyOCR:
         self._team_colors[team] = list(hsv_color)
         self._track_team.clear()
         self._track_team_votes.clear()
+        self._team_lock.clear()          # anchor changed → invalidate locks (fix C)
+        self._team_disagree.clear()
 
     def inherit_team(self, new_tid: int, old_tid: int) -> None:
         """Carry team AND accumulated OCR votes from old_tid to new_tid.
@@ -1433,6 +1501,10 @@ class JerseyOCR:
                 self._track_team_votes[old_tid],
                 maxlen=self._TEAM_VOTE_HISTORY,
             )
+        # Carry the soft team lock (same physical player); fresh disagreement counter.
+        if old_tid in self._team_lock:
+            self._team_lock[new_tid] = self._team_lock[old_tid]
+        self._team_disagree.pop(new_tid, None)
 
         # ── Fix #2: pool OCR number votes across the fragment ────────────────
         old_votes = self._votes.get(old_tid)

@@ -51,6 +51,9 @@ CONFIRMED_OCR_EVERY   = 6    # confirmed players: re-OCR only every N calls (Fix
                              # enough to catch a zoom-in confidence upgrade without
                              # spending GPU re-reading already-known numbers
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
+DIGIT_DEDUP_OVERLAP = 0.5  # x-overlap (fraction of narrower box) above which two
+                           # digit detections are treated as the SAME physical digit
+                           # and the lower-confidence one is dropped (Fix #5)
 CONF_THRESHOLD    = 0.30  # jersey_no.pt detection confidence (lowered from 0.40 — distant/small numbers)
 OCR_HEIGHT_PX     = 160   # larger resize → OCR reads small/distant jersey numbers better
 OCR_MIN_SCORE     = 0.35  # slightly more permissive — voting absorbs noise
@@ -991,7 +994,7 @@ class JerseyOCR:
         or None. mean_confidence is the average per-digit detection confidence — used
         by the confidence-upgrade logic in Pass 2 to detect zoom-in upgrades.
         """
-        digit_boxes: list[tuple[float, str, float]] = []
+        digit_boxes: list[tuple[float, float, str, float]] = []
         for box in det_result.boxes:
             cls        = int(box.cls[0])
             raw_name   = self._digit_model.names.get(cls, str(cls))
@@ -999,19 +1002,35 @@ class JerseyOCR:
                           if (len(raw_name) == 1 and raw_name.isdigit())
                           else str(cls))
             x1   = float(box.xyxy[0][0])
+            x2   = float(box.xyxy[0][2])
             conf = float(box.conf[0])
-            digit_boxes.append((x1, digit_char, conf))
-            logger.debug("digit: '%s' x1=%.0f conf=%.2f", digit_char, x1, conf)
+            digit_boxes.append((x1, x2, digit_char, conf))
+            logger.debug("digit: '%s' x=%.0f-%.0f conf=%.2f", digit_char, x1, x2, conf)
 
         if not digit_boxes:
             return None
 
-        if len(digit_boxes) > 2:
-            digit_boxes.sort(key=lambda b: -b[2])
-            digit_boxes = digit_boxes[:2]
-        digit_boxes.sort(key=lambda b: b[0])
-        number_str  = "".join(b[1] for b in digit_boxes)
-        mean_conf   = sum(b[2] for b in digit_boxes) / len(digit_boxes)
+        # ── Fix #5: drop duplicate detections on the SAME physical digit ─────────
+        # The detector sometimes fires two overlapping boxes for one digit; left
+        # unchecked they concatenate to e.g. "11" from a single "1". Greedy NMS on
+        # the x-axis keeps the higher-confidence box when two overlap heavily.
+        digit_boxes.sort(key=lambda b: -b[3])   # highest confidence first
+        kept: list[tuple[float, float, str, float]] = []
+        for x1b, x2b, ch, cf in digit_boxes:
+            is_dup = False
+            for kx1, kx2, _kc, _kf in kept:
+                ox = max(0.0, min(x2b, kx2) - max(x1b, kx1))
+                narrower = max(1.0, min(x2b - x1b, kx2 - kx1))
+                if ox / narrower >= DIGIT_DEDUP_OVERLAP:
+                    is_dup = True
+                    break
+            if not is_dup:
+                kept.append((x1b, x2b, ch, cf))
+
+        kept = kept[:2]                         # jersey numbers are 0–99 (≤ 2 digits)
+        kept.sort(key=lambda b: b[0])           # left-to-right reading order
+        number_str  = "".join(b[2] for b in kept)
+        mean_conf   = sum(b[3] for b in kept) / len(kept)
 
         try:
             number = int(number_str)

@@ -51,9 +51,16 @@ TRANSFER_MIN_LONG_VOTES = 3  # 2-digit candidate needs this many reads before 1-
                              # partial reads accumulate enough evidence before reassigning
 OCR_SAMPLE_EVERY      = 1    # unconfirmed players: OCR on every process() call
                              # roster whitelist removes false positives; voting absorbs noise
-CONFIRMED_OCR_EVERY   = 6    # confirmed players: re-OCR only every N calls (Fix #4) —
-                             # enough to catch a zoom-in confidence upgrade without
-                             # spending GPU re-reading already-known numbers
+CONFIRMED_OCR_EVERY   = 3    # confirmed players: re-OCR every N calls (Fix #4). Kept low
+                             # so a WRONG confirmation (ID swap / early misread) is re-read
+                             # and corrected fast — the disagreement flush below needs fresh
+                             # reads. Was 6; 3 halves the stale-lock lag for a little more GPU.
+# Stale-lock correction: if the last DISAGREE_N reads for a track all agree on a
+# number DIFFERENT from its confirmed one, the underlying player likely changed
+# (ID swap) or the first confirm was wrong — flush the stale votes so the new
+# number takes over in ~1-2 frames instead of waiting out MAX_VOTE_HISTORY inertia.
+DISAGREE_WINDOW       = 5    # keep the last N reads per track for disagreement checks
+DISAGREE_N            = 3    # consecutive agreeing reads that override a stale confirmation
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 DIGIT_DEDUP_OVERLAP = 0.5  # x-overlap (fraction of narrower box) above which two
                            # digit detections are treated as the SAME physical digit
@@ -293,6 +300,8 @@ class JerseyOCR:
         self._last_ocr_frame: dict[int, int] = {}
         # Best digit-model confidence seen per track — used to detect zoom-in upgrades.
         self._best_read_conf: dict[int, float] = {}
+        # Recent raw reads per track (post-whitelist) for the stale-lock flush.
+        self._recent_reads: dict[int, deque] = {}
 
         # Uniqueness guard: (team, jersey_number) → canonical track_id.
         # When two live tracks both read the same (team, number), only the first
@@ -748,6 +757,28 @@ class JerseyOCR:
                             )
                     if read_conf > self._best_read_conf.get(track_id, 0.0):
                         self._best_read_conf[track_id] = read_conf
+
+                # ── Stale-lock correction ────────────────────────────────────
+                # If the last DISAGREE_N reads all agree on a number different from
+                # the currently-confirmed one, drop the stale votes so the new
+                # number takes over immediately (ID swap / early misread recovery)
+                # instead of waiting out the 20-deep deque inertia.
+                if candidate is not None:
+                    rq = self._recent_reads.setdefault(
+                        track_id, deque(maxlen=DISAGREE_WINDOW))
+                    rq.append(candidate)
+                    if len(rq) >= DISAGREE_N:
+                        last = list(rq)[-DISAGREE_N:]
+                        cur  = self._current_confirmed(track_id)
+                        if (cur is not None and last[0] != cur
+                                and all(x == last[0] for x in last)):
+                            self._votes.pop(track_id, None)
+                            self._best_read_conf.pop(track_id, None)
+                            logger.info(
+                                "track %d: %d consecutive reads of %s disagree with "
+                                "confirmed %s — flushing stale lock",
+                                track_id, DISAGREE_N, last[0], cur,
+                            )
 
                 self._last_ocr_frame[track_id] = self._frame_counter
                 # Vote weight = digit-model confidence scaled by blur quality (Fix #3).
@@ -1237,6 +1268,7 @@ class JerseyOCR:
         self._frame_counter = 0
         self._last_ocr_frame.clear()
         self._best_read_conf.clear()
+        self._recent_reads.clear()
         self._team_number_owner.clear()
         logger.info("JerseyOCR reset (quarter boundary)")
 

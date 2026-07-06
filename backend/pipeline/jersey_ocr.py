@@ -30,10 +30,14 @@ logger = logging.getLogger(__name__)
 MODELS_DIR            = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME         = "jersey_no.pt"
 DIGIT_MODEL_FILENAME   = "best-detect-num-v2.pt"
-DIGIT_CONF_THRESHOLD   = 0.20   # minimum per-digit detection confidence (raised from
-                                 # 0.15 in Fix #3 — confidence-weighted voting already
-                                 # down-weights weak reads, so a slightly higher floor
-                                 # trims the worst noise without hurting recall)
+DIGIT_CONF_THRESHOLD   = 0.12   # minimum per-digit detection confidence. LOW on purpose:
+                                 # the digit model detects only ONE digit in ~60% of crops
+                                 # at 0.20, so 2-digit jerseys (11,16,88) read as a single
+                                 # ambiguous digit. Measured on real frames: 0.20→40% two-box
+                                 # reads, 0.12→53%, 0.08→62%. Confidence-weighted voting
+                                 # (see _resolve_votes) down-weights the weak reads this lets
+                                 # in, so recall rises without confirming noise. 0.12 balances
+                                 # recall vs noise; 0.08 recovers more but adds spurious reads.
 
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
                              # at ocr_interval=2 (0.13s), 2 votes ≈ 0.27s — faster confirmation;

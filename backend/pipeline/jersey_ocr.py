@@ -91,12 +91,15 @@ TEAM_VALUE_WEIGHT     = float(os.getenv("TEAM_VALUE_WEIGHT", "0.25"))  # legacy 
 # in LAB, then thresholding. Camera-invariant (LAB separates luminance from colour)
 # and GENERAL to ANY team colours: the axis auto-selects whichever channels separate
 # the two uploaded colours (red/white, blue/black, green/yellow, …). Orientation is
-# fixed by the axis (A at t=0, B at t>0) so A/B can NEVER globally flip. Validated on
-# real ground truth: 85% balanced (vs 79% legacy HSV nearest-anchor). The boundary
-# sits at ~0.30 of the A→B distance because jerseys render MUTED vs the vivid upload
+# fixed by the axis (A at t=0, B at t>0) so A/B can NEVER globally flip. The boundary
+# sits partway along the A→B distance because jerseys render MUTED vs the vivid upload
 # (rendered colours compress toward the middle). "distance" = legacy HSV metric.
+# FRAC tuned on 84 HAND-LABELLED crops (UNESA white vs UBAYA muted-maroon, real run):
+# 0.35 = 91% balanced (A 95% / B 87%), best of {0.25:75%, 0.30:86%, 0.40:87%} and
+# ties/beats legacy distance (86%). NOTE: single match, one LAB scale — re-validate on
+# the next match (different colours) before trusting the exact value.
 TEAM_MATCH_MODE       = os.getenv("TEAM_MATCH_MODE", "axis")             # "axis" | "distance"
-TEAM_AXIS_FRAC        = float(os.getenv("TEAM_AXIS_FRAC", "0.30"))       # threshold along A→B
+TEAM_AXIS_FRAC        = float(os.getenv("TEAM_AXIS_FRAC", "0.35"))       # threshold along A→B
 TEAM_AXIS_CONF_FRAC   = float(os.getenv("TEAM_AXIS_CONF_FRAC", "0.15"))  # confident-vote margin
 LAB_SCALE_MIN_SAMPLES = int(os.getenv("LAB_SCALE_MIN_SAMPLES", "50"))    # crops before scale freezes
 _LAB_SCALE_DEFAULT    = (40.0, 8.0, 8.0)   # per-channel LAB std used until measured from video

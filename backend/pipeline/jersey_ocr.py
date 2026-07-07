@@ -42,8 +42,13 @@ DIGIT_CONF_THRESHOLD   = 0.12   # minimum per-digit detection confidence. LOW on
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
                              # at ocr_interval=2 (0.13s), 2 votes ≈ 0.27s — faster confirmation;
                              # roster whitelist + MAX_VOTE_HISTORY absorb stray misreads
-CONF_UPGRADE_MIN      = 0.60 # absolute digit-model confidence floor to trigger a flush
-CONF_UPGRADE_DELTA    = 0.25 # new read must beat _best_read_conf by this margin to flush
+# Confidence-upgrade flush thresholds. Relaxed from 0.60/0.25 → 0.50/0.10 after a
+# ground-truth sweep (19 hand-labelled tracks, real process() replay): 0.50/0.10
+# lifted mid-track number accuracy 57.7%→61.2% and final accuracy 57.9%→63.2% while
+# flip-rate barely moved (3.84→3.95/track). Env-overridable. NOTE: lowering DISAGREE_N
+# to 2 was ALSO tested and REJECTED — it thrashed (acc 57.7%→52.9%, flips +47%).
+CONF_UPGRADE_MIN      = float(os.getenv("CONF_UPGRADE_MIN",   "0.50"))  # digit-conf floor to flush
+CONF_UPGRADE_DELTA    = float(os.getenv("CONF_UPGRADE_DELTA", "0.10"))  # margin over prior best to flush
 MAX_VOTE_HISTORY      = 20   # rolling window — 20 reads per player (OCR_SAMPLE_EVERY=1)
                              # smaller window lets wrong reads be forgotten faster
 TRANSFER_MIN_LONG_VOTES = 3  # 2-digit candidate needs this many reads before 1-digit votes

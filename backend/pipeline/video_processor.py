@@ -285,7 +285,7 @@ def _hex_to_hsv(hex_color: str) -> list:
 # (same env var so the anchor-admit guard + K-Means orientation use the same metric
 # as runtime classification). Raised 0.25->0.5: white(bright) vs maroon(dark) is
 # strongly value-separable and 0.25 under-used it.
-_TEAM_VALUE_WEIGHT = float(os.getenv("TEAM_VALUE_WEIGHT", "0.5"))
+_TEAM_VALUE_WEIGHT = float(os.getenv("TEAM_VALUE_WEIGHT", "0.25"))  # legacy fallback metric; 0.5 hurt red (reverted)
 
 
 def _hsv_dist(a: list, b: list) -> float:

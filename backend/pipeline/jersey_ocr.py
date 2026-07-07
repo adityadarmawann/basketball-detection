@@ -79,7 +79,22 @@ TEAM_CONFIDENT_MARGIN = 25.0  # min |dist_a - dist_b| for a frame's color vote t
 # brightness is a strong camera-robust discriminator that 0.25 under-used, so a
 # warm-lit white player (elevated S) mis-flipped to red. 0.5 fixed every measured
 # borderline (6/6) with no regressions. Env-gated for A/B testing.
-TEAM_VALUE_WEIGHT     = float(os.getenv("TEAM_VALUE_WEIGHT", "0.5"))
+TEAM_VALUE_WEIGHT     = float(os.getenv("TEAM_VALUE_WEIGHT", "0.25"))  # legacy metric only; 0.5 hurt red (measured), reverted
+
+# ── Team-colour matching: UPLOAD-AXIS PROJECTION (default) ───────────────────
+# Classify by projecting a player's chest colour onto the UPLOAD-defined A→B axis
+# in LAB, then thresholding. Camera-invariant (LAB separates luminance from colour)
+# and GENERAL to ANY team colours: the axis auto-selects whichever channels separate
+# the two uploaded colours (red/white, blue/black, green/yellow, …). Orientation is
+# fixed by the axis (A at t=0, B at t>0) so A/B can NEVER globally flip. Validated on
+# real ground truth: 85% balanced (vs 79% legacy HSV nearest-anchor). The boundary
+# sits at ~0.30 of the A→B distance because jerseys render MUTED vs the vivid upload
+# (rendered colours compress toward the middle). "distance" = legacy HSV metric.
+TEAM_MATCH_MODE       = os.getenv("TEAM_MATCH_MODE", "axis")             # "axis" | "distance"
+TEAM_AXIS_FRAC        = float(os.getenv("TEAM_AXIS_FRAC", "0.30"))       # threshold along A→B
+TEAM_AXIS_CONF_FRAC   = float(os.getenv("TEAM_AXIS_CONF_FRAC", "0.15"))  # confident-vote margin
+LAB_SCALE_MIN_SAMPLES = int(os.getenv("LAB_SCALE_MIN_SAMPLES", "50"))    # crops before scale freezes
+_LAB_SCALE_DEFAULT    = (40.0, 8.0, 8.0)   # per-channel LAB std used until measured from video
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 DIGIT_DEDUP_OVERLAP = 0.5  # x-overlap (fraction of narrower box) above which two
                            # digit detections are treated as the SAME physical digit
@@ -325,6 +340,12 @@ class JerseyOCR:
         # confident-disagreement counter used to detect a player change under the id.
         self._team_lock:     dict[int, str] = {}
         self._team_disagree: dict[int, int] = {}
+        # Upload-axis team matching (default): LAB anchors + a per-channel LAB scale
+        # measured once from early crops, and a fingerprinted axis cache.
+        self._team_colors_lab: dict[str, list[float]] = {}   # "A"/"B" → [L, a, b]
+        self._lab_scale = None            # np.array [sL,sa,sb], frozen after N samples
+        self._lab_samples: list = []      # LAB medians collected until scale freezes
+        self._team_axis = None            # cache: (fingerprint, As, axis, scale, tB, thr, cmargin)
 
         # Uniqueness guard: (team, jersey_number) → canonical track_id.
         # When two live tracks both read the same (team, number), only the first
@@ -1326,19 +1347,14 @@ class JerseyOCR:
         Soft lock (fix C): once evidence is strong the team LOCKS so camera pan /
         occlusion can't flip it; the lock breaks only on TEAM_SPLIT_DISAGREE
         consecutive CONFIDENT disagreements (= the player under this id changed).
+
+        Vote/confidence come from _team_vote_confident (upload-axis projection by
+        default — camera-invariant and general to any team colours).
         """
-        if "A" not in self._team_colors or "B" not in self._team_colors:
+        vote, confident = self._team_vote_confident(player_crop)
+        if vote is None:
+            # no calibration / crop failed — hold last known (prefer the lock)
             return self._team_lock.get(track_id) or self._track_team.get(track_id)
-
-        dominant_hsv = self._dominant_hsv(player_crop)
-        if dominant_hsv is None:
-            # crop failed — hold last known (prefer the lock), do NOT count a vote
-            return self._team_lock.get(track_id) or self._track_team.get(track_id)
-
-        dist_a = self._hsv_distance(dominant_hsv, self._team_colors["A"])
-        dist_b = self._hsv_distance(dominant_hsv, self._team_colors["B"])
-        vote      = "A" if dist_a <= dist_b else "B"
-        confident = abs(dist_a - dist_b) >= TEAM_CONFIDENT_MARGIN
 
         locked = self._team_lock.get(track_id)
         if locked is not None:
@@ -1388,16 +1404,101 @@ class JerseyOCR:
         logger.info("track %d: identity SPLIT — team→%s (player changed under id)",
                     track_id, new_team)
 
-    def raw_team_vote(self, player_crop: np.ndarray) -> Optional[str]:
-        """Single-frame team from color with NO state/lock — for A/B orientation
-        checks (video_processor disambiguation) that must see a fresh read."""
-        if "A" not in self._team_colors or "B" not in self._team_colors:
+    @staticmethod
+    def _hsv_to_lab(hsv: list) -> list:
+        """Convert an OpenCV-HSV [H0-180,S0-255,V0-255] colour to LAB [L,a,b]."""
+        px = np.uint8([[[int(hsv[0]) % 180,
+                         int(np.clip(hsv[1], 0, 255)),
+                         int(np.clip(hsv[2], 0, 255))]]])
+        lab = cv2.cvtColor(cv2.cvtColor(px, cv2.COLOR_HSV2BGR), cv2.COLOR_BGR2LAB)[0, 0]
+        return [float(lab[0]), float(lab[1]), float(lab[2])]
+
+    @staticmethod
+    def _dominant_lab(crop: np.ndarray) -> Optional[list]:
+        """Median LAB of the chest strip — mirrors _dominant_hsv geometry."""
+        h, w = crop.shape[:2]
+        if h < 4 or w < 4:
             return None
+        chest = crop[int(h * 0.20):int(h * 0.50), int(w * 0.15):int(w * 0.85)]
+        if chest.size == 0:
+            return None
+        lab = cv2.cvtColor(chest, cv2.COLOR_BGR2LAB)
+        return np.median(lab.reshape(-1, 3).astype(np.float32), axis=0).tolist()
+
+    def set_team_colors_lab(self) -> None:
+        """(Re)derive LAB anchors from the HSV _team_colors and drop the axis cache.
+        Call whenever _team_colors changes (upload set_team_reference or K-Means)."""
+        for t in ("A", "B"):
+            if t in self._team_colors:
+                self._team_colors_lab[t] = self._hsv_to_lab(self._team_colors[t])
+        self._team_axis = None
+
+    def _ensure_team_axis(self):
+        """Build & cache the UPLOAD-defined A→B discriminant axis in scaled LAB.
+        Fingerprinted on anchors+scale so any change rebuilds it. Orientation is
+        fixed here (A at t=0, B at t=+|axis|) → A/B can never flip at runtime."""
+        if "A" not in self._team_colors_lab or "B" not in self._team_colors_lab:
+            return None
+        scale = (self._lab_scale if self._lab_scale is not None
+                 else np.array(_LAB_SCALE_DEFAULT, dtype=np.float64))
+        A = np.array(self._team_colors_lab["A"], dtype=np.float64)
+        B = np.array(self._team_colors_lab["B"], dtype=np.float64)
+        fp = (tuple(A), tuple(B), tuple(scale))
+        if self._team_axis is not None and self._team_axis[0] == fp:
+            return self._team_axis
+        As = A / scale
+        axis = B / scale - As
+        norm = float(np.linalg.norm(axis))
+        if norm < 1e-6:                        # degenerate (A≈B) → caller falls back
+            self._team_axis = None
+            return None
+        axis = axis / norm
+        tB = float((B / scale - As) @ axis)    # == norm; B at tB, A at 0
+        self._team_axis = (fp, As, axis, scale, tB,
+                           TEAM_AXIS_FRAC * tB, TEAM_AXIS_CONF_FRAC * tB)
+        return self._team_axis
+
+    def _team_vote_confident(self, player_crop: np.ndarray):
+        """Return (vote, confident) for one crop, or (None, False) if unclassifiable.
+        Default = UPLOAD-AXIS projection (camera-invariant, general, no A/B flip);
+        legacy HSV nearest-anchor when TEAM_MATCH_MODE='distance'."""
+        if "A" not in self._team_colors or "B" not in self._team_colors:
+            return None, False
+
+        if TEAM_MATCH_MODE == "axis":
+            lab = self._dominant_lab(player_crop)
+            if lab is None:
+                return None, False
+            # Measure the per-channel LAB scale ONCE from early crops, then freeze —
+            # down-weights whatever varies most (usually luminance/lighting), so the
+            # axis leans on the stable colour channels. Generalises to any lighting.
+            if self._lab_scale is None:
+                self._lab_samples.append(lab)
+                if len(self._lab_samples) >= LAB_SCALE_MIN_SAMPLES:
+                    s = np.std(np.array(self._lab_samples, dtype=np.float64), axis=0)
+                    s[s < 1e-3] = 1.0
+                    self._lab_scale = s
+                    self._team_axis = None     # rebuild axis with the measured scale
+            ax = self._ensure_team_axis()
+            if ax is None:
+                return None, False
+            _fp, As, axis, scale, _tB, thr, cmargin = ax
+            t = float((np.array(lab, dtype=np.float64) / scale - As) @ axis)
+            return ("A" if t < thr else "B"), (abs(t - thr) >= cmargin)
+
+        # ── legacy HSV nearest-anchor ──
         hsv = self._dominant_hsv(player_crop)
         if hsv is None:
-            return None
-        return ("A" if self._hsv_distance(hsv, self._team_colors["A"])
-                       <= self._hsv_distance(hsv, self._team_colors["B"]) else "B")
+            return None, False
+        da = self._hsv_distance(hsv, self._team_colors["A"])
+        db = self._hsv_distance(hsv, self._team_colors["B"])
+        return ("A" if da <= db else "B"), (abs(da - db) >= TEAM_CONFIDENT_MARGIN)
+
+    def raw_team_vote(self, player_crop: np.ndarray) -> Optional[str]:
+        """Single-frame team with NO state/lock — for A/B orientation checks
+        (video_processor disambiguation) that must see a fresh read."""
+        vote, _ = self._team_vote_confident(player_crop)
+        return vote
 
     def calibrate_teams(
         self, frame: np.ndarray, tracked_players: list[dict]
@@ -1465,6 +1566,7 @@ class JerseyOCR:
 
         self._team_colors["A"] = centers[0].tolist()
         self._team_colors["B"] = centers[1].tolist()
+        self.set_team_colors_lab()       # keep LAB anchors + axis in sync (upload-axis)
         self._track_team.clear()
         self._track_team_votes.clear()
         self._team_lock.clear()          # colors recomputed → invalidate locks (fix C)
@@ -1483,6 +1585,7 @@ class JerseyOCR:
         if team not in ("A", "B"):
             raise ValueError("team must be 'A' or 'B'")
         self._team_colors[team] = list(hsv_color)
+        self.set_team_colors_lab()       # derive LAB anchor + rebuild axis (upload-axis)
         self._track_team.clear()
         self._track_team_votes.clear()
         self._team_lock.clear()          # anchor changed → invalidate locks (fix C)

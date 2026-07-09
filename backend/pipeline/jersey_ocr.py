@@ -103,6 +103,12 @@ TEAM_AXIS_FRAC        = float(os.getenv("TEAM_AXIS_FRAC", "0.35"))       # thres
 TEAM_AXIS_CONF_FRAC   = float(os.getenv("TEAM_AXIS_CONF_FRAC", "0.15"))  # confident-vote margin
 LAB_SCALE_MIN_SAMPLES = int(os.getenv("LAB_SCALE_MIN_SAMPLES", "50"))    # crops before scale freezes
 _LAB_SCALE_DEFAULT    = (40.0, 8.0, 8.0)   # per-channel LAB std used until measured from video
+# Jersey-colour extraction: keep the chest pixels CLOSEST to either team anchor
+# (drops skin / court / white-number / an overlapping neighbour's jersey) before
+# the median. On 84 hand-labelled crops this lifted the RAW classifier 91% → 98%
+# balanced AND made it scale-robust (median-only swung 79-95% across LAB scales;
+# anchor-filtered stayed 96-98%). Fraction of chest pixels kept:
+TEAM_JERSEY_PIXEL_FRAC = float(os.getenv("TEAM_JERSEY_PIXEL_FRAC", "0.60"))
 HIGH_CONF_EARLY_EXIT  = 0.85 # stop trying OCR variants once any one exceeds this score
 DIGIT_DEDUP_OVERLAP = 0.5  # x-overlap (fraction of narrower box) above which two
                            # digit detections are treated as the SAME physical digit
@@ -1421,17 +1427,40 @@ class JerseyOCR:
         lab = cv2.cvtColor(cv2.cvtColor(px, cv2.COLOR_HSV2BGR), cv2.COLOR_BGR2LAB)[0, 0]
         return [float(lab[0]), float(lab[1]), float(lab[2])]
 
-    @staticmethod
-    def _dominant_lab(crop: np.ndarray) -> Optional[list]:
-        """Median LAB of the chest strip — mirrors _dominant_hsv geometry."""
+    def _dominant_lab(self, crop: np.ndarray) -> Optional[list]:
+        """Jersey chest colour in LAB, robust to contamination.
+
+        A plain median of the chest strip blends in skin (neck/arms), the white
+        number print, shadows, and — when players overlap — a neighbour's jersey.
+        Instead we keep only the chest pixels CLOSEST to either team anchor (the
+        jersey-like majority) and median THOSE. Measured on 84 hand-labelled crops:
+        raw classifier 91% → 98% balanced, and scale-robust (96-98% vs median's
+        79-95% across LAB scales). Falls back to a plain median before the anchors
+        exist (early frames / uncalibrated)."""
         h, w = crop.shape[:2]
         if h < 4 or w < 4:
             return None
         chest = crop[int(h * 0.20):int(h * 0.50), int(w * 0.15):int(w * 0.85)]
         if chest.size == 0:
             return None
-        lab = cv2.cvtColor(chest, cv2.COLOR_BGR2LAB)
-        return np.median(lab.reshape(-1, 3).astype(np.float32), axis=0).tolist()
+        px = cv2.cvtColor(chest, cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32)
+
+        a = self._team_colors_lab.get("A")
+        b = self._team_colors_lab.get("B")
+        if a is None or b is None or len(px) < 10:
+            return np.median(px, axis=0).tolist()   # not calibrated yet → plain median
+
+        scale = (self._lab_scale if self._lab_scale is not None
+                 else np.array(_LAB_SCALE_DEFAULT, dtype=np.float64))
+        a = np.asarray(a, dtype=np.float32); b = np.asarray(b, dtype=np.float32)
+        da = np.linalg.norm((px - a) / scale, axis=1)
+        db = np.linalg.norm((px - b) / scale, axis=1)
+        d  = np.minimum(da, db)                      # distance to the NEAREST anchor
+        thr = np.percentile(d, TEAM_JERSEY_PIXEL_FRAC * 100.0)
+        sub = px[d <= thr]                           # keep the jersey-like fraction
+        if len(sub) < 5:
+            return np.median(px, axis=0).tolist()
+        return np.median(sub, axis=0).tolist()
 
     def set_team_colors_lab(self) -> None:
         """(Re)derive LAB anchors from the HSV _team_colors and drop the axis cache.

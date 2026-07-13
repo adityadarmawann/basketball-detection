@@ -79,6 +79,24 @@ TEAM_LOCK_MIN_VOTES   = 5     # votes before a track's team may lock
 TEAM_LOCK_MAJORITY    = 0.7   # majority fraction required to lock
 TEAM_SPLIT_DISAGREE   = 4     # consecutive CONFIDENT disagreements that split identity
 TEAM_CONFIDENT_MARGIN = 25.0  # min |dist_a - dist_b| for a frame's color vote to count
+
+# ── NOT-A-TEAM rejection (referees, coaches — anyone wearing neither team colour) ──
+# The A→B axis forces a BINARY decision: a referee's dark shirt is projected onto the
+# line and lands on one side, so referees always get a team. Reject them by DISTANCE
+# to the nearest anchor, measured on the RAW chest median — NOT on _dominant_lab,
+# which is anchor-filtered and therefore drags ANY colour toward a team (that is why
+# an earlier residual test failed).
+# Per crop the distributions overlap (players p90=3.60 vs referees p10=3.45), but the
+# MEDIAN over a few crops separates cleanly. Measured (84 hand-labelled players vs 274
+# detector-class referee crops), threshold 3.55:
+#     1 crop  → 83% players kept / 88% referees rejected   (overlaps)
+#     5 crops → 97.2% / 97.4%      10 crops → 99.6% / 99.7%      20 crops → 100% / 100%
+TEAM_REJECT_DIST        = float(os.getenv("TEAM_REJECT_DIST", "3.55"))
+TEAM_REJECT_MIN_SAMPLES = int(os.getenv("TEAM_REJECT_MIN_SAMPLES", "5"))
+# Team votes are WEIGHTED (mirrors the jersey-number vote, which is already weighted by
+# read_conf × blur_q). weight = decision-margin × jersey-likeness, so a blurred or
+# half-occluded crop no longer counts the same as a clean one.
+TEAM_VOTE_WEIGHT_FLOOR  = float(os.getenv("TEAM_VOTE_WEIGHT_FLOOR", "0.15"))
 # Weight of the brightness (V) term in team-colour distance. Raised 0.25->0.5:
 # measured on real UNESA(white,bright ~V220) vs UBAYA(maroon,dark ~V130) frames,
 # brightness is a strong camera-robust discriminator that 0.25 under-used, so a
@@ -354,6 +372,13 @@ class JerseyOCR:
         # confident-disagreement counter used to detect a player change under the id.
         self._team_lock:     dict[int, str] = {}
         self._team_disagree: dict[int, int] = {}
+        # Rolling RAW colour distance to the nearest team anchor, per track. A referee /
+        # coach sits far from BOTH anchors; the median over a few crops rejects them
+        # (see TEAM_REJECT_DIST). Also feeds the team-vote weight.
+        self._track_color_dist: dict[int, deque] = {}
+        # Tracks judged NOT-A-TEAM (referee/coach). Distinct from "no vote this frame":
+        # video_processor must PURGE its sticky team for these, not hold the last one.
+        self._team_rejected: set[int] = set()
         # Upload-axis team matching (default): LAB anchors + a per-channel LAB scale
         # measured once from early crops, and a fingerprinted axis cache.
         self._team_colors_lab: dict[str, list[float]] = {}   # "A"/"B" → [L, a, b]
@@ -1323,6 +1348,8 @@ class JerseyOCR:
         self._votes.clear()
         self._track_team.clear()
         self._track_team_votes.clear()
+        self._track_color_dist.clear()
+        self._team_rejected.clear()
         self._frame_counter = 0
         self._last_ocr_frame.clear()
         self._best_read_conf.clear()
@@ -1365,7 +1392,27 @@ class JerseyOCR:
         Vote/confidence come from _team_vote_confident (upload-axis projection by
         default — camera-invariant and general to any team colours).
         """
-        vote, confident = self._team_vote_confident(player_crop)
+        # ── (1) NOT-A-TEAM gate: referees/coaches wear neither team's colour ────
+        # Accumulate the RAW distance to the nearest anchor. One crop is ambiguous
+        # (the two distributions overlap), but the MEDIAN over a few crops separates
+        # players from referees almost perfectly — so we only reject once we have
+        # TEAM_REJECT_MIN_SAMPLES of evidence, never on a single frame.
+        dist = self._anchor_distance(player_crop)
+        if dist is not None:
+            dq = self._track_color_dist.setdefault(
+                track_id, deque(maxlen=self._TEAM_VOTE_HISTORY))
+            dq.append(dist)
+            if (len(dq) >= TEAM_REJECT_MIN_SAMPLES
+                    and float(np.median(np.asarray(dq))) > TEAM_REJECT_DIST):
+                # Neither team → emit NO team, so the UI shows a neutral box instead
+                # of forcing a referee into A or B.
+                self._track_team.pop(track_id, None)
+                self._team_lock.pop(track_id, None)
+                self._team_rejected.add(track_id)
+                return None
+            self._team_rejected.discard(track_id)
+
+        vote, confident, conf = self._team_vote_confident(player_crop)
         if vote is None:
             # no calibration / crop failed — hold last known (prefer the lock)
             return self._team_lock.get(track_id) or self._track_team.get(track_id)
@@ -1385,16 +1432,24 @@ class JerseyOCR:
             self._track_team[track_id] = result
             return result
 
-        # Not locked yet — accumulate rolling votes; lock once evidence is strong.
+        # ── (2) WEIGHTED rolling votes (mirrors the weighted jersey-number vote) ──
+        # weight = decision margin × jersey-likeness. A borderline or contaminated
+        # crop no longer counts as much as a clean, decisive one.
+        likeness = 1.0
+        if dist is not None and TEAM_REJECT_DIST > 1e-6:
+            likeness = float(np.clip(1.0 - dist / TEAM_REJECT_DIST, 0.0, 1.0))
+        weight = max(TEAM_VOTE_WEIGHT_FLOOR, conf * likeness)
+
         if track_id not in self._track_team_votes:
             self._track_team_votes[track_id] = deque(maxlen=self._TEAM_VOTE_HISTORY)
-        self._track_team_votes[track_id].append(vote)
+        self._track_team_votes[track_id].append((vote, weight))
         votes   = self._track_team_votes[track_id]
-        count_a = votes.count("A")
-        count_b = votes.count("B")
-        total   = len(votes)
-        result  = "A" if count_a >= count_b else "B"
-        if total >= TEAM_LOCK_MIN_VOTES and max(count_a, count_b) / total >= TEAM_LOCK_MAJORITY:
+        w_a     = sum(w for v, w in votes if v == "A")
+        w_b     = sum(w for v, w in votes if v == "B")
+        total_w = w_a + w_b
+        result  = "A" if w_a >= w_b else "B"
+        if (len(votes) >= TEAM_LOCK_MIN_VOTES
+                and max(w_a, w_b) / max(total_w, 1e-6) >= TEAM_LOCK_MAJORITY):
             self._team_lock[track_id] = result
             self._team_disagree[track_id] = 0
 
@@ -1414,7 +1469,9 @@ class JerseyOCR:
             self._team_number_owner.pop(key, None)
         self._team_lock[track_id]     = new_team
         self._team_disagree[track_id] = 0
-        self._track_team_votes[track_id] = deque([new_team], maxlen=self._TEAM_VOTE_HISTORY)
+        self._track_team_votes[track_id] = deque([(new_team, 1.0)], maxlen=self._TEAM_VOTE_HISTORY)
+        self._track_color_dist.pop(track_id, None)   # new person → re-judge not-a-team from scratch
+        self._team_rejected.discard(track_id)
         logger.info("track %d: identity SPLIT — team→%s (player changed under id)",
                     track_id, new_team)
 
@@ -1442,6 +1499,27 @@ class JerseyOCR:
             return None
         lab = cv2.cvtColor(chest, cv2.COLOR_BGR2LAB)
         return np.median(lab.reshape(-1, 3).astype(np.float32), axis=0).tolist()
+
+    def _anchor_distance(self, crop: np.ndarray) -> Optional[float]:
+        """Distance from the RAW chest median to the NEAREST team anchor (scaled LAB).
+
+        Deliberately uses the RAW median, not _dominant_lab: _dominant_lab keeps only
+        the pixels closest to an anchor, so it drags ANY shirt — including a referee's
+        black one — toward a team colour and destroys exactly the signal we need here.
+        Large distance ⇒ this person wears neither team's colour."""
+        lab = self._chest_median_lab(crop)
+        if lab is None:
+            return None
+        a = self._team_colors_lab.get("A")
+        b = self._team_colors_lab.get("B")
+        if a is None or b is None:
+            return None
+        scale = (self._lab_scale if self._lab_scale is not None
+                 else np.array(_LAB_SCALE_DEFAULT, dtype=np.float64))
+        v  = np.asarray(lab, dtype=np.float64)
+        da = np.linalg.norm((v - np.asarray(a, dtype=np.float64)) / scale)
+        db = np.linalg.norm((v - np.asarray(b, dtype=np.float64)) / scale)
+        return float(min(da, db))
 
     def _dominant_lab(self, crop: np.ndarray) -> Optional[list]:
         """Jersey chest colour in LAB, robust to contamination.
@@ -1512,16 +1590,20 @@ class JerseyOCR:
         return self._team_axis
 
     def _team_vote_confident(self, player_crop: np.ndarray):
-        """Return (vote, confident) for one crop, or (None, False) if unclassifiable.
+        """Return (vote, confident, conf) for one crop, or (None, False, 0.0).
+
+        `conf` ∈ [0,1] is the CONTINUOUS decision margin (|t - threshold| / margin,
+        clipped) — used as the team-vote weight so a decisive read outweighs a
+        borderline one. `confident` stays the boolean the split logic uses.
         Default = UPLOAD-AXIS projection (camera-invariant, general, no A/B flip);
         legacy HSV nearest-anchor when TEAM_MATCH_MODE='distance'."""
         if "A" not in self._team_colors or "B" not in self._team_colors:
-            return None, False
+            return None, False, 0.0
 
         if TEAM_MATCH_MODE == "axis":
             lab = self._dominant_lab(player_crop)
             if lab is None:
-                return None, False
+                return None, False, 0.0
             # Measure the per-channel LAB scale ONCE from early crops, then freeze —
             # down-weights whatever varies most (usually luminance/lighting), so the
             # axis leans on the stable colour channels. Generalises to any lighting.
@@ -1544,23 +1626,33 @@ class JerseyOCR:
                     self._team_axis = None     # rebuild axis with the measured scale
             ax = self._ensure_team_axis()
             if ax is None:
-                return None, False
+                return None, False, 0.0
             _fp, As, axis, scale, _tB, thr, cmargin = ax
             t = float((np.array(lab, dtype=np.float64) / scale - As) @ axis)
-            return ("A" if t < thr else "B"), (abs(t - thr) >= cmargin)
+            margin = abs(t - thr)
+            conf = min(1.0, margin / cmargin) if cmargin > 1e-6 else 1.0
+            return ("A" if t < thr else "B"), (margin >= cmargin), conf
 
         # ── legacy HSV nearest-anchor ──
         hsv = self._dominant_hsv(player_crop)
         if hsv is None:
-            return None, False
+            return None, False, 0.0
         da = self._hsv_distance(hsv, self._team_colors["A"])
         db = self._hsv_distance(hsv, self._team_colors["B"])
-        return ("A" if da <= db else "B"), (abs(da - db) >= TEAM_CONFIDENT_MARGIN)
+        margin = abs(da - db)
+        conf = (min(1.0, margin / TEAM_CONFIDENT_MARGIN)
+                if TEAM_CONFIDENT_MARGIN > 1e-6 else 1.0)
+        return ("A" if da <= db else "B"), (margin >= TEAM_CONFIDENT_MARGIN), conf
+
+    def is_not_team(self, track_id: int) -> bool:
+        """True when this track has enough colour evidence that it belongs to NEITHER
+        team (referee / coach). Callers must clear any sticky team for it."""
+        return track_id in self._team_rejected
 
     def raw_team_vote(self, player_crop: np.ndarray) -> Optional[str]:
         """Single-frame team with NO state/lock — for A/B orientation checks
         (video_processor disambiguation) that must see a fresh read."""
-        vote, _ = self._team_vote_confident(player_crop)
+        vote, _, _ = self._team_vote_confident(player_crop)
         return vote
 
     def calibrate_teams(
@@ -1632,6 +1724,8 @@ class JerseyOCR:
         self.set_team_colors_lab()       # keep LAB anchors + axis in sync (upload-axis)
         self._track_team.clear()
         self._track_team_votes.clear()
+        self._track_color_dist.clear()
+        self._team_rejected.clear()
         self._team_lock.clear()          # colors recomputed → invalidate locks (fix C)
         self._team_disagree.clear()
 
@@ -1651,6 +1745,8 @@ class JerseyOCR:
         self.set_team_colors_lab()       # derive LAB anchor + rebuild axis (upload-axis)
         self._track_team.clear()
         self._track_team_votes.clear()
+        self._track_color_dist.clear()
+        self._team_rejected.clear()
         self._team_lock.clear()          # anchor changed → invalidate locks (fix C)
         self._team_disagree.clear()
 
@@ -1673,6 +1769,15 @@ class JerseyOCR:
                 self._track_team_votes[old_tid],
                 maxlen=self._TEAM_VOTE_HISTORY,
             )
+        # Carry the not-a-team evidence too, else a referee whose id churns would keep
+        # resetting to "unjudged" and get a team colour for the first few frames again.
+        if old_tid in self._track_color_dist:
+            self._track_color_dist[new_tid] = deque(
+                self._track_color_dist[old_tid],
+                maxlen=self._TEAM_VOTE_HISTORY,
+            )
+        if old_tid in self._team_rejected:
+            self._team_rejected.add(new_tid)
         # Carry the soft team lock (same physical player); fresh disagreement counter.
         if old_tid in self._team_lock:
             self._team_lock[new_tid] = self._team_lock[old_tid]

@@ -1263,6 +1263,17 @@ class VideoProcessor:
         if self._tracker:
             for player in tracked_players:
                 tid = player["track_id"]
+
+                # ── NOT-A-TEAM (referee / coach): neither jersey colour ──────────
+                # jersey_ocr has accumulated enough colour evidence that this person
+                # wears neither team's kit. Emit NO team AND purge the sticky cache —
+                # otherwise the sticky below would resurrect the team it was given in
+                # its first few frames (before the evidence accumulated).
+                if self._jersey and self._jersey.is_not_team(tid):
+                    player["team"] = ""
+                    self._last_known_team.pop(tid, None)
+                    continue
+
                 jersey_num = self._tracker.get_jersey_number(tid)
                 if jersey_num is not None and self._roster:
                     # ── Team from COLOR is the authority ─────────────────────────

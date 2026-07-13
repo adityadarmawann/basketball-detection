@@ -91,6 +91,15 @@ TEAM_CONFIDENT_MARGIN = 25.0  # min |dist_a - dist_b| for a frame's color vote t
 # detector-class referee crops), threshold 3.55:
 #     1 crop  → 83% players kept / 88% referees rejected   (overlaps)
 #     5 crops → 97.2% / 97.4%      10 crops → 99.6% / 99.7%      20 crops → 100% / 100%
+# DEFAULT OFF — the absolute threshold below is ASYMMETRIC in practice: the uploaded
+# maroon anchor is vivid while the rendered maroon on court is washed out, so team B
+# players sit systematically FARTHER from their anchor than team A players
+# (measured p50: A=2.54 vs B=3.19) and a single global threshold rejects ~20% of B
+# and ~5% of A. Worse, my calibration set was stratified by a*, which over-sampled
+# VIVID maroon and hid this. Enabling it in a real run collapsed team B to ~0.
+# A correct version must normalise per team (or use an adaptive/outlier threshold),
+# not one absolute distance. Kept behind a flag until that is measured properly.
+TEAM_REJECT_ENABLED     = os.getenv("TEAM_REJECT_ENABLED", "0") == "1"
 TEAM_REJECT_DIST        = float(os.getenv("TEAM_REJECT_DIST", "3.55"))
 TEAM_REJECT_MIN_SAMPLES = int(os.getenv("TEAM_REJECT_MIN_SAMPLES", "5"))
 # Team votes are WEIGHTED (mirrors the jersey-number vote, which is already weighted by
@@ -1397,7 +1406,7 @@ class JerseyOCR:
         # (the two distributions overlap), but the MEDIAN over a few crops separates
         # players from referees almost perfectly — so we only reject once we have
         # TEAM_REJECT_MIN_SAMPLES of evidence, never on a single frame.
-        dist = self._anchor_distance(player_crop)
+        dist = self._anchor_distance(player_crop) if TEAM_REJECT_ENABLED else None
         if dist is not None:
             dq = self._track_color_dist.setdefault(
                 track_id, deque(maxlen=self._TEAM_VOTE_HISTORY))

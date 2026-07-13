@@ -1427,6 +1427,22 @@ class JerseyOCR:
         lab = cv2.cvtColor(cv2.cvtColor(px, cv2.COLOR_HSV2BGR), cv2.COLOR_BGR2LAB)[0, 0]
         return [float(lab[0]), float(lab[1]), float(lab[2])]
 
+    @staticmethod
+    def _chest_median_lab(crop: np.ndarray) -> Optional[list]:
+        """Plain (unfiltered) median LAB of the chest strip.
+
+        Used ONLY to measure the per-channel LAB scale. It must stay unfiltered:
+        the anchor-filtered _dominant_lab polarises its outputs toward the anchors,
+        so its spread reflects team separation, not sensor/lighting noise."""
+        h, w = crop.shape[:2]
+        if h < 4 or w < 4:
+            return None
+        chest = crop[int(h * 0.20):int(h * 0.50), int(w * 0.15):int(w * 0.85)]
+        if chest.size == 0:
+            return None
+        lab = cv2.cvtColor(chest, cv2.COLOR_BGR2LAB)
+        return np.median(lab.reshape(-1, 3).astype(np.float32), axis=0).tolist()
+
     def _dominant_lab(self, crop: np.ndarray) -> Optional[list]:
         """Jersey chest colour in LAB, robust to contamination.
 
@@ -1509,8 +1525,18 @@ class JerseyOCR:
             # Measure the per-channel LAB scale ONCE from early crops, then freeze —
             # down-weights whatever varies most (usually luminance/lighting), so the
             # axis leans on the stable colour channels. Generalises to any lighting.
+            #
+            # CRITICAL: measure it from the RAW chest median, NOT from _dominant_lab.
+            # _dominant_lab is anchor-filtered, so its outputs are POLARISED toward
+            # whichever anchor each crop is nearest. Their std then measures the
+            # A-vs-B SEPARATION rather than the per-channel noise — which would make
+            # the axis down-weight exactly the channels that separate the teams.
+            # (Measured: feeding _dominant_lab back in gave scale [59,15,7] and
+            # collapsed A-recall to 73%; the raw median gives ~[33,9,8] → 98%.)
             if self._lab_scale is None:
-                self._lab_samples.append(lab)
+                raw = self._chest_median_lab(player_crop)
+                if raw is not None:
+                    self._lab_samples.append(raw)
                 if len(self._lab_samples) >= LAB_SCALE_MIN_SAMPLES:
                     s = np.std(np.array(self._lab_samples, dtype=np.float64), axis=0)
                     s[s < 1e-3] = 1.0

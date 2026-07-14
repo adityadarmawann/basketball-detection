@@ -47,13 +47,35 @@ DIGIT_CONF_THRESHOLD   = 0.12   # minimum per-digit detection confidence. LOW on
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
                              # at ocr_interval=2 (0.13s), 2 votes ≈ 0.27s — faster confirmation;
                              # roster whitelist + MAX_VOTE_HISTORY absorb stray misreads
-# Confidence-upgrade flush thresholds. Relaxed from 0.60/0.25 → 0.50/0.10 after a
-# ground-truth sweep (19 hand-labelled tracks, real process() replay): 0.50/0.10
-# lifted mid-track number accuracy 57.7%→61.2% and final accuracy 57.9%→63.2% while
-# flip-rate barely moved (3.84→3.95/track). Env-overridable. NOTE: lowering DISAGREE_N
-# to 2 was ALSO tested and REJECTED — it thrashed (acc 57.7%→52.9%, flips +47%).
-CONF_UPGRADE_MIN      = float(os.getenv("CONF_UPGRADE_MIN",   "0.50"))  # digit-conf floor to flush
-CONF_UPGRADE_DELTA    = float(os.getenv("CONF_UPGRADE_DELTA", "0.10"))  # margin over prior best to flush
+# INCUMBENCY MARGIN. _resolve_votes() is stateless: it re-elects argmax(weight) on EVERY
+# read, so once the window slides, a challenger that edges ahead by any epsilon takes the
+# number — and the next read hands it straight back. That churn (not the flushes) was the
+# dominant defect: replaying the 14 Jul run's 7007 OCR reads over 624 fresh tracks, plain
+# vote turnover caused 65% of all number changes, a THIRD of which were later undone.
+# So a challenger must now out-weigh the sitting number by this factor to unseat it.
+# Measured by replaying that run through this very code (coverage and latency are
+# IDENTICAL at every setting — 284 tracks numbered, median 5 frames to first
+# confirmation; only churn moves):
+#     1.0 (none) -> 223 changes, 63 undone, 48 flip-flops   <- old behaviour
+#     1.3        -> 171 changes, 30 undone, 18 flip-flops
+#     1.5        -> 160 changes, 27 undone, 17 flip-flops
+#     2.0        -> 151 changes, 23 undone, 15 flip-flops   <- chosen: the knee
+#     2.5, 3.0   -> 149/148 changes, 23 undone, 15 flip-flops  (flat — no further gain)
+# 2.0 sits where the curve goes flat, so the exact value is not load-bearing. Everything
+# still changing past it is a challenger with >=2x the weight, i.e. real evidence.
+# The flushes below deliberately BYPASS this (they drop the incumbent), so a genuinely
+# wrong early confirmation can still be corrected fast.
+VOTE_HYSTERESIS       = float(os.getenv("VOTE_HYSTERESIS", "2.0"))
+# Confidence-upgrade flush thresholds. The digit model is weak on this footage — MEDIAN
+# read confidence is 0.35 — so a 0.50 floor meant "upgrade on a better read" almost never
+# fired for the low-confidence reads it was meant to serve, and a 0.10 delta ignored the
+# small gains (0.34 -> 0.36) that are the norm here. Floor dropped to 0.0 and delta to
+# 0.02 so any genuinely better read is acted on. Safe ONLY because of the incumbency
+# margin above, which is what stops the now-hair-trigger flush from thrashing. Revisit
+# once the digit model is retrained on more data (median 0.35 is the real problem here;
+# every knob below is only compensating for it).
+CONF_UPGRADE_MIN      = float(os.getenv("CONF_UPGRADE_MIN",   "0.0"))   # digit-conf floor to flush
+CONF_UPGRADE_DELTA    = float(os.getenv("CONF_UPGRADE_DELTA", "0.02"))  # margin over prior best to flush
 MAX_VOTE_HISTORY      = 20   # rolling window — 20 reads per player (OCR_SAMPLE_EVERY=1)
                              # smaller window lets wrong reads be forgotten faster
 TRANSFER_MIN_LONG_VOTES = 3  # 2-digit candidate needs this many reads before 1-digit votes
@@ -388,6 +410,10 @@ class JerseyOCR:
 
         # Voting state: track_id → deque of int candidates
         self._votes: dict[int, deque] = {}
+        # The number currently held by each track — the INCUMBENT. Vote resolution is
+        # otherwise stateless, so without this a challenger only has to tie to take over.
+        # Dropped by both flushes, so a wrong incumbent is still correctable.
+        self._confirmed_num: dict[int, int] = {}
 
         # Team classification
         # _track_team: current best team per track — updated every frame, NOT a permanent lock.
@@ -876,6 +902,7 @@ class JerseyOCR:
                         current_confirmed, _ = self._vote_status(track_id)
                         if current_confirmed is not None and candidate != current_confirmed:
                             self._votes.pop(track_id, None)
+                            self._confirmed_num.pop(track_id, None)   # incumbent steps down
                             _flush = "conf_upgrade"
                             logger.info(
                                 "track %d: confidence upgrade %.2f→%.2f %s→%d — flushing votes",
@@ -900,6 +927,7 @@ class JerseyOCR:
                                 and all(x == last[0] for x in last)):
                             self._votes.pop(track_id, None)
                             self._best_read_conf.pop(track_id, None)
+                            self._confirmed_num.pop(track_id, None)   # incumbent steps down
                             _flush = "disagree"
                             logger.info(
                                 "track %d: %d consecutive reads of %s disagree with "
@@ -911,6 +939,8 @@ class JerseyOCR:
                 # Vote weight = digit-model confidence scaled by blur quality (Fix #3).
                 self._vote_number(track_id, candidate, read_conf * _blur_q)
                 confirmed, conf = self._vote_status(track_id)
+                if confirmed is not None:
+                    self._confirmed_num[track_id] = confirmed   # this track's incumbent
 
                 if self.diag.on:
                     self.diag.ocr(
@@ -1305,9 +1335,15 @@ class JerseyOCR:
 
         return self._current_confirmed(track_id)
 
-    def _resolve_votes(self, votes) -> tuple[Optional[int], float]:
+    def _resolve_votes(
+        self, votes, incumbent: Optional[int] = None
+    ) -> tuple[Optional[int], float]:
         """
         Confidence-weighted, prefix/suffix-aware vote resolution (Fix #3).
+
+        `incumbent` is the number this track currently holds, if any. Passing it applies
+        the VOTE_HYSTERESIS margin (see below); omitting it keeps the old pure-argmax
+        behaviour, which is what the tests and legacy bare-int callers expect.
 
         `votes` is an iterable of (candidate, weight). Per candidate we track a
         read COUNT (evidence it is real) and a summed WEIGHT (how sharp/confident
@@ -1369,26 +1405,42 @@ class JerseyOCR:
         confidence = valid[best] / total_w if total_w > 0 else 0.0
         confirmed  = (best if count[best] >= VOTE_THRESHOLD
                       and valid[best] >= MIN_CONFIRM_WEIGHT else None)
+
+        # Incumbency margin: a sitting number is not unseated by a hair. The challenger
+        # must out-weigh it by VOTE_HYSTERESIS, and the incumbent must still be backed by
+        # real reads in the window (once it ages out entirely, it loses by default).
+        # Only bites when someone else would otherwise win outright — if `confirmed` is
+        # None (nothing clears the thresholds) the incumbent is NOT resurrected.
+        if (incumbent is not None and confirmed is not None and confirmed != incumbent
+                and incumbent in valid
+                and count.get(incumbent, 0) >= VOTE_THRESHOLD
+                and valid[confirmed] < valid[incumbent] * VOTE_HYSTERESIS):
+            confirmed  = incumbent
+            confidence = valid[incumbent] / total_w if total_w > 0 else 0.0
+
         return confirmed, confidence
 
     def _current_confirmed(self, track_id: int) -> Optional[int]:
         if track_id not in self._votes or not self._votes[track_id]:
             return None
-        confirmed, _ = self._resolve_votes(self._votes[track_id])
+        confirmed, _ = self._resolve_votes(
+            self._votes[track_id], self._confirmed_num.get(track_id))
         return confirmed
 
     def _vote_confidence(self, track_id: int) -> float:
         """Weight share of the leading candidate [0.0, 1.0]."""
         if track_id not in self._votes or not self._votes[track_id]:
             return 0.0
-        _, confidence = self._resolve_votes(self._votes[track_id])
+        _, confidence = self._resolve_votes(
+            self._votes[track_id], self._confirmed_num.get(track_id))
         return confidence
 
     def _vote_status(self, track_id: int) -> tuple[Optional[int], float]:
         """Return (confirmed_number, confidence) using weighted vote resolution."""
         if track_id not in self._votes or not self._votes[track_id]:
             return None, 0.0
-        return self._resolve_votes(self._votes[track_id])
+        return self._resolve_votes(
+            self._votes[track_id], self._confirmed_num.get(track_id))
 
     def reset(self) -> None:
         """
@@ -1401,6 +1453,7 @@ class JerseyOCR:
         once per game and remain valid across quarters.
         """
         self._votes.clear()
+        self._confirmed_num.clear()
         self._track_team.clear()
         self._track_team_votes.clear()
         self._track_color_dist.clear()
@@ -1418,8 +1471,10 @@ class JerseyOCR:
         """Clear voting history for one track or all tracks."""
         if track_id is None:
             self._votes.clear()
+            self._confirmed_num.clear()
         else:
             self._votes.pop(track_id, None)
+            self._confirmed_num.pop(track_id, None)
 
     # ------------------------------------------------------------------
     # Team classification (K-Means HSV)
@@ -1558,6 +1613,7 @@ class JerseyOCR:
         the new player is read fresh, release any (team,number) ownership, and
         re-anchor the team lock to the new team."""
         self._votes.pop(track_id, None)
+        self._confirmed_num.pop(track_id, None)   # different person → no incumbent
         self._best_read_conf.pop(track_id, None)
         self._recent_reads.pop(track_id, None)
         for key in [k for k, v in self._team_number_owner.items() if v == track_id]:
@@ -1909,6 +1965,11 @@ class JerseyOCR:
                 self._best_read_conf.get(new_tid, 0.0),
                 self._best_read_conf[old_tid],
             )
+        # Same physical player, new id — the number they already hold comes with them.
+        # Without this the re-ID'd track has no incumbent, so the hysteresis margin is
+        # not applied on its first reads and a stray misread walks straight in.
+        if old_tid in self._confirmed_num and new_tid not in self._confirmed_num:
+            self._confirmed_num[new_tid] = self._confirmed_num[old_tid]
 
     # ------------------------------------------------------------------
     # Colour helpers

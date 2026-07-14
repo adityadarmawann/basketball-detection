@@ -30,6 +30,7 @@ except ImportError:
     import json as _json_lib     # fallback: stdlib json
     def _json_dumps(obj, **kw) -> str:
         return _json_lib.dumps(obj, default=str, **kw)
+import hashlib
 import json  # still needed for json.loads in a few places
 import logging
 import os
@@ -307,6 +308,18 @@ def _hsv_dist(a: list, b: list) -> float:
 # indistinguishable and the pipeline falls back to K-Means. White↔black ≈ 160,
 # navy↔black ≈ 110, so 25 safely admits every realistic distinct-jersey pair.
 TEAM_COLOR_MIN_SEPARATION = 25.0
+
+# Fingerprint of the jersey_ocr module that is ACTUALLY LOADED, recorded in every diag
+# config.json. A long-running server (uvicorn --reload especially) can be serving code that
+# is older than the file on disk, and process start times are not proof of anything — we
+# lost time trying to infer from a timestamp which code a live run was on. Hash the source
+# the interpreter imported and stop guessing.
+try:
+    _CODE_SHA = hashlib.md5(
+        Path(_jmod.__file__).read_bytes()
+    ).hexdigest()[:10]
+except Exception:
+    _CODE_SHA = "unknown"
 
 # Distinct tracks that must weigh in before K-Means cluster orientation (which cluster is
 # team A) is settled from roster-unique jersey numbers. This path only runs when the team
@@ -668,6 +681,15 @@ class VideoProcessor:
                     frac=getattr(_jmod, "TEAM_AXIS_FRAC", None),
                     conf_frac=getattr(_jmod, "TEAM_AXIS_CONF_FRAC", None),
                     pixel_frac=getattr(_jmod, "TEAM_JERSEY_PIXEL_FRAC", None),
+                    # Every knob that can change the result must land here, or a run cannot
+                    # be reproduced or even identified after the fact. These three were
+                    # missing, and it left us unable to tell which code a live run was on.
+                    number_crop_pad=getattr(_jmod, "NUMBER_CROP_PAD", None),
+                    digit_conf=getattr(_jmod, "DIGIT_CONF_THRESHOLD", None),
+                    vote_hysteresis=getattr(_jmod, "VOTE_HYSTERESIS", None),
+                    conf_upgrade_min=getattr(_jmod, "CONF_UPGRADE_MIN", None),
+                    conf_upgrade_delta=getattr(_jmod, "CONF_UPGRADE_DELTA", None),
+                    code_sha=_CODE_SHA,
                     scale=(list(_j._lab_scale) if _j._lab_scale is not None else None),
                     anchor_hsv={k: list(v) for k, v in _j._team_colors.items()},
                     anchor_lab={k: list(v) for k, v in _j._team_colors_lab.items()},
@@ -694,6 +716,15 @@ class VideoProcessor:
                     frac=getattr(_jmod, "TEAM_AXIS_FRAC", None),
                     conf_frac=getattr(_jmod, "TEAM_AXIS_CONF_FRAC", None),
                     pixel_frac=getattr(_jmod, "TEAM_JERSEY_PIXEL_FRAC", None),
+                    # Every knob that can change the result must land here, or a run cannot
+                    # be reproduced or even identified after the fact. These three were
+                    # missing, and it left us unable to tell which code a live run was on.
+                    number_crop_pad=getattr(_jmod, "NUMBER_CROP_PAD", None),
+                    digit_conf=getattr(_jmod, "DIGIT_CONF_THRESHOLD", None),
+                    vote_hysteresis=getattr(_jmod, "VOTE_HYSTERESIS", None),
+                    conf_upgrade_min=getattr(_jmod, "CONF_UPGRADE_MIN", None),
+                    conf_upgrade_delta=getattr(_jmod, "CONF_UPGRADE_DELTA", None),
+                    code_sha=_CODE_SHA,
                     scale=(list(_j._lab_scale) if _j._lab_scale is not None else None),
                     anchor_hsv={k: list(v) for k, v in _j._team_colors.items()},
                     anchor_lab={k: list(v) for k, v in _j._team_colors_lab.items()},

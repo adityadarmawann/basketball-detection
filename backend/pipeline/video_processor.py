@@ -635,6 +635,32 @@ class VideoProcessor:
                     sep, TEAM_COLOR_MIN_SEPARATION,
                 )
 
+        # ── Diagnostics sink: everything needed to re-score this run offline ──────
+        # Anchors are final at this point (hints applied or K-Means will run), so this
+        # captures the exact configuration the classifier will use for the whole video.
+        if self._jersey is not None:
+            try:
+                self._jersey.diag = _diag.Diag(str(match_id))
+                _j = self._jersey
+                self._jersey.diag.config(
+                    match_id=str(match_id),
+                    mode=getattr(_jmod, "TEAM_MATCH_MODE", None),
+                    frac=getattr(_jmod, "TEAM_AXIS_FRAC", None),
+                    conf_frac=getattr(_jmod, "TEAM_AXIS_CONF_FRAC", None),
+                    pixel_frac=getattr(_jmod, "TEAM_JERSEY_PIXEL_FRAC", None),
+                    scale=(list(_j._lab_scale) if _j._lab_scale is not None else None),
+                    anchor_hsv={k: list(v) for k, v in _j._team_colors.items()},
+                    anchor_lab={k: list(v) for k, v in _j._team_colors_lab.items()},
+                    hint_hex_a=jersey_color_a or None,
+                    hint_hex_b=jersey_color_b or None,
+                    hint_hsv_a=self._jersey_hint_a,
+                    hint_hsv_b=self._jersey_hint_b,
+                    kmeans_calibrated=self._kmeans_calibrated,
+                    roster_keys=sorted(self._roster.keys()) if self._roster else [],
+                )
+            except Exception as _e:
+                logger.debug("diag config: %s", _e)
+
         # Try NVDEC hardware decode first (GPU dedicated engine, ~10× faster than CPU).
         # Falls back to cv2 software decode when ffmpegcv is not installed or GPU unavailable.
         cap = _open_video_cap(str(video_path))

@@ -25,6 +25,11 @@ from typing import Optional
 import cv2
 import numpy as np
 
+try:
+    from . import diag as _diag
+except ImportError:      # standalone/script import
+    import diag as _diag
+
 logger = logging.getLogger(__name__)
 
 MODELS_DIR            = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
@@ -398,6 +403,7 @@ class JerseyOCR:
         # coach sits far from BOTH anchors; the median over a few crops rejects them
         # (see TEAM_REJECT_DIST). Also feeds the team-vote weight.
         self._track_color_dist: dict[int, deque] = {}
+        self.diag = _diag.null()          # set by video_processor once match_id is known
         # Tracks judged NOT-A-TEAM (referee/coach). Distinct from "no vote this frame":
         # video_processor must PURGE its sticky team for these, not hold the last one.
         self._team_rejected: set[int] = set()
@@ -824,6 +830,8 @@ class JerseyOCR:
                 # When team is already known from color rolling-vote, only accept
                 # numbers on that team's side of the roster — this blocks
                 # cross-team number ambiguity (e.g. both teams wearing #7).
+                _cand_raw = candidate          # before the roster whitelist (diagnostics)
+                _rej = None
                 if candidate is not None and roster:
                     js = str(candidate)
                     known_team = self._track_team.get(track_id)
@@ -838,6 +846,7 @@ class JerseyOCR:
                                      f"{js}_A" in roster or
                                      f"{js}_B" in roster)
                     if not in_roster:
+                        _rej = f"not_in_roster(team={known_team or '?'})"
                         logger.debug(
                             "track %d: OCR candidate %d rejected — not in roster"
                             " (team=%s)",
@@ -846,6 +855,7 @@ class JerseyOCR:
                         candidate  = None
                         read_conf  = 0.0
 
+                _flush = None
                 # ── Confidence-upgrade flush ──────────────────────────────────
                 # When the camera zooms in and produces a significantly more
                 # confident read than anything seen before, flush the stale vote
@@ -857,6 +867,7 @@ class JerseyOCR:
                         current_confirmed, _ = self._vote_status(track_id)
                         if current_confirmed is not None and candidate != current_confirmed:
                             self._votes.pop(track_id, None)
+                            _flush = "conf_upgrade"
                             logger.info(
                                 "track %d: confidence upgrade %.2f→%.2f %s→%d — flushing votes",
                                 track_id, prev_best, read_conf, current_confirmed, candidate,
@@ -880,6 +891,7 @@ class JerseyOCR:
                                 and all(x == last[0] for x in last)):
                             self._votes.pop(track_id, None)
                             self._best_read_conf.pop(track_id, None)
+                            _flush = "disagree"
                             logger.info(
                                 "track %d: %d consecutive reads of %s disagree with "
                                 "confirmed %s — flushing stale lock",
@@ -890,6 +902,17 @@ class JerseyOCR:
                 # Vote weight = digit-model confidence scaled by blur quality (Fix #3).
                 self._vote_number(track_id, candidate, read_conf * _blur_q)
                 confirmed, conf = self._vote_status(track_id)
+
+                if self.diag.on:
+                    self.diag.ocr(
+                        f=self._frame_counter, tid=track_id,
+                        cand_raw=_cand_raw, cand=candidate, rej=_rej,
+                        read_conf=read_conf, blur=_blur_q,
+                        w=read_conf * _blur_q, flush=_flush,
+                        votes=dict(Counter(c for c, _w in self._votes.get(track_id, []))),
+                        confirmed=confirmed, vote_conf=conf,
+                        team=self._track_team.get(track_id),
+                    )
 
                 logger.info(
                     "track %d: candidate=%s  conf=%.2f blur_q=%.2f  votes=%s  confirmed=%s",
@@ -1436,9 +1459,35 @@ class JerseyOCR:
             self._team_rejected.discard(track_id)
 
         vote, confident, conf = self._team_vote_confident(player_crop)
+
+        # ── diagnostics: capture the full basis of this decision ──────────────
+        if self.diag.on:
+            _raw = self._chest_median_lab(player_crop)
+            _dom = self._dominant_lab(player_crop)
+            _t = _thr = _dA = _dB = None
+            _ax = self._ensure_team_axis()
+            if _ax is not None and _dom is not None:
+                _fp, _As, _axis, _sc, _tB, _thr, _cm = _ax
+                _t = float((np.array(_dom, dtype=np.float64) / _sc - _As) @ _axis)
+                if _raw is not None:
+                    _al = self._team_colors_lab.get("A"); _bl = self._team_colors_lab.get("B")
+                    if _al is not None and _bl is not None:
+                        _v = np.asarray(_raw, dtype=np.float64)
+                        _dA = float(np.linalg.norm((_v - np.asarray(_al)) / _sc))
+                        _dB = float(np.linalg.norm((_v - np.asarray(_bl)) / _sc))
+            self._diag_pending = dict(
+                f=self._frame_counter, tid=track_id,
+                lab_raw=_raw, lab_dom=_dom, t=_t, thr=_thr, conf=conf,
+                vote=vote, dA=_dA, dB=_dB,
+                locked=self._team_lock.get(track_id),
+                crop=player_crop,
+            )
+
         if vote is None:
             # no calibration / crop failed — hold last known (prefer the lock)
-            return self._team_lock.get(track_id) or self._track_team.get(track_id)
+            _res = self._team_lock.get(track_id) or self._track_team.get(track_id)
+            self._diag_emit(_res, 0.0)
+            return _res
 
         locked = self._team_lock.get(track_id)
         if locked is not None:
@@ -1453,6 +1502,7 @@ class JerseyOCR:
             else:
                 result = locked
             self._track_team[track_id] = result
+            self._diag_emit(result, 0.0)
             return result
 
         # ── (2) WEIGHTED rolling votes (mirrors the weighted jersey-number vote) ──
@@ -1478,7 +1528,20 @@ class JerseyOCR:
 
         # Update current-best cache (used by Fast Path A and inherit_team)
         self._track_team[track_id] = result
+        self._diag_emit(result, weight, w_a, w_b, len(votes))
         return result
+
+    def _diag_emit(self, team, weight, w_a=None, w_b=None, nvotes=None) -> None:
+        """Flush the pending team-decision row (no-op unless DIAG_DUMP=1)."""
+        if not self.diag.on:
+            return
+        row = getattr(self, "_diag_pending", None)
+        if not row:
+            return
+        self._diag_pending = None
+        crop = row.pop("crop", None)
+        row.update(team=team, w=weight, wA=w_a, wB=w_b, nvotes=nvotes)
+        self.diag.team(crop=crop, **row)
 
     def _split_track_identity(self, track_id: int, new_team: str) -> None:
         """The physical player under track_id changed (confirmed by a sustained,

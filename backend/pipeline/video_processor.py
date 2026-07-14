@@ -69,6 +69,12 @@ _create_tracker    = _rel_or_abs("tracker",            "create_tracker")
 _create_court      = _rel_or_abs("court",              "create_court_mapper")
 _create_pose       = _rel_or_abs("pose",               "create_pose_estimator")
 _create_jersey     = _rel_or_abs("jersey_ocr",         "create_jersey_ocr")
+try:
+    from . import diag as _diag
+    from . import jersey_ocr as _jmod
+except ImportError:      # standalone/script import
+    import diag as _diag
+    import jersey_ocr as _jmod
 _create_action     = _rel_or_abs("action",             "create_action_classifier")
 _create_events     = _rel_or_abs("event_engine",       "create_event_engine")
 _create_stats      = _rel_or_abs("stats_calculator",   "create_stats_calculator")
@@ -661,6 +667,32 @@ class VideoProcessor:
             except Exception as _e:
                 logger.debug("diag config: %s", _e)
 
+        # ── Diagnostics sink: everything needed to re-score this run offline ─────
+        # Anchors are final here, so this captures the exact configuration the
+        # classifier will use for the whole video.
+        if self._jersey is not None:
+            try:
+                self._jersey.diag = _diag.Diag(str(match_id))
+                _j = self._jersey
+                self._jersey.diag.config(
+                    match_id=str(match_id),
+                    mode=getattr(_jmod, "TEAM_MATCH_MODE", None),
+                    frac=getattr(_jmod, "TEAM_AXIS_FRAC", None),
+                    conf_frac=getattr(_jmod, "TEAM_AXIS_CONF_FRAC", None),
+                    pixel_frac=getattr(_jmod, "TEAM_JERSEY_PIXEL_FRAC", None),
+                    scale=(list(_j._lab_scale) if _j._lab_scale is not None else None),
+                    anchor_hsv={k: list(v) for k, v in _j._team_colors.items()},
+                    anchor_lab={k: list(v) for k, v in _j._team_colors_lab.items()},
+                    hint_hex_a=jersey_color_a or None,
+                    hint_hex_b=jersey_color_b or None,
+                    hint_hsv_a=self._jersey_hint_a,
+                    hint_hsv_b=self._jersey_hint_b,
+                    kmeans_calibrated=self._kmeans_calibrated,
+                    roster_keys=sorted(self._roster.keys()) if self._roster else [],
+                )
+            except Exception as _e:
+                logger.debug("diag config: %s", _e)
+
         # Try NVDEC hardware decode first (GPU dedicated engine, ~10× faster than CPU).
         # Falls back to cv2 software decode when ffmpegcv is not installed or GPU unavailable.
         cap = _open_video_cap(str(video_path))
@@ -1111,6 +1143,7 @@ class VideoProcessor:
                 if frame_id % COURT_EVERY_N_FRAMES == 0:
                     court = self._court.process_frame(frame)
                     self._last_court_result = court
+                    self._diag_court(frame_id, frame, court)
                 else:
                     court = self._last_court_result
                 frame_data["court"] = court
@@ -1526,6 +1559,72 @@ class VideoProcessor:
             )
 
         return frame_data
+
+    # ── Court diagnostics ────────────────────────────────────────────────────
+    # Court keypoint groups. The visible SET is a fingerprint of which camera is
+    # live (left basket / right basket / wide). Ids per court.py LABEL_TO_COURT.
+    _KP_LEFT  = frozenset({1, 2, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 16})
+    _KP_RIGHT = frozenset({25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38, 41})
+
+    def _diag_court(self, frame_id: int, frame, court: dict) -> None:
+        """Record what the camera is looking at, and how fast it is moving.
+
+        Per court run:
+          - visible keypoint IDs        → the scene fingerprint (LEFT / RIGHT / WIDE)
+          - image centre + 4 corners mapped to COURT METRES → where the camera points
+            and how much of the court it actually sees
+          - mean pixel shift of keypoints shared with the previous run → camera SPEED,
+            which is the signal that shreds the tracker (measured: 2.9x more id churn
+            at fast pan than with a still camera)
+        """
+        j = getattr(self, "_jersey", None)
+        if j is None or not getattr(j, "diag", None) or not j.diag.on:
+            return
+        try:
+            # NOTE: process_frame() returns the list under "court_keypoints"
+            # (not "keypoints") and marks the ones below their confidence gate
+            # as occluded=True. "Visible" = the ones that can actually feed H.
+            kps = court.get("court_keypoints") or []
+            vis = {int(k["point_id"]): tuple(k["pixel_pos"])
+                   for k in kps if not k.get("occluded")}
+            ids = sorted(vis)
+            nL  = len(self._KP_LEFT & set(ids))
+            nR  = len(self._KP_RIGHT & set(ids))
+            if len(ids) < 4:
+                scene = "NO-COURT"
+            elif nL >= 3 and nR >= 3:
+                scene = "WIDE"
+            elif nL >= 3:
+                scene = "LEFT"
+            elif nR >= 3:
+                scene = "RIGHT"
+            else:
+                scene = "PARTIAL"
+
+            prev  = getattr(self, "_diag_prev_kp", None)
+            shift = None
+            if prev:
+                common = [k for k in vis if k in prev]
+                if common:
+                    shift = float(np.mean([
+                        float(np.hypot(vis[k][0] - prev[k][0], vis[k][1] - prev[k][1]))
+                        for k in common
+                    ]))
+            self._diag_prev_kp = vis
+
+            look = corners = None
+            if court.get("is_calibrated") and frame is not None:
+                h, w = frame.shape[:2]
+                look = self._court.pixel_to_court([w / 2.0, h / 2.0])
+                corners = [c for c in (self._court.pixel_to_court(p) for p in
+                                       ([0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]))
+                           if c]
+
+            j.diag.court(f=frame_id, scene=scene, nvis=len(ids), ids=ids,
+                         nL=nL, nR=nR, calib=bool(court.get("is_calibrated")),
+                         shift_px=shift, look=look, corners=corners)
+        except Exception as e:
+            logger.debug("diag court: %s", e)
 
     # ── Per-frame bbox snapshot (for frontend time-based lookup) ─────────────
 

@@ -12,6 +12,9 @@ Output (per match, under DIAG_DIR):
     <match_id>/config.json   one-shot: anchors, scale, FRAC, mode, roster
     <match_id>/team.jsonl    one row per player-frame that was colour-classified
     <match_id>/ocr.jsonl     one row per OCR read
+    <match_id>/court.jsonl   one row per court run: visible keypoints (= the scene
+                             fingerprint), where the camera is looking in COURT
+                             metres, and how fast it moved since the last run
     <match_id>/crops/        every DIAG_CROP_EVERY-th crop, named f{frame}_t{tid}.jpg
 
 Everything is off unless DIAG_DUMP=1, and every call is wrapped so a diagnostics
@@ -53,8 +56,9 @@ class Diag:
             self.root = os.path.join(DIAG_DIR, str(match_id))
             self.crops = os.path.join(self.root, "crops")
             os.makedirs(self.crops, exist_ok=True)
-            self._team_f = open(os.path.join(self.root, "team.jsonl"), "w", buffering=1)
-            self._ocr_f = open(os.path.join(self.root, "ocr.jsonl"), "w", buffering=1)
+            self._team_f  = open(os.path.join(self.root, "team.jsonl"),  "w", buffering=1)
+            self._ocr_f   = open(os.path.join(self.root, "ocr.jsonl"),   "w", buffering=1)
+            self._court_f = open(os.path.join(self.root, "court.jsonl"), "w", buffering=1)
         except Exception:
             self.on = False
 
@@ -94,10 +98,20 @@ class Diag:
         except Exception:
             pass
 
+    # ── per court run: which keypoints are visible, where the camera looks ──
+    def court(self, **row: Any) -> None:
+        if not self.on:
+            return
+        try:
+            with _lock:
+                self._court_f.write(json.dumps(_clean(row), separators=(",", ":")) + "\n")
+        except Exception:
+            pass
+
     def close(self) -> None:
         if not self.on:
             return
-        for f in ("_team_f", "_ocr_f"):
+        for f in ("_team_f", "_ocr_f", "_court_f"):
             try:
                 getattr(self, f).close()
             except Exception:

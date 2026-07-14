@@ -1633,6 +1633,18 @@ class JerseyOCR:
                     s[s < 1e-3] = 1.0
                     self._lab_scale = s
                     self._team_axis = None     # rebuild axis with the measured scale
+                    # LOUD: this is the exact configuration the classifier will use for
+                    # the whole video. If team colours come out wrong, this line says why.
+                    logger.warning(
+                        "TEAM-CFG  mode=%s  anchors_HSV A=%s B=%s  anchors_LAB A=%s B=%s  "
+                        "scale=%s  FRAC=%.2f",
+                        TEAM_MATCH_MODE,
+                        [round(v, 1) for v in self._team_colors.get("A", [])],
+                        [round(v, 1) for v in self._team_colors.get("B", [])],
+                        [round(v) for v in self._team_colors_lab.get("A", [])],
+                        [round(v) for v in self._team_colors_lab.get("B", [])],
+                        [round(float(v), 1) for v in s], TEAM_AXIS_FRAC,
+                    )
             ax = self._ensure_team_axis()
             if ax is None:
                 return None, False, 0.0

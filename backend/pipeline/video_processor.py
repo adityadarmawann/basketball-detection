@@ -597,6 +597,14 @@ class VideoProcessor:
         # Guard: only anchor when the two colors are actually distinguishable;
         # otherwise fall back to K-Means (runs in the per-frame block below).
         # K-Means also remains the path when one or both colors are missing.
+        if self._jersey and (self._jersey_hint_a is None or self._jersey_hint_b is None):
+            # Silent fallback to K-Means here is how a run ends up with garbage team
+            # colours while everything else looks fine. Make it impossible to miss.
+            logger.warning(
+                "TEAM-CFG  NO JERSEY COLOUR HINTS (A=%s B=%s) — falling back to K-Means. "
+                "Team A/B will NOT be anchored to the uploaded jersey colours.",
+                self._jersey_hint_a, self._jersey_hint_b,
+            )
         if (self._jersey
                 and self._jersey_hint_a is not None
                 and self._jersey_hint_b is not None):

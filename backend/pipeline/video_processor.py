@@ -308,6 +308,15 @@ def _hsv_dist(a: list, b: list) -> float:
 # navy↔black ≈ 110, so 25 safely admits every realistic distinct-jersey pair.
 TEAM_COLOR_MIN_SEPARATION = 25.0
 
+# Distinct tracks that must weigh in before K-Means cluster orientation (which cluster is
+# team A) is settled from roster-unique jersey numbers. This path only runs when the team
+# colours were NOT anchored to uploaded jerseys — an upload fixes the orientation, so A/B
+# cannot flip and the block is skipped entirely.
+# It used to act on a SINGLE read: one OCR misread of a number unique to one team would
+# swap the two teams for the WHOLE match and wipe every track's votes. The digit model's
+# median read confidence on this footage is 0.35, so that is not a hypothetical.
+ORIENT_MIN_VOTES = 3
+
 
 # ── Main class ────────────────────────────────────────────────────────────────
 
@@ -375,6 +384,10 @@ class VideoProcessor:
         self._team_color_ready:   set  = set()   # tracks which teams are calibrated
         self._kmeans_calibrated:  bool = False   # True after first calibrate_teams() call
         self._kmeans_disambiguated: bool = False # True after first roster-confirmed jersey
+        # track_id → "this track's colour disagrees with its roster-unique number".
+        # Evidence for which K-Means cluster is team A; keyed by track so one player
+        # (or one misread) cannot decide it alone. Unused when jerseys were uploaded.
+        self._orient_votes: dict[int, bool] = {}
         self._jersey_hint_a: Optional[list] = None  # user-supplied Team A HSV hint
         self._jersey_hint_b: Optional[list] = None  # user-supplied Team B HSV hint
 
@@ -549,6 +562,7 @@ class VideoProcessor:
         self._scoring_events      = []
         self._kmeans_calibrated   = False
         self._kmeans_disambiguated = False
+        self._orient_votes.clear()
         self._start_quarter   = max(1, min(4, start_quarter))   # kept for _finalize merge
         self._current_quarter = self._start_quarter
 
@@ -1360,9 +1374,15 @@ class VideoProcessor:
                                       or jersey_color_map.get(tid, ""))
 
                     # ── K-Means orientation via unique jerseys (no user hints) ───
-                    # Fires only until _kmeans_disambiguated is set.
-                    # A unique jersey (worn by exactly one team) lets us verify which
-                    # K-Means cluster is Team A by comparing color vs. roster.
+                    # UNREACHABLE when the uploaded jersey colours anchored the teams:
+                    # the upload fixes the axis orientation (A at t=0, B at t>0), so A/B
+                    # cannot flip and _kmeans_disambiguated is preset. This is only the
+                    # K-Means fallback path, where the two clusters are arbitrary and a
+                    # jersey number worn by exactly one team is what tells them apart.
+                    #
+                    # A swap here is drastic — it re-labels EVERY player and drops every
+                    # vote — and it used to fire on ONE read. Take a majority of
+                    # ORIENT_MIN_VOTES distinct tracks instead.
                     if (self._jersey and self._kmeans_calibrated
                             and not self._kmeans_disambiguated):
                         has_a = bool(self._roster.get(f"{jersey_num}_A"))
@@ -1378,26 +1398,39 @@ class VideoProcessor:
                                     # see a FRESH read, not the soft lock (fix C).
                                     raw_color = self._jersey.raw_team_vote(crop)
                                     if raw_color is not None:
-                                        if raw_color != expected:
-                                            tc = self._jersey._team_colors
-                                            tc["A"], tc["B"] = tc["B"], tc["A"]
-                                            self._jersey._track_team.clear()
-                                            self._jersey._track_team_votes.clear()
-                                            self._jersey._team_lock.clear()      # A/B swapped → drop locks
-                                            self._jersey._team_disagree.clear()
-                                            logger.info(
-                                                "Team-color A↔B swapped: jersey #%d unique to "
-                                                "team %s but color said %s → clusters swapped",
-                                                jersey_num, expected, raw_color,
-                                            )
-                                        else:
-                                            logger.info(
-                                                "Team-color verified: jersey #%d unique to team %s ✓",
-                                                jersey_num, expected,
-                                            )
-                                        self._kmeans_disambiguated = True
-                                        self._team_color_ready.update(("A", "B"))
-                                        color_team = expected
+                                        # Keyed by track: one player cannot outvote the rest.
+                                        self._orient_votes[tid] = (raw_color != expected)
+                                        n_seen = len(self._orient_votes)
+                                        n_swap = sum(self._orient_votes.values())
+                                        if n_seen >= ORIENT_MIN_VOTES:
+                                            if n_swap * 2 > n_seen:
+                                                tc = self._jersey._team_colors
+                                                tc["A"], tc["B"] = tc["B"], tc["A"]
+                                                # The HSV colours are only half the story:
+                                                # in the default `axis` mode the classifier
+                                                # reads the LAB anchors + axis, which are
+                                                # DERIVED from these. Without this call they
+                                                # keep the old orientation — the bbox colours
+                                                # would swap while the classifier did not.
+                                                self._jersey.set_team_colors_lab()
+                                                self._jersey._track_team.clear()
+                                                self._jersey._track_team_votes.clear()
+                                                self._jersey._team_lock.clear()
+                                                self._jersey._team_disagree.clear()
+                                                logger.info(
+                                                    "Team-color A↔B SWAPPED: %d of %d tracks with a "
+                                                    "roster-unique number disagreed with their colour",
+                                                    n_swap, n_seen,
+                                                )
+                                            else:
+                                                logger.info(
+                                                    "Team-color orientation kept: %d of %d tracks "
+                                                    "agreed with the roster",
+                                                    n_seen - n_swap, n_seen,
+                                                )
+                                            self._kmeans_disambiguated = True
+                                            self._team_color_ready.update(("A", "B"))
+                                            color_team = expected
                             except Exception as e:
                                 logger.debug("K-Means disambiguation error: %s", e)
 

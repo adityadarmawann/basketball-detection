@@ -49,21 +49,29 @@ DIGIT_CONF_THRESHOLD   = 0.12   # minimum per-digit detection confidence. LOW on
 # a box cropped tight around the digits is OUT OF ITS DISTRIBUTION and it barely responds.
 # The old code padded by a FIXED 10px — on a median 42px-tall number box that is only +24%.
 #
-# Measured on hand-labelled numbers from q1-UBAYA-UNESA.mp4, through _run_yolo_digit_ocr()
-# with the TensorRT engine THIS PIPELINE ACTUALLY LOADS on CUDA (best-detect-num-v2.engine
-# — NOT the .pt; the fp16 engine scores very differently, so .pt numbers do not transfer):
-#     +24% (= the old 10px)   2/23 correct   9%
-#     +50%                    3/23          13%
-#     +80%                    7/23          30%
-#     +100%                  11/23          48%   <- chosen, the peak
-#     +130%                  10/23          43%
-# This is also why the heuristic chest-strip FALLBACK (a wide crop) was quietly OUT-
-# PERFORMING the jersey_no.pt PRIMARY path it was only supposed to back up.
+# Measured on 31 HAND-LABELLED numbers from q1-UBAYA-UNESA.mp4, read straight off the raw
+# jersey_no.pt boxes (no box re-derivation — an earlier attempt reconstructed the boxes and
+# the mapping bug made the whole curve look worse than it is). Both the .pt and the
+# TensorRT engine the pipeline loads on CUDA, to confirm the fp16 export is not the culprit:
 #
-# 48% is still bad. The model itself is the ceiling — it needs retraining, and the crops
-# for that are being collected in test-video/nojersey. When it is retrained, RE-MEASURE
-# this: the right pad is a property of the model's training distribution, not a constant.
-NUMBER_CROP_PAD       = float(os.getenv("NUMBER_CROP_PAD", "1.0"))
+#     pad     .pt      .engine
+#     +24%    10%      10%      <- the old fixed 10px
+#     +50%    26%      19%
+#     +80%    58%      55%
+#     +100%   77%      74%
+#     +130%   81%      84%      <- chosen: the knee
+#     +160%   81%      84%      (flat — so the exact value is not load-bearing)
+#
+# .pt and .engine agree at every pad: the fp16 engine is NOT degraded, and the crop is the
+# whole story. 10% -> 84% on the same boxes, same frames, same read path.
+#
+# This also explains a standing oddity: the heuristic chest-strip FALLBACK (a wide crop) was
+# quietly OUT-PERFORMING the jersey_no.pt PRIMARY path it was only supposed to back up.
+#
+# RE-MEASURE this after the digit model is retrained (crops being collected in
+# test-video/nojersey): the right pad is a property of the model's training distribution,
+# not a universal constant.
+NUMBER_CROP_PAD       = float(os.getenv("NUMBER_CROP_PAD", "1.3"))
 
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
                              # at ocr_interval=2 (0.13s), 2 votes ≈ 0.27s — faster confirmation;

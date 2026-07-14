@@ -129,7 +129,20 @@ TEAM_MATCH_MODE       = os.getenv("TEAM_MATCH_MODE", "axis")             # "axis
 TEAM_AXIS_FRAC        = float(os.getenv("TEAM_AXIS_FRAC", "0.35"))       # threshold along A→B
 TEAM_AXIS_CONF_FRAC   = float(os.getenv("TEAM_AXIS_CONF_FRAC", "0.15"))  # confident-vote margin
 LAB_SCALE_MIN_SAMPLES = int(os.getenv("LAB_SCALE_MIN_SAMPLES", "50"))    # crops before scale freezes
-_LAB_SCALE_DEFAULT    = (40.0, 8.0, 8.0)   # per-channel LAB std used until measured from video
+# Per-channel LAB normalisation for the team axis. FIXED — deliberately NOT measured
+# from the video. Measuring it was a LOTTERY: the std of the first 50 chest medians
+# mixes sensor noise with BETWEEN-TEAM variation, so if that window happens to be
+# dominated by one team the a* spread collapses and the axis stops separating the
+# teams. Measured across 20 calibration windows on a real match (79 hand-labelled
+# crops):
+#     measured-then-frozen : 82-97% balanced (spread 16), team B as low as 64%
+#     rolling (whole video):    93% flat,                  team B 86%
+#     FIXED (this)         :    97% flat (spread 0),       team B 97%
+# The scale describes the COLOUR SPACE (L varies far more than a*/b* under stadium
+# lighting), not the teams — the teams enter through the uploaded anchors. So a
+# constant is both more robust AND still general to any pair of jersey colours.
+_LAB_SCALE_DEFAULT    = (40.0, 8.0, 8.0)
+LAB_SCALE_MEASURE     = os.getenv("LAB_SCALE_MEASURE", "0") == "1"   # opt-in, not advised
 # Jersey-colour extraction: keep the chest pixels CLOSEST to either team anchor
 # (drops skin / court / white-number / an overlapping neighbour's jersey) before
 # the median. On 84 hand-labelled crops this lifted the RAW classifier 91% → 98%
@@ -391,7 +404,8 @@ class JerseyOCR:
         # Upload-axis team matching (default): LAB anchors + a per-channel LAB scale
         # measured once from early crops, and a fingerprinted axis cache.
         self._team_colors_lab: dict[str, list[float]] = {}   # "A"/"B" → [L, a, b]
-        self._lab_scale = None            # np.array [sL,sa,sb], frozen after N samples
+        self._lab_scale = (None if LAB_SCALE_MEASURE
+                           else np.array(_LAB_SCALE_DEFAULT, dtype=np.float64))
         self._lab_samples: list = []      # LAB medians collected until scale freezes
         self._team_axis = None            # cache: (fingerprint, As, axis, scale, tB, thr, cmargin)
 
@@ -1596,6 +1610,19 @@ class JerseyOCR:
         tB = float((B / scale - As) @ axis)    # == norm; B at tB, A at 0
         self._team_axis = (fp, As, axis, scale, tB,
                            TEAM_AXIS_FRAC * tB, TEAM_AXIS_CONF_FRAC * tB)
+        # LOUD, once per (anchors, scale): the complete configuration the classifier
+        # uses. If team colours come out wrong, this single line says why.
+        if fp != getattr(self, "_team_axis_logged", None):
+            self._team_axis_logged = fp
+            logger.warning(
+                "TEAM-CFG  mode=%s  FRAC=%.2f  scale=%s  anchorHSV A=%s B=%s  anchorLAB A=%s B=%s",
+                TEAM_MATCH_MODE, TEAM_AXIS_FRAC,
+                [round(float(v), 1) for v in scale],
+                [round(v, 1) for v in self._team_colors.get("A", [])],
+                [round(v, 1) for v in self._team_colors.get("B", [])],
+                [round(v) for v in self._team_colors_lab.get("A", [])],
+                [round(v) for v in self._team_colors_lab.get("B", [])],
+            )
         return self._team_axis
 
     def _team_vote_confident(self, player_crop: np.ndarray):
@@ -1624,7 +1651,7 @@ class JerseyOCR:
             # the axis down-weight exactly the channels that separate the teams.
             # (Measured: feeding _dominant_lab back in gave scale [59,15,7] and
             # collapsed A-recall to 73%; the raw median gives ~[33,9,8] → 98%.)
-            if self._lab_scale is None:
+            if LAB_SCALE_MEASURE and self._lab_scale is None:
                 raw = self._chest_median_lab(player_crop)
                 if raw is not None:
                     self._lab_samples.append(raw)
@@ -1633,18 +1660,6 @@ class JerseyOCR:
                     s[s < 1e-3] = 1.0
                     self._lab_scale = s
                     self._team_axis = None     # rebuild axis with the measured scale
-                    # LOUD: this is the exact configuration the classifier will use for
-                    # the whole video. If team colours come out wrong, this line says why.
-                    logger.warning(
-                        "TEAM-CFG  mode=%s  anchors_HSV A=%s B=%s  anchors_LAB A=%s B=%s  "
-                        "scale=%s  FRAC=%.2f",
-                        TEAM_MATCH_MODE,
-                        [round(v, 1) for v in self._team_colors.get("A", [])],
-                        [round(v, 1) for v in self._team_colors.get("B", [])],
-                        [round(v) for v in self._team_colors_lab.get("A", [])],
-                        [round(v) for v in self._team_colors_lab.get("B", [])],
-                        [round(float(v), 1) for v in s], TEAM_AXIS_FRAC,
-                    )
             ax = self._ensure_team_axis()
             if ax is None:
                 return None, False, 0.0

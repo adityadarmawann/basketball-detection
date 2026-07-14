@@ -44,6 +44,27 @@ DIGIT_CONF_THRESHOLD   = 0.12   # minimum per-digit detection confidence. LOW on
                                  # in, so recall rises without confirming noise. 0.12 balances
                                  # recall vs noise; 0.08 recovers more but adds spurious reads.
 
+# How far to grow the jersey_no.pt number box before handing it to the DIGIT model, as a
+# fraction of the box's own width/height. The digit model was trained on torso-sized crops;
+# a box cropped tight around the digits is OUT OF ITS DISTRIBUTION and it barely responds.
+# The old code padded by a FIXED 10px — on a median 42px-tall number box that is only +24%.
+#
+# Measured on hand-labelled numbers from q1-UBAYA-UNESA.mp4, through _run_yolo_digit_ocr()
+# with the TensorRT engine THIS PIPELINE ACTUALLY LOADS on CUDA (best-detect-num-v2.engine
+# — NOT the .pt; the fp16 engine scores very differently, so .pt numbers do not transfer):
+#     +24% (= the old 10px)   2/23 correct   9%
+#     +50%                    3/23          13%
+#     +80%                    7/23          30%
+#     +100%                  11/23          48%   <- chosen, the peak
+#     +130%                  10/23          43%
+# This is also why the heuristic chest-strip FALLBACK (a wide crop) was quietly OUT-
+# PERFORMING the jersey_no.pt PRIMARY path it was only supposed to back up.
+#
+# 48% is still bad. The model itself is the ceiling — it needs retraining, and the crops
+# for that are being collected in test-video/nojersey. When it is retrained, RE-MEASURE
+# this: the right pad is a property of the model's training distribution, not a constant.
+NUMBER_CROP_PAD       = float(os.getenv("NUMBER_CROP_PAD", "1.0"))
+
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
                              # at ocr_interval=2 (0.13s), 2 votes ≈ 0.27s — faster confirmation;
                              # roster whitelist + MAX_VOTE_HISTORY absorb stray misreads
@@ -780,10 +801,14 @@ class JerseyOCR:
                             best_match = (nx1f, ny1f, nx2f, ny2f)
                 if best_match and best_ratio >= 0.25:
                     nx1f, ny1f, nx2f, ny2f = best_match
-                    pad = 10
+                    # Grow the number box RELATIVELY, not by a fixed 10px. See
+                    # NUMBER_CROP_PAD: the digit model needs the surrounding torso, and a
+                    # tight box blinds it completely.
+                    bw, bh = nx2f - nx1f, ny2f - ny1f
+                    px, py = int(bw * NUMBER_CROP_PAD), int(bh * NUMBER_CROP_PAD)
                     nc  = frame[
-                        max(0, ny1f - pad):min(h_frame, ny2f + pad),
-                        max(0, nx1f - pad):min(w_frame, nx2f + pad),
+                        max(0, ny1f - py):min(h_frame, ny2f + py),
+                        max(0, nx1f - px):min(w_frame, nx2f + px),
                     ]
                     if nc.size > 0:
                         number_crop = nc

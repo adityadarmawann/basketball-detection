@@ -126,12 +126,21 @@ TEAM_VALUE_WEIGHT     = float(os.getenv("TEAM_VALUE_WEIGHT", "0.25"))  # legacy 
 # fixed by the axis (A at t=0, B at t>0) so A/B can NEVER globally flip. The boundary
 # sits partway along the A→B distance because jerseys render MUTED vs the vivid upload
 # (rendered colours compress toward the middle). "distance" = legacy HSV metric.
-# FRAC tuned on 84 HAND-LABELLED crops (UNESA white vs UBAYA muted-maroon, real run):
-# 0.35 = 91% balanced (A 95% / B 87%), best of {0.25:75%, 0.30:86%, 0.40:87%} and
-# ties/beats legacy distance (86%). NOTE: single match, one LAB scale — re-validate on
-# the next match (different colours) before trusting the exact value.
+# The boundary sits nearer A than the midpoint because the two anchors are NOT equally
+# far from their own players. Measured on the 14 Jul run: a real white player sits 2.23
+# from the white anchor, but a real maroon player sits 3.81 from the maroon anchor — and
+# 3.74 from the WHITE one. Rendered maroon washes out; vivid uploaded maroon does not.
+# So maroon is nearly equidistant and leaks into A unless the boundary is pulled toward A.
+# FRAC cross-validated on two INDEPENDENT hand-labelled sets (46 crops 14 Jul + 79 crops
+# 13 Jul), at the fixed LAB scale below:
+#     0.30 -> 98% / 97% balanced   <- chosen (helps B: 88%->100%, costs A nothing)
+#     0.35 -> 92% / 97%            <- previous, tuned when the scale was still MEASURED
+#     0.25 -> 92% / 93%     0.40 -> 94% / 97%
+# Both sets are the same two colours. RE-VALIDATE on the next match (blue/black,
+# green/yellow) before trusting the exact value — the asymmetry above is a property of
+# THESE two jerseys, not a universal constant.
 TEAM_MATCH_MODE       = os.getenv("TEAM_MATCH_MODE", "axis")             # "axis" | "distance"
-TEAM_AXIS_FRAC        = float(os.getenv("TEAM_AXIS_FRAC", "0.35"))       # threshold along A→B
+TEAM_AXIS_FRAC        = float(os.getenv("TEAM_AXIS_FRAC", "0.30"))       # threshold along A→B
 TEAM_AXIS_CONF_FRAC   = float(os.getenv("TEAM_AXIS_CONF_FRAC", "0.15"))  # confident-vote margin
 LAB_SCALE_MIN_SAMPLES = int(os.getenv("LAB_SCALE_MIN_SAMPLES", "50"))    # crops before scale freezes
 # Per-channel LAB normalisation for the team axis. FIXED — deliberately NOT measured

@@ -73,6 +73,24 @@ DIGIT_CONF_THRESHOLD   = 0.12   # minimum per-digit detection confidence. LOW on
 # not a universal constant.
 NUMBER_CROP_PAD       = float(os.getenv("NUMBER_CROP_PAD", "1.3"))
 
+# The padding above is CONTEXT for the model — it is not where the number is. Grown by
+# 1.3 on every side, the original jersey_no.pt box occupies only the middle 1/3.6 = 28% of
+# the crop; everything else is whatever happened to be behind the player. Courtside that
+# is advertising hoardings — SPALDING, POLYTRON, BAYAN — and the digit model reads THEIR
+# letters as jersey digits. It is the single biggest source of invented numbers, and it is
+# how a referee ends up wearing "#1".
+# So: give the model the context, but only ACCEPT digit boxes whose centre lands in the
+# middle DIGIT_CENTRE_FRAC of the crop. 0.45 leaves a comfortable margin around the 28%
+# the number really occupies, so a slightly-off jersey_no box does not lose its digits.
+# Measured on 31 hand-labelled player numbers + 7 referee crops (q1-UBAYA-UNESA.mp4):
+#     accept every box (old)   players 81% correct   referees invented a number 86% of the time
+#     centre 0.55              players 87%           referees 71%
+#     centre 0.45  <- chosen   players 87%           referees 71%
+#     centre 0.35              players 87%           referees 57%   (tight; little margin)
+# Player accuracy goes UP: the background digits were corrupting real reads too, not just
+# manufacturing fake ones. Applies ONLY to the jersey_no.pt crop — see _parse_digit_result.
+DIGIT_CENTRE_FRAC     = float(os.getenv("DIGIT_CENTRE_FRAC", "0.45"))
+
 VOTE_THRESHOLD        = 2    # OCR reads required to confirm a jersey number
                              # at ocr_interval=2 (0.13s), 2 votes ≈ 0.27s — faster confirmation;
                              # roster whitelist + MAX_VOTE_HISTORY absorb stray misreads
@@ -795,6 +813,10 @@ class JerseyOCR:
             # Priority 1: jersey_no.pt full-frame bbox overlapping this player
             # Priority 2: heuristic chest strip on player crop (fallback)
             number_crop = None
+            # Whether number_crop is the jersey_no.pt box (digits in the middle, padding is
+            # background) or the heuristic chest strip (digits NOT centred). Only the former
+            # may have the DIGIT_CENTRE_FRAC filter applied — see _parse_digit_result.
+            crop_centred = False
             if _frame_num_boxes:
                 best_match, best_ratio = None, 0.0
                 for (nx1f, ny1f, nx2f, ny2f, _nconf) in _frame_num_boxes:
@@ -820,6 +842,7 @@ class JerseyOCR:
                     ]
                     if nc.size > 0:
                         number_crop = nc
+                        crop_centred = True     # built around the number box
                         logger.debug(
                             "track %d: jersey_no.pt full-frame match (overlap=%.2f)",
                             track_id, best_ratio,
@@ -845,20 +868,24 @@ class JerseyOCR:
             _blur_q = _blur_quality(_blur_score(_crop_gray))
 
             # Schedule for batch digit OCR in Pass 2
-            pending[i] = (player, player_crop, number_crop, _blur_q)
+            pending[i] = (player, player_crop, number_crop, _blur_q, crop_centred)
 
         # ── Batch digit OCR: all pending tight crops in ONE GPU call ─────────
         if pending:
             slot_indices = sorted(pending.keys())
             tight_crops  = [pending[i][2] for i in slot_indices]
-            tight_cands  = self._batch_digit_ocr(tight_crops)
+            # Per-crop: only the jersey_no.pt-derived crops are centred on the number.
+            # The heuristic chest-strip fallback is not, and filtering it would throw away
+            # real digits.
+            tight_centred = [pending[i][4] for i in slot_indices]
+            tight_cands  = self._batch_digit_ocr(tight_crops, centred=tight_centred)
 
             # Small second batch for fallback wide crop where tight gave None
             fb_map: dict[int, tuple] = {}   # j (tight-list index) → (slot_idx, fb_crop)
             for j, slot_i in enumerate(slot_indices):
                 if tight_cands[j] is not None:
                     continue
-                _, player_crop, _, _ = pending[slot_i]
+                _, player_crop, _, _, _ = pending[slot_i]
                 ph, pw = player_crop.shape[:2]
                 fb = player_crop[int(ph * 0.10):int(ph * 0.75),
                                  int(pw * 0.05):int(pw * 0.95)]
@@ -884,7 +911,7 @@ class JerseyOCR:
 
             # ── Pass 2: vote, confidence upgrade, team classify, build results ──
             for j, slot_i in enumerate(slot_indices):
-                player, player_crop, _, _blur_q = pending[slot_i]
+                player, player_crop, _, _blur_q, _ = pending[slot_i]
                 track_id  = player["track_id"]
 
                 # Unpack (number, mean_conf) from digit model; default to no read.
@@ -1156,9 +1183,14 @@ class JerseyOCR:
 
         return None
 
-    def _batch_digit_ocr(self, crops: list) -> list:
+    def _batch_digit_ocr(self, crops: list, centred=False) -> list:
         """
         Run best-detect-num-v2.pt on a batch of crops in a single GPU call.
+
+        `centred` is forwarded to _parse_digit_result. Accepts a single bool, or a list
+        aligned with `crops` — the two crop sources have different geometry, so this is
+        per-crop: True only for crops built around the jersey_no.pt box (digits in the
+        middle, padding is background), False for the heuristic chest-strip fallback.
 
         Replaces N sequential _run_yolo_digit_ocr() calls with one batched
         model.predict() — roughly N× faster on CUDA.
@@ -1219,17 +1251,30 @@ class JerseyOCR:
                     conf=DIGIT_CONF_THRESHOLD,
                     verbose=False,
                 )
-                out[orig_idx] = self._parse_digit_result(det[0])
+                _c = (centred[orig_idx] if isinstance(centred, (list, tuple))
+                      and orig_idx < len(centred) else bool(centred))
+                out[orig_idx] = self._parse_digit_result(det[0], centred=_c)
             except Exception as exc:
                 logger.debug("Digit model inference error (crop %d): %s", j, exc)
         return out
 
-    def _parse_digit_result(self, det_result) -> Optional[tuple[int, float]]:
+    def _parse_digit_result(
+        self, det_result, centred: bool = False
+    ) -> Optional[tuple[int, float]]:
         """
         Parse one YOLO digit-model Result object into (jersey_number, mean_confidence)
         or None. mean_confidence is the average per-digit detection confidence — used
         by the confidence-upgrade logic in Pass 2 to detect zoom-in upgrades.
+
+        `centred` says the crop is the jersey_no.pt box grown by NUMBER_CROP_PAD, so the
+        REAL digits sit in the middle and everything the padding pulled in is background.
+        See DIGIT_CENTRE_FRAC. Do NOT set it for the torso fallback crop — that one is not
+        built around the number, so its digits are not centred.
         """
+        h_img, w_img = det_result.orig_shape
+        if centred and w_img and h_img:
+            lo, hi = 0.5 - DIGIT_CENTRE_FRAC / 2, 0.5 + DIGIT_CENTRE_FRAC / 2
+
         digit_boxes: list[tuple[float, float, str, float]] = []
         for box in det_result.boxes:
             cls        = int(box.cls[0])
@@ -1238,8 +1283,16 @@ class JerseyOCR:
                           if (len(raw_name) == 1 and raw_name.isdigit())
                           else str(cls))
             x1   = float(box.xyxy[0][0])
+            y1   = float(box.xyxy[0][1])
             x2   = float(box.xyxy[0][2])
+            y2   = float(box.xyxy[0][3])
             conf = float(box.conf[0])
+            if centred and w_img and h_img:
+                cx, cy = (x1 + x2) / 2 / w_img, (y1 + y2) / 2 / h_img
+                if not (lo <= cx <= hi and lo <= cy <= hi):
+                    logger.debug("digit '%s' dropped — off-centre (%.2f, %.2f)",
+                                 digit_char, cx, cy)
+                    continue
             digit_boxes.append((x1, x2, digit_char, conf))
             logger.debug("digit: '%s' x=%.0f-%.0f conf=%.2f", digit_char, x1, x2, conf)
 

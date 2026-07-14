@@ -111,9 +111,16 @@ function drawBallBox(
 }
 
 // ── Roster jersey→name lookup helper ─────────────────────────────────────────
-function rosterName(roster: RosterPlayer[], jerseyNumber: number | null): string | null {
-  if (jerseyNumber == null) return null
-  const entry = roster.find(r => r.jerseyNumber === jerseyNumber)
+// A number alone does NOT identify a player: both teams reuse numbers (9 of 24 in
+// this league), so matching on the number only would show the other team's player.
+// The backend already gates numbers by team, so team is what disambiguates here.
+function rosterName(
+  roster: RosterPlayer[],
+  jerseyNumber: number | null,
+  team: string | null,
+): string | null {
+  if (jerseyNumber == null || !team) return null
+  const entry = roster.find(r => r.jerseyNumber === jerseyNumber && r.team === team)
   return entry ? entry.name.split(' ')[0] : null
 }
 
@@ -153,7 +160,7 @@ export default function CourtOverlay({ videoRef, frameData }: CourtOverlayProps)
             const color = p.t === 'A' ? TEAM_A_COLOR : p.t === 'B' ? TEAM_B_COLOR : UNCONFIRMED
 
             // Top label: "#7 | Budi" when roster match found, else "#7" or "ID:3"
-            const name = rosterName(roster, p.j)
+            const name = rosterName(roster, p.j, p.t)
             const topLabel = p.j != null
               ? (name ? `#${p.j} | ${name}` : `#${p.j}`)
               : `ID:${p.i}`

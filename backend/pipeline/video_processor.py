@@ -321,6 +321,33 @@ try:
 except Exception:
     _CODE_SHA = "unknown"
 
+# Return the PyTorch working cache to the driver once a video is done. MEASURED on this
+# box: the whole model stack (incl. VideoMAE) is only ~0.7 GB resident; the caching
+# allocator then GROWS during a run (2.3 GB after 300 frames; a full 26k-frame video is
+# what pushed a live server to ~7.5 GB) and never shrinks on its own. empty_cache() hands
+# the freed-but-reserved pool back — measured ~0.55 GB reclaimed after a 300-frame run,
+# proportionally more after a full video. Models + CUDA context (~1.4 GB) stay resident,
+# so the next video pays no reload. Two idle backends therefore sit at ~1.4 GB each and
+# share one 8 GB GPU comfortably; without this, a server that finished a run keeps its
+# whole peak reserved. Off via GPU_RELEASE_IDLE=0. NOT a full unload.
+GPU_RELEASE_IDLE = os.getenv("GPU_RELEASE_IDLE", "1") == "1"
+
+
+def _release_gpu_cache(tag: str = "") -> None:
+    if not GPU_RELEASE_IDLE:
+        return
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return
+        before = torch.cuda.memory_reserved() / 1e9
+        torch.cuda.empty_cache()
+        after = torch.cuda.memory_reserved() / 1e9
+        logger.info("GPU cache released%s: reserved %.2f -> %.2f GB (freed %.2f)",
+                    f" ({tag})" if tag else "", before, after, before - after)
+    except Exception as e:
+        logger.debug("GPU cache release skipped: %s", e)
+
 # Distinct tracks that must weigh in before K-Means cluster orientation (which cluster is
 # team A) is settled from roster-unique jersey numbers. This path only runs when the team
 # colours were NOT anchored to uploaded jerseys — an upload fixes the orientation, so A/B
@@ -975,6 +1002,9 @@ class VideoProcessor:
             grab_thread.join(timeout=5.0)
             detect_thread.join(timeout=5.0)
             await self._finalize(match_id)
+            # Video done (done/error/cancelled all land here) → server is now idle. Hand
+            # the ~6 GB inference cache back so a co-resident backend can use the GPU.
+            _release_gpu_cache(f"match {match_id}")
             logger.info("Processing complete: match=%s  frames=%d  status=%s",
                         match_id, frame_id, self._status)
 

@@ -1297,8 +1297,13 @@ class VideoProcessor:
                 _jersey_due = True
         if _jersey_due:
             try:
+                # Coasted players carry a PREDICTED bbox (see tracker coasting) — the
+                # crop may sit beside the real player, and one bad crop pollutes both
+                # the colour votes and the number votes. They keep their cached team
+                # and number via the sticky paths below; just don't re-read them.
+                _real_players = [p for p in tracked_players if not p.get("coasted")]
                 jersey = self._jersey.process(
-                    frame, tracked_players, self._tracker,
+                    frame, _real_players, self._tracker,
                     roster=self._roster or None,
                 )
                 frame_data["jersey"] = jersey

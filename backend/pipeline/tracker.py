@@ -41,6 +41,18 @@ _LOST_TRACK_MAX_AGE = int(os.getenv("LOST_TRACK_MAX_AGE", "120"))  # was 60
 # inheritance threshold (0.25) because pooling wrong votes corrupts a number.
 _PARTIAL_INHERIT_IOU = 0.35
 
+# How long a briefly-lost player keeps a PREDICTED bbox on screen (processed frames).
+# A jumping player defeats the association gate twice over: vertical acceleration breaks
+# the Kalman IoU match, and the mid-air detection is motion-blurred into the low-score
+# band, which ByteTrack forbids from STARTING tracks — so the shooter's box vanishes
+# exactly during the shot, and score attribution falls back to whoever else is nearest
+# the ball. The lost track still lives inside ByteTrack (track_buffer=90) and its Kalman
+# mean keeps advancing every frame (GMC-warped, so it follows camera pans too); coasting
+# just keeps DRAWING it. When the player lands and is re-detected, the same track_id
+# re-associates and the box snaps back to reality.
+# ~0.5 s of airtime: 15 frames at the 30 fps processed rate. 0 disables.
+_COAST_FRAMES = int(os.getenv("TRACK_COAST_FRAMES", "15"))
+
 
 def _center(x1: float, y1: float, x2: float, y2: float) -> list[float]:
     return [(x1 + x2) / 2.0, (y1 + y2) / 2.0]
@@ -452,6 +464,51 @@ class PlayerTracker:
 
         # Update last-seen positions for next frame's inheritance check
         self._player_last_seen = {p["track_id"]: p["bbox"] for p in tracked_players}
+
+        # ── Coasting: keep a briefly-lost player visible on prediction ───────────
+        # Placed AFTER the inheritance bookkeeping on purpose: the lost caches and
+        # _player_last_seen must only ever see REAL observations, never predicted
+        # boxes. Coasted entries are flagged so downstream skips OCR/colour voting
+        # on them (a predicted crop may sit off the player and would poison votes);
+        # the replay keeps drawing the box and the event engine keeps seeing the
+        # airborne shooter.
+        if _COAST_FRAMES > 0 and self._player_tracker is not None:
+            try:
+                fh, fw = frame.shape[:2]
+                cur_fid = int(getattr(self._player_tracker, "frame_id", 0) or 0)
+                for st in list(getattr(self._player_tracker, "lost_stracks", [])):
+                    tid = int(st.track_id)
+                    if tid in current_player_ids or not getattr(st, "is_activated", False):
+                        continue
+                    gap = cur_fid - int(getattr(st, "end_frame", cur_fid) or cur_fid)
+                    if not (0 < gap <= _COAST_FRAMES):
+                        continue
+                    try:
+                        x1, y1, x2, y2 = [float(v) for v in st.xyxy]
+                    except Exception:
+                        continue
+                    bw, bh = x2 - x1, y2 - y1
+                    if bw < 8 or bh < 16:                      # degenerate prediction
+                        continue
+                    cx1, cy1 = max(0.0, x1), max(0.0, y1)
+                    cx2, cy2 = min(float(fw), x2), min(float(fh), y2)
+                    if (cx2 - cx1) < bw * 0.4 or (cy2 - cy1) < bh * 0.4:
+                        continue                               # drifted mostly off-frame
+                    # Someone already covers this spot (same player re-id'd, or another
+                    # player moved in) → don't draw a duplicate box on top of them.
+                    if any(_box_iou([cx1, cy1, cx2, cy2], p["bbox"]) > 0.3
+                           for p in tracked_players):
+                        continue
+                    tracked_players.append({
+                        "track_id":   tid,
+                        "bbox":       [cx1, cy1, cx2, cy2],
+                        "confidence": float(getattr(st, "score", 0.0) or 0.0),
+                        "class":      "player",
+                        "center":     [(cx1 + cx2) / 2.0, (cy1 + cy2) / 2.0],
+                        "coasted":    True,
+                    })
+            except Exception as _e:
+                logger.debug("Coasting skipped: %s", _e)
 
         # Referees
         ref_arr = self._detections_to_array(

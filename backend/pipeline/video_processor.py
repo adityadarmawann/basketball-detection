@@ -2194,6 +2194,74 @@ class VideoProcessor:
             "team_stats":   team_out,
         }
 
+    def _patch_birth_teams(self) -> None:
+        """
+        Erase the birth flicker from the replay.
+
+        A track born right after a camera cut votes its colour from a motion-blurred
+        crop, so ~10% of tracks wear the WRONG team for their first decision or two
+        (~0.1-0.2 s) before the vote settles. The score is already immune (scoring
+        events resolve their team retroactively at finalize); this applies the same
+        idea to the bbox colour: repaint each track's first BIRTH_WINDOW appearances
+        with the team it holds JUST AFTER settling. Replay only — live WS untouched.
+
+        Three hazards, each guarded (all three fired in the dry-run on the 14 Jul
+        run, so none of this is hypothetical):
+          1. Tracks keyed by (quarter, tid) — ByteTrack resets ids at quarter change,
+             so the same tid in Q1/Q2 is two different people.
+          2. The reference is the majority of the SETTLE_SPAN appearances right after
+             the window, not the whole life — mid-life team changes (identity splits)
+             stay untouched (verified: 0 boxes changed outside the window).
+          3. A repaint is skipped when it would collide with another player's
+             (team, jersey) in the same frame — the replay dedup keys on that pair,
+             and repainting into a collision resurrects the duplicate-identity ghost
+             (17 skips in the dry-run).
+
+        Measured on the 14 Jul run: 164 boxes repainted across 45/1397 tracks;
+        birth-wrong tracks 10% -> 5% (the rest are genuine mid-life changes).
+        Off via REPLAY_PATCH_BIRTH_TEAMS=0.
+        """
+        if os.getenv("REPLAY_PATCH_BIRTH_TEAMS", "1") != "1" or not self._frame_store:
+            return
+        BIRTH_WINDOW = 5    # matches TEAM_LOCK_MIN_VOTES — the settling period
+        SETTLE_SPAN  = 10   # "settled" = majority of this many appearances after it
+
+        appearances: dict = {}
+        for snap in self._frame_store:
+            q = snap.get("q", 1)
+            for p in snap.get("p", []):
+                appearances.setdefault((q, p.get("i")), []).append((snap, p))
+
+        patched_boxes = patched_tracks = skipped = 0
+        for _key, plist in appearances.items():
+            if len(plist) < 2:
+                continue
+            after = [p.get("t") for _, p in plist[BIRTH_WINDOW:BIRTH_WINDOW + SETTLE_SPAN]
+                     if p.get("t") in ("A", "B")]
+            if not after:   # died inside the window → settle to its own majority
+                after = [p.get("t") for _, p in plist if p.get("t") in ("A", "B")]
+                if not after:
+                    continue
+            ref = "A" if after.count("A") >= after.count("B") else "B"
+            hit = False
+            for snap, p in plist[:BIRTH_WINDOW]:
+                if p.get("t") not in ("A", "B") or p["t"] == ref:
+                    continue
+                j = p.get("j")
+                if j is not None and any(o is not p and o.get("t") == ref and o.get("j") == j
+                                         for o in snap.get("p", [])):
+                    skipped += 1
+                    continue
+                p["t"] = ref
+                patched_boxes += 1
+                hit = True
+            patched_tracks += hit
+        if patched_boxes or skipped:
+            logger.info(
+                "_patch_birth_teams: repainted %d birth boxes on %d tracks (%d collision skips)",
+                patched_boxes, patched_tracks, skipped,
+            )
+
     def _patch_frame_scores(self) -> None:
         """
         Retroactively correct sc and q_sc in every frame snapshot.
@@ -2283,7 +2351,12 @@ class VideoProcessor:
     async def _finalize(self, match_id: str) -> None:
         """Update MongoDB match status; push final stats; write output files."""
 
-        # ── 0. Retroactively patch sc/q_sc using final team assignments ──────
+        # ── 0. Retroactively patch the frame snapshots ────────────────────────
+        # Birth flicker first (repaints p["t"] on each track's first frames), then
+        # scores. Order does not matter for correctness — the score patch resolves
+        # teams from StatsCalculator/_last_known_team, not from the frame snapshots —
+        # but teams-before-scores reads naturally.
+        self._patch_birth_teams()
         # During processing, team may be "" for early scoring events (K-Means not
         # yet calibrated, jersey OCR not yet confirmed). At finalize time all teams
         # are known → rebuild correct running score and patch every frame snapshot.

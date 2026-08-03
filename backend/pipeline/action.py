@@ -67,7 +67,10 @@ RULE_CONFIDENCE  = 0.6    # all rule-based outputs flagged as estimates
 SHOOT_CONFIDENCE = 0.85   # from pose.py shooting detection
 
 MODEL_BUFFER_MIN = 16  # minimum frames before model runs
-MODEL_CONF_MIN   = 0.25  # minimum softmax confidence to accept model prediction; below → rule-based
+MODEL_CONF_MIN   = float(os.getenv("ACTION_MODEL_CONF_MIN", "0.20"))  # min softmax conf to accept
+                         # the action-model prediction; below → rule-based. Env-tunable so it can be
+                         # swept against ground truth. Lowered 0.25→0.20: trust more model predictions
+                         # (fewer rule-based fallbacks) — validate on footage before trusting further.
                          # 6 classes → uniform baseline ≈ 0.167; 0.25 = ~1.5× baseline (meaningful signal)
 _INPUT_SIZE      = 224   # spatial resize for model input
 

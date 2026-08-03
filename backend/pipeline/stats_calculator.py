@@ -45,19 +45,30 @@ def _empty_stats() -> dict:
     return {
         "pts": 0, "fgm": 0, "fga": 0,
         "three_pm": 0, "three_pa": 0,
+        "two_pm": 0, "two_pa": 0,
         "ftm": 0, "fta": 0,
         "oreb": 0, "dreb": 0, "reb": 0,
         "ast": 0, "stl": 0, "blk": 0,
         "tov": 0, "pf": 0,
         "plus_minus": 0, "min": 0.0,
-        "fg_pct": 0.0, "three_pct": 0.0, "eff": 0.0,
+        "fg_pct": 0.0, "three_pct": 0.0, "two_pct": 0.0,
+        "ft_pct": 0.0, "eff": 0.0,
     }
 
 
 def _compute_derived(s: dict) -> None:
-    """In-place: FG%, 3P%, EFF from accumulated counters."""
-    s["fg_pct"]    = round(s["fgm"] / s["fga"],         3) if s["fga"]    > 0 else 0.0
+    """In-place: 2PT split, FG%, 3P%, 2P%, FT%, EFF from accumulated counters.
+
+    2PT is DERIVED (fgm − three_pm), never accumulated separately, so there is a
+    single source of truth: whatever the shot-position → _is_three() geometry
+    decided for each field goal. No second counter to drift out of sync.
+    """
+    s["two_pm"]    = max(0, s["fgm"] - s["three_pm"])
+    s["two_pa"]    = max(0, s["fga"] - s["three_pa"])
+    s["fg_pct"]    = round(s["fgm"] / s["fga"],           3) if s["fga"]    > 0 else 0.0
     s["three_pct"] = round(s["three_pm"] / s["three_pa"], 3) if s["three_pa"] > 0 else 0.0
+    s["two_pct"]   = round(s["two_pm"] / s["two_pa"],     3) if s["two_pa"]  > 0 else 0.0
+    s["ft_pct"]    = round(s["ftm"] / s["fta"],           3) if s["fta"]     > 0 else 0.0
     s["eff"]       = float(
         (s["pts"] + s["reb"] + s["ast"] + s["stl"] + s["blk"])
         - (s["fga"] - s["fgm"] + s["tov"])
@@ -483,22 +494,50 @@ class StatsCalculator:
             result[q] = out
         return result
 
+    # Counting fields summed straight from each player's total box score.
+    _TEAM_ACC = (
+        "pts", "fgm", "fga", "three_pm", "three_pa", "ftm", "fta",
+        "oreb", "dreb", "reb", "ast", "stl", "blk", "tov", "pf",
+    )
+
     def _compute_team_stats(self, total_all: dict) -> dict:
-        teams = {
-            "A": {"pts": 0, "reb": 0, "ast": 0, "stl": 0,
-                  "blk": 0, "tov": 0, "fgm": 0, "fga": 0, "fg_pct": 0.0},
-            "B": {"pts": 0, "reb": 0, "ast": 0, "stl": 0,
-                  "blk": 0, "tov": 0, "fgm": 0, "fga": 0, "fg_pct": 0.0},
-        }
+        """Roll the per-player box score up to team totals.
+
+        Mirrors the full player box score (was previously only pts/reb/ast/stl/
+        blk/tov/fgm/fga): now includes 3PT, FT, OREB/DREB, PF and the derived
+        percentages + EFF + 2PT split, so team stats are as complete as player
+        stats.  Percentages/2PT are derived exactly like _compute_derived so the
+        two layers can never disagree.
+        """
+        def _blank() -> dict:
+            d = {k: 0 for k in self._TEAM_ACC}
+            d.update({
+                "two_pm": 0, "two_pa": 0,
+                "fg_pct": 0.0, "three_pct": 0.0, "two_pct": 0.0,
+                "ft_pct": 0.0, "eff": 0.0,
+            })
+            return d
+
+        teams = {"A": _blank(), "B": _blank()}
         for tid, ts in total_all.items():
             team = self._roster.get(tid, {}).get("team", "")
             if team not in teams:
                 continue
             t = teams[team]
-            for k in ("pts", "reb", "ast", "stl", "blk", "tov", "fgm", "fga"):
+            for k in self._TEAM_ACC:
                 t[k] += ts.get(k, 0)
+
         for t in teams.values():
-            t["fg_pct"] = round(t["fgm"] / t["fga"], 3) if t["fga"] > 0 else 0.0
+            t["two_pm"]    = max(0, t["fgm"] - t["three_pm"])
+            t["two_pa"]    = max(0, t["fga"] - t["three_pa"])
+            t["fg_pct"]    = round(t["fgm"] / t["fga"],           3) if t["fga"]    > 0 else 0.0
+            t["three_pct"] = round(t["three_pm"] / t["three_pa"], 3) if t["three_pa"] > 0 else 0.0
+            t["two_pct"]   = round(t["two_pm"] / t["two_pa"],     3) if t["two_pa"]  > 0 else 0.0
+            t["ft_pct"]    = round(t["ftm"] / t["fta"],           3) if t["fta"]     > 0 else 0.0
+            t["eff"]       = float(
+                (t["pts"] + t["reb"] + t["ast"] + t["stl"] + t["blk"])
+                - (t["fga"] - t["fgm"] + t["tov"])
+            )
         return teams
 
     def _rank_players(self, total_all: dict, player_stats: dict) -> list:

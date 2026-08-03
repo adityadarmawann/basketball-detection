@@ -2016,6 +2016,8 @@ class VideoProcessor:
     _EVENT_TYPE_MAP = {
         "MADE_FG": "FGM", "MADE_3": "FGM", "SHOT_MADE": "FGM",
         "MISSED_FG": "FGA", "MISSED_3": "FGA", "SHOT_MISSED": "FGA",
+        "MADE_FT": "FTM", "FT_MADE": "FTM",
+        "MISSED_FT": "FTA", "FT_MISSED": "FTA",
         "REBOUND": "REB", "OREB": "REB", "DREB": "REB",
         "AST": "AST", "ASSIST": "AST",
         "STL": "STL", "STEAL": "STL",
@@ -2040,6 +2042,8 @@ class VideoProcessor:
         points = None
         if event_type == "FGM":
             points = 3 if event.get("is_three") else 2
+        elif event_type == "FTM":
+            points = 1
 
         # Use the event's own video timestamp so the log time matches
         # the video player position (elapsed MM:SS), not a game-clock countdown.

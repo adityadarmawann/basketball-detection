@@ -33,7 +33,7 @@ export interface FrameUpdate {
 
 export interface GameEvent {
   type: 'event';
-  eventType: 'FGM' | 'FGA' | 'REB' | 'AST' | 'STL' | 'BLK' | 'TOV' | 'FOUL';
+  eventType: 'FGM' | 'FGA' | 'FTM' | 'FTA' | 'REB' | 'AST' | 'STL' | 'BLK' | 'TOV' | 'FOUL';
   trackId?: number;       // raw ByteTrack ID — stable anchor for retroactive patches
   playerId: number;       // jersey_number once confirmed, else trackId
   playerName: string;

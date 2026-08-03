@@ -8,6 +8,8 @@ const getEventIcon = (eventType: string) => {
   const icons: Record<string, string> = {
     FGM: '✓',
     FGA: '🎯',
+    FTM: '🏀',
+    FTA: '🎯',
     REB: '📦',
     AST: '🤝',
     STL: '🚨',

@@ -17,6 +17,7 @@ Score and possession state are also accessible as instance attributes.
 
 import logging
 import math
+import os
 from collections import deque
 from typing import Optional
 
@@ -60,6 +61,21 @@ REBOUND_HOOP_RADIUS_M  = 1.5
 REBOUND_COOLDOWN_F     = 20
 REBOUND_MIN_F          = 8      # min frames after the shot before a rebound can count
                                 # (ball needs time to reach the rim first)
+
+# ── Free-throw detection (OPT-IN, default OFF) ────────────────────────────────
+# A made free throw currently counts as a 2-point field goal (same ball-in-hoop
+# mechanism), inflating the score. This reclassifies a shot as a free throw when
+# the shooter's FEET (pose-refined court_pos) are on the free-throw line AND they
+# were stationary (a set free throw, not a live-play jumper from the elbow).
+# Kept behind a flag, default OFF, because a wrong call directly changes the score
+# (1 vs 2 pts) — validate on real footage before enabling with FT_DETECT_ENABLED=1.
+FT_DETECT_ENABLED         = os.getenv("FT_DETECT_ENABLED", "0") == "1"
+FT_LINE_X_LEFT            = 5.8       # metres from left baseline (FIBA free-throw line)
+FT_LINE_X_RIGHT           = COURT_W - 5.8   # 22.2 — right free-throw line
+FT_LINE_Y                 = COURT_H / 2.0   # 7.5 — line centre
+FT_SPOT_RADIUS_M          = 0.7      # feet must be this close to a FT-line centre
+FT_STATIONARY_SPREAD_M    = 1.0      # max shooter movement over the pre-shot window
+FT_STATIONARY_MIN_SAMPLES = 6        # need at least this many recent positions
 
 BLOCK_DIST_PX          = 60
 BLOCK_DIST_M           = 1.0
@@ -560,17 +576,30 @@ class EventEngine:
             or self._estimate_shot_pos(shooter["track_id"], is_court)
         )
         is_three = self._is_three(shot_pos) if (shot_pos and is_court) else False
+        is_ft    = self._is_free_throw(shooter["track_id"], shot_pos, is_court)
 
         # ── 5. Emit event ────────────────────────────────────────────────
-        events.append({
-            "type":         "MADE_FG",
-            "track_id":     shooter["track_id"],
-            "quarter":      quarter,
-            "team":         made_team,
-            "is_three":     is_three,
-            "court_pos":    shot_pos,
-            "timestamp_ms": ts_ms,
-        })
+        # A set free throw from the FT line scores 1, not 2 — reclassify so the
+        # box score records FTM/FTA and the score isn't inflated. Off by default.
+        if is_ft:
+            events.append({
+                "type":         "MADE_FT",
+                "track_id":     shooter["track_id"],
+                "quarter":      quarter,
+                "team":         made_team,
+                "court_pos":    shot_pos,
+                "timestamp_ms": ts_ms,
+            })
+        else:
+            events.append({
+                "type":         "MADE_FG",
+                "track_id":     shooter["track_id"],
+                "quarter":      quarter,
+                "team":         made_team,
+                "is_three":     is_three,
+                "court_pos":    shot_pos,
+                "timestamp_ms": ts_ms,
+            })
 
         self._fg_cooldown          = self._fg_cooldown_f
         self._miss_frame           = -999
@@ -582,12 +611,18 @@ class EventEngine:
         # trigger another zone entry check during cooldown.
         self._ball_px_hist.clear()
 
-        pts = 3 if is_three else 2
-        logger.info(
-            "MADE_FG  +%dPTS  shooter=%s  team=%s  3pt=%s  Q%d  video=%s",
-            pts, shooter["track_id"], made_team or "?",
-            is_three, quarter, _fmt_ts(ts_ms),
-        )
+        if is_ft:
+            logger.info(
+                "MADE_FT  +1PT (free throw)  shooter=%s  team=%s  Q%d  video=%s",
+                shooter["track_id"], made_team or "?", quarter, _fmt_ts(ts_ms),
+            )
+        else:
+            pts = 3 if is_three else 2
+            logger.info(
+                "MADE_FG  +%dPTS  shooter=%s  team=%s  3pt=%s  Q%d  video=%s",
+                pts, shooter["track_id"], made_team or "?",
+                is_three, quarter, _fmt_ts(ts_ms),
+            )
         return events
 
     def _nearest_hoop_px_center(self, ball_px) -> Optional[list]:
@@ -602,6 +637,35 @@ class EventEngine:
                     if d < best_d:
                         best_d, best_c = d, c
         return best_c
+
+    def _is_free_throw(
+        self, shooter_tid: int, shot_pos: Optional[list], is_court: bool,
+    ) -> bool:
+        """True when a shot looks like a set free throw (opt-in, default OFF).
+
+        Requires ALL of: the flag on, court calibration, the shooter's feet
+        (pose-refined court_pos) within FT_SPOT_RADIUS_M of a free-throw-line
+        centre, AND the shooter stationary over the pre-shot window (position
+        spread < FT_STATIONARY_SPREAD_M). The stationary gate is what separates a
+        real free throw from a live-play jumper taken near the line, keeping this
+        high-precision — because a wrong call changes the score by a point.
+        """
+        if not FT_DETECT_ENABLED or not is_court or not shot_pos:
+            return False
+        near_line = (
+            _dist(shot_pos, [FT_LINE_X_LEFT,  FT_LINE_Y]) < FT_SPOT_RADIUS_M
+            or _dist(shot_pos, [FT_LINE_X_RIGHT, FT_LINE_Y]) < FT_SPOT_RADIUS_M
+        )
+        if not near_line:
+            return False
+        hist = self._player_court_hist.get(shooter_tid)
+        if not hist or len(hist) < FT_STATIONARY_MIN_SAMPLES:
+            return False
+        recent = list(hist)[-15:]
+        cx = sum(p[0] for p in recent) / len(recent)
+        cy = sum(p[1] for p in recent) / len(recent)
+        spread = max(_dist(p, [cx, cy]) for p in recent)
+        return spread < FT_STATIONARY_SPREAD_M
 
     def _estimate_shot_pos(self, track_id: int, is_court: bool) -> Optional[list]:
         """
@@ -655,13 +719,28 @@ class EventEngine:
         team     = self._last_shooter_team or (shooter.get("team", "") if shooter else "")
         shot_pos = self.last_shot_pos
         is_three = self._is_three(shot_pos) if shot_pos else False
+        tid      = shooter["track_id"] if shooter else 0
+        is_ft    = self._is_free_throw(tid, shot_pos, is_court)
 
         self._fg_miss_emitted    = True
         self._miss_frame         = self.frame_count
         self._last_shooter_id    = None
         self.last_shot_pos       = None
 
-        tid = shooter["track_id"] if shooter else 0
+        # A missed set free throw → MISSED_FT (FTA without FTM), not a missed FG.
+        if is_ft:
+            logger.info(
+                "MISSED_FT  shooter=%s  team=%s  Q%d  video=%s",
+                tid, team, quarter, _fmt_ts(ts_ms),
+            )
+            return {
+                "type":       "MISSED_FT",
+                "track_id":   tid,
+                "quarter":    quarter,
+                "team":       team,
+                "court_pos":  shot_pos,
+                "timestamp_ms": ts_ms,
+            }
 
         logger.info(
             "MISSED_FG  shooter=%s  team=%s  3pt=%s  Q%d  video=%s",

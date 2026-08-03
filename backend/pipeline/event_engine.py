@@ -58,6 +58,8 @@ FG_MIN_DOWNWARD_DY     = 2      # ball must be moving downward by at least this 
 REBOUND_HOOP_RADIUS_PX = 90
 REBOUND_HOOP_RADIUS_M  = 1.5
 REBOUND_COOLDOWN_F     = 20
+REBOUND_MIN_F          = 8      # min frames after the shot before a rebound can count
+                                # (ball needs time to reach the rim first)
 
 BLOCK_DIST_PX          = 60
 BLOCK_DIST_M           = 1.0
@@ -193,6 +195,7 @@ class EventEngine:
         self._fg_hoop_cache_ttl    = _sc(FG_HOOP_CACHE_TTL)
         self._fg_shooter_ttl_f     = _sc(FG_SHOOTER_TTL_F)
         self._rebound_cooldown_f   = _sc(REBOUND_COOLDOWN_F)
+        self._reb_min_f            = _sc(REBOUND_MIN_F)
         self._blk_cooldown_f       = _sc(BLK_COOLDOWN_F)
         self._blk_shot_window_f    = _sc(BLK_SHOT_WINDOW_F)
         self._blk_path2_window_f   = _sc(BLK_PATH2_WINDOW_F)
@@ -692,8 +695,27 @@ class EventEngine:
           2. Ball is within rebound zone (near hoop / backboard).
           3. A player gains possession of the ball.
         """
-        frames_since_miss = self.frame_count - self._miss_frame
-        if frames_since_miss > self._rebound_cooldown_f * 3:
+        # A rebound follows a live, UNMADE shot. The physical rebound happens
+        # ~1-2 s after the release — so anchor the window to the SHOT attempt,
+        # NOT to the MISSED_FG accounting event (which only fires
+        # FG_MISS_TIMEOUT_F frames later, long after the ball was rebounded, so
+        # the old `frames_since_miss` window opened too late and rebounds were
+        # almost never credited). Two entry paths:
+        #   • live shot: SHOOT fired, not yet made (a MADE clears _last_shooter_id
+        #     BEFORE this runs — FG detection precedes rebound in process()), past
+        #     the minimum ball-flight time.
+        #   • post-miss: the air-ball MISSED_FG just fired — keep a short window
+        #     after it so those rebounds are still caught.
+        live_shot = (
+            self._last_shooter_id is not None
+            and (self.frame_count - self._shot_attempt_frame) >= self._reb_min_f
+            and self._ball_in_hoop_frames == 0   # not currently dwelling for a make
+        )
+        post_miss = (
+            self._miss_frame > 0
+            and (self.frame_count - self._miss_frame) <= self._rebound_cooldown_f * 3
+        )
+        if not (live_shot or post_miss):
             return None
 
         ball_pos = self._ball_pos(ball, is_court)
@@ -738,8 +760,12 @@ class EventEngine:
         if self._last_shooter_team and reb_team:
             sub_type = "OFF" if reb_team == self._last_shooter_team else "DEF"
 
+        # End the shot: the ball has been secured, so no further rebound (or a
+        # late MISSED_FG) should fire for this attempt.
         self._rebound_cooldown = self._rebound_cooldown_f
         self._miss_frame       = -999
+        self._last_shooter_id  = None
+        self._fg_miss_emitted  = True
 
         return {
             "type":      "REBOUND",
@@ -1089,7 +1115,13 @@ class EventEngine:
         self._last_shooter_id    = None
         self._shot_attempt_frame = -999
         self._fg_cooldown        = 0
-        self._ball_in_hoop_prev  = False
+        # Reset the REAL ball/hoop dwell counters (the old `_ball_in_hoop_prev`
+        # here was a ghost attribute — defined nowhere, read nowhere — so these
+        # leaked across quarters and could trigger a phantom MADE_FG on the first
+        # frames of the next quarter).
+        self._ball_in_hoop_frames = 0
+        self._ball_lost_frames    = 0
+        self._hoop_cache_age      = 0
         self._fg_miss_emitted    = False
         self._rebound_cooldown   = 0
         self._miss_frame         = -999

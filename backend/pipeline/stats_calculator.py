@@ -862,9 +862,11 @@ if __name__ == "__main__":
     sc7 = StatsCalculator(fps=10)
     roster7 = {1: {"name": "Runner", "team": "A", "jersey_number": 7}}
 
-    # Frame 0: position (0, 0) at t=0
+    # Frames must be within MAX_GAP_MS (500 ms) or the occlusion guard skips the
+    # sample — real processed frames are ~40-80 ms apart, so we step in 500 ms.
+    # Two 2.5 m steps of 500 ms each → 5 m total at 18 km/h.
     sc7.update([], {1: (0.0, 0.0, 0)},    {}, roster7)
-    # Frame 1: position (3, 4) at t=1000ms → 5m in 1s = 18 km/h
+    sc7.update([], {1: (1.5, 2.0, 500)},  {}, {})
     sc7.update([], {1: (3.0, 4.0, 1000)}, {}, {})
 
     ps7 = sc7.get_player_stats(1)
@@ -874,8 +876,8 @@ if __name__ == "__main__":
     print(f"  distance = {mpi7['distance_m']} m  (expected 5.0)  ✓")
     print(f"  max_speed = {mpi7['max_speed_kmh']} km/h  (expected 18.0)  ✓")
 
-    # Frame 2: no movement → distance unchanged
-    sc7.update([], {1: (3.0, 4.0, 2000)}, {}, {})
+    # No-movement frame within the gap window → distance unchanged
+    sc7.update([], {1: (3.0, 4.0, 1500)}, {}, {})
     ps7b = sc7.get_player_stats(1)
     assert abs(ps7b["mpi"]["distance_m"] - 5.0) < 0.01
     print("  No-move frame → distance unchanged  ✓")

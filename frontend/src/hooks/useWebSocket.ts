@@ -1,7 +1,6 @@
 import { useRef, useCallback } from 'react'
 import { FrameUpdate, GameEvent, JerseyConfirmedMessage, PlayerStats, MpiMetrics } from '../types'
 import { useMatchStore } from '../store/matchStore'
-import { MockWebSocketServer } from '../utils/mockWebSocket'
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -11,6 +10,11 @@ const RECONNECT_DELAY_MS = 2_000
 const MAX_RETRIES        = 5
 
 // ── Store initializers ────────────────────────────────────────────────────────
+//
+// The roster is seeded with ZEROED stats so the tables render the player list
+// immediately.  Every real number after that comes from the backend — the live
+// WebSocket carries score/positions/events, and the authoritative box score +
+// MPI are fetched over REST by useMatchStats().  Nothing here is invented.
 
 const buildInitialStats = (
   roster: { jerseyNumber: number; name: string; team: 'A' | 'B' }[],
@@ -69,10 +73,6 @@ const buildInitialMpi = (
   return mpi
 }
 
-const calcEff = (p: PlayerStats): number =>
-  (p.pts + p.totReb + p.ast + p.stl + p.blocks) -
-  (p.twoPointAtt + p.threePointAtt - p.twoPointMade - p.threePointMade + p.tov)
-
 /** Convert OpenCV HSV [H:0-180, S:0-255, V:0-255] → CSS hex color */
 const hsvToHex = (hsv: number[]): string => {
   if (!hsv || hsv.length < 3) return ''
@@ -101,14 +101,18 @@ const hsvToHex = (hsv: number[]): string => {
 
 export const useWebSocket = () => {
   const wsRef            = useRef<WebSocket | null>(null)
-  const mockServerRef    = useRef<MockWebSocketServer | null>(null)
   const retryCountRef    = useRef(0)
   const reconnectTimer   = useRef<number | null>(null)
   const connectTimer     = useRef<number | null>(null)
   const isActiveRef      = useRef(false)      // false after disconnect() to stop retries
-  const initialStatsRef  = useRef<Record<number, PlayerStats>>({})
 
-  // ── Message handlers (identical logic for real WS and mock) ────────────────
+  // ── Message handlers ───────────────────────────────────────────────────────
+  //
+  // The live frame carries only what the pipeline actually measures per frame:
+  // score, quarter, clock, player positions/action/speed, ball, possession and
+  // pipeline metrics.  It does NOT carry the box score — that is computed by the
+  // backend and pulled over REST by useMatchStats().  We deliberately write
+  // NOTHING to stats/mpi here, so there is no fabricated/raced value.
 
   const handleFrameUpdate = useCallback((frame: FrameUpdate) => {
     const s = useMatchStore.getState()
@@ -131,48 +135,6 @@ export const useWebSocket = () => {
       )
     }
 
-    // Tick minutes: each frame ≈ 0.1 s = 1/600 min
-    const updatedStats = { ...s.stats }
-    Object.values(updatedStats).forEach((p) => {
-      updatedStats[p.playerId] = { ...p, minutes: p.minutes + 1 / 600 }
-    })
-
-    // Derive MPI from per-player speed
-    const updatedMpi = { ...s.mpi }
-    frame.players.forEach((player) => {
-      // Match by jerseyNumber → playerId when available; fall back to trackId
-      const byJersey = player.jerseyNumber != null
-        ? Object.values(s.stats).find((p) => p.jerseyNumber === player.jerseyNumber)
-        : null
-      const pid = byJersey?.playerId ?? player.trackId
-      if (!updatedMpi[pid]) return
-      const prev     = updatedMpi[pid]
-      const newDist  = prev.distanceCoveredM + player.speedKmh / 36_000   // km/h × 0.1 s → m
-      const newMax   = Math.max(prev.maxSpeedKmh, player.speedKmh)
-      const newAvg   = prev.avgSpeedKmh === 0
-        ? player.speedKmh
-        : prev.avgSpeedKmh * 0.99 + player.speedKmh * 0.01
-      const mpiComposite = Math.min(
-        100,
-        40 + (newDist / 50) * 20 + (newAvg / 25) * 20 + Math.random() * 5,
-      )
-      updatedMpi[pid] = {
-        ...prev,
-        distanceCoveredM: newDist,
-        maxSpeedKmh:      newMax,
-        avgSpeedKmh:      newAvg,
-        mpiComposite,
-        jumpHeightCm:     prev.jumpHeightCm    || 40 + Math.random() * 30,
-        accelerationMs2:  prev.accelerationMs2 || 2  + Math.random() * 3,
-        agility:          prev.agility         || 60 + Math.random() * 30,
-        endurance:        Math.min(100, 50 + newDist / 80),
-        fatigue:          Math.min(100, newDist / 50),
-      }
-    })
-
-    s.setStats(updatedStats)
-    s.setMpi(updatedMpi)
-
     // K-Means detected colors — update only when backend has calibrated
     if (frame.teamColors) {
       const hexA = frame.teamColors.A ? hsvToHex(frame.teamColors.A) : ''
@@ -190,70 +152,12 @@ export const useWebSocket = () => {
     )
   }, [])
 
+  // A game event only feeds the live event feed.  The box-score impact of the
+  // event is reflected by the backend recomputation, which useMatchStats() pulls
+  // (it refetches whenever a new event arrives).  We never mutate stats here.
   const handleEvent = useCallback((event: GameEvent) => {
-    const s = useMatchStore.getState()
-    s.addEvent(event)
-
-    const currentStats = { ...s.stats }
-    const playerEntry = Object.values(currentStats).find(
-      (p) => p.jerseyNumber === event.playerId || p.playerId === event.playerId,
-    )
-    if (!playerEntry) return
-
-    const p = { ...playerEntry }
-
-    switch (event.eventType) {
-      case 'FGM':
-        if (event.points === 3) {
-          p.threePointMade++
-          p.threePointAtt++
-        } else {
-          p.twoPointMade++
-          p.twoPointAtt++
-        }
-        p.pts += event.points ?? 2
-        break
-      case 'FGA':
-        if (Math.random() > 0.5) p.threePointAtt++
-        else p.twoPointAtt++
-        break
-      case 'REB':
-        if (Math.random() > 0.3) p.defReb++
-        else p.offReb++
-        p.totReb++
-        break
-      case 'AST':  p.ast++;    break
-      case 'STL':  p.stl++;    break
-      case 'BLK':  p.blocks++; break
-      case 'TOV':  p.tov++;    break
-      case 'FOUL': p.fouls++;  break
-    }
-
-    const totalAtt = p.twoPointAtt + p.threePointAtt
-    p.fgPercent = totalAtt > 0
-      ? ((p.twoPointMade + p.threePointMade) / totalAtt) * 100
-      : 0
-    p.plusMinus = event.team === 'A'
-      ? useMatchStore.getState().teamA.score - useMatchStore.getState().teamB.score
-      : useMatchStore.getState().teamB.score - useMatchStore.getState().teamA.score
-    p.eff = calcEff(p)
-
-    currentStats[p.playerId] = p
-    s.setStats(currentStats)
+    useMatchStore.getState().addEvent(event)
   }, [])
-
-  // ── Mock fallback ─────────────────────────────────────────────────────────
-
-  const startMock = useCallback(() => {
-    mockServerRef.current?.stop()
-    const mockRoster = Object.values(initialStatsRef.current)
-    mockServerRef.current = new MockWebSocketServer(
-      handleFrameUpdate,
-      handleEvent,
-      mockRoster,
-    )
-    mockServerRef.current.start()
-  }, [handleFrameUpdate, handleEvent])
 
   // ── Real WebSocket ────────────────────────────────────────────────────────
 
@@ -268,20 +172,29 @@ export const useWebSocket = () => {
       wsRef.current = null
     }
 
+    const store = useMatchStore.getState()
+    store.setWsStatus('connecting')
+
     const url = `${WS_BASE}/api/ws/live?match_id=${encodeURIComponent(matchId)}`
     const ws  = new WebSocket(url)
     wsRef.current = ws
 
     let didOpen = false
 
-    // 3 s connection timeout → fallback to mock
+    const markDisconnected = () => {
+      const st = useMatchStore.getState()
+      st.setWsStatus('disconnected')
+      st.setIsLive(false)   // faster REST polling takes over — real stats keep flowing
+    }
+
+    // Connection timeout — no fake fallback, just report disconnected.
     connectTimer.current = window.setTimeout(() => {
       if (!didOpen && isActiveRef.current) {
-        ws.onclose = null   // prevent retry from onclose
+        ws.onclose = null
         ws.onerror = null
         ws.close()
         wsRef.current = null
-        startMock()
+        markDisconnected()
       }
     }, CONNECT_TIMEOUT_MS)
 
@@ -292,6 +205,7 @@ export const useWebSocket = () => {
         connectTimer.current = null
       }
       retryCountRef.current = 0
+      useMatchStore.getState().setWsStatus('live')
     }
 
     ws.onmessage = (evt: MessageEvent) => {
@@ -305,6 +219,8 @@ export const useWebSocket = () => {
         } else if (data['type'] === 'jersey_confirmed') {
           handleJerseyConfirmed(data as unknown as JerseyConfirmedMessage)
         }
+        // Other message types (processing_complete, …) carry no per-frame render
+        // state; the authoritative final box score is fetched over REST.
       } catch {
         // ignore unparseable messages
       }
@@ -323,15 +239,15 @@ export const useWebSocket = () => {
 
       if (retryCountRef.current < MAX_RETRIES) {
         retryCountRef.current += 1
+        useMatchStore.getState().setWsStatus('connecting')
         reconnectTimer.current = window.setTimeout(() => {
           if (isActiveRef.current) connectReal(matchId)
         }, RECONNECT_DELAY_MS)
       } else {
-        // Exhausted retries → fall back to mock
-        startMock()
+        markDisconnected()
       }
     }
-  }, [handleFrameUpdate, handleEvent, handleJerseyConfirmed, startMock])
+  }, [handleFrameUpdate, handleEvent, handleJerseyConfirmed])
 
   // ── Public API ────────────────────────────────────────────────────────────
 
@@ -342,22 +258,21 @@ export const useWebSocket = () => {
     const store = useMatchStore.getState()
     const { roster, matchId } = store
 
+    // Seed roster rows with zeros; real numbers arrive from the backend.
     const initialStats = buildInitialStats(roster)
-    const initialMpi   = buildInitialMpi(initialStats)
-    initialStatsRef.current = initialStats
-
     store.setStats(initialStats)
-    store.setMpi(initialMpi)
-    store.setIsLive(true)
+    store.setMpi(buildInitialMpi(initialStats))
 
     if (!matchId) {
-      // No matchId (dev / setup mode) → use mock directly
-      startMock()
+      // No match to stream — do NOT fabricate anything.
+      store.setIsLive(false)
+      store.setWsStatus('idle')
       return
     }
 
+    store.setIsLive(true)
     connectReal(matchId)
-  }, [startMock, connectReal])
+  }, [connectReal])
 
   const disconnect = useCallback(() => {
     isActiveRef.current = false
@@ -382,11 +297,9 @@ export const useWebSocket = () => {
       wsRef.current = null
     }
 
-    // Stop mock if running
-    mockServerRef.current?.stop()
-    mockServerRef.current = null
-
-    useMatchStore.getState().setIsLive(false)
+    const st = useMatchStore.getState()
+    st.setIsLive(false)
+    st.setWsStatus('idle')
   }, [])
 
   return { connect, disconnect }

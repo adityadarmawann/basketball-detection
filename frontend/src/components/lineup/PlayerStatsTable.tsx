@@ -113,7 +113,7 @@ export default function PlayerStatsTable({ players, teamName }: PlayerStatsTable
             >
               <td className="py-3 px-2 font-bold">{p.jerseyNumber}</td>
               <td className="py-3 px-2 font-bold text-text-primary">{p.name}</td>
-              <td className="py-3 px-2 tabular-nums">{(p.minutes / 60).toFixed(1)}</td>
+              <td className="py-3 px-2 tabular-nums">{p.minutes.toFixed(1)}</td>
               <td className="py-3 px-2 tabular-nums font-bold">{p.pts}</td>
               <td className="py-3 px-2 tabular-nums">{`${p.twoPointMade}/${p.twoPointAtt}`}</td>
               <td className="py-3 px-2 tabular-nums">{`${p.threePointMade}/${p.threePointAtt}`}</td>

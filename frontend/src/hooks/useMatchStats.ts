@@ -79,11 +79,12 @@ export interface RawMpiPlayer {
   mpi_composite?:   number
   distance_m?:      number
   avg_speed_kmh?:   number
-  max_speed_kmh?:   number
-  jump_height_cm?:  number
-  agility_score?:   number
-  endurance_score?: number
-  fatigue_score?:   number
+  max_speed_kmh?:    number
+  jump_height_cm?:   number
+  acceleration_ms2?: number
+  agility_score?:    number
+  endurance_score?:  number
+  fatigue_score?:    number
 }
 
 // ── Normalizers ────────────────────────────────────────────────────────────────
@@ -163,9 +164,9 @@ export function normalizeMpiStats(raw: RawMpiPlayer): MpiMetrics {
     distanceCoveredM: raw.distance_m      ?? 0,
     avgSpeedKmh:      raw.avg_speed_kmh   ?? 0,
     maxSpeedKmh:      raw.max_speed_kmh   ?? 0,
-    jumpHeightCm:     raw.jump_height_cm  ?? 0,
-    accelerationMs2:  0,    // not in the backend MPI payload
-    agility:          raw.agility_score   ?? 0,
+    jumpHeightCm:     raw.jump_height_cm   ?? 0,
+    accelerationMs2:  raw.acceleration_ms2 ?? 0,   // real, from stats_calculator mpi
+    agility:          raw.agility_score    ?? 0,
     endurance:        raw.endurance_score ?? 0,
     fatigue:          raw.fatigue_score   ?? 0,
     mpiComposite:     raw.mpi_composite   ?? 0,

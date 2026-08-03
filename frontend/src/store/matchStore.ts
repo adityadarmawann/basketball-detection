@@ -12,6 +12,7 @@ const initialState: MatchState = {
   shotClock: 24,
   possession: { teamA: 0.5, teamB: 0.5 },
   isLive: false,
+  wsStatus: 'idle',
   isVideoMode: false,
   players: [],
   playersVideoTs: 0,
@@ -44,6 +45,7 @@ export const useMatchStore = create<MatchState & {
   setShotClock: (clock: number) => void
   setPossession: (possession: { teamA: number; teamB: number }) => void
   setIsLive: (live: boolean) => void
+  setWsStatus: (status: MatchState['wsStatus']) => void
   setIsVideoMode: (v: boolean) => void
   setPlayers: (players: Player[], videoTs?: number) => void
   setBall: (ball: BallState | null) => void
@@ -83,6 +85,7 @@ export const useMatchStore = create<MatchState & {
       setShotClock: (clock) => set({ shotClock: clock }),
       setPossession: (possession) => set({ possession }),
       setIsLive: (live) => set({ isLive: live }),
+      setWsStatus: (wsStatus) => set({ wsStatus }),
       setIsVideoMode: (v) => set({ isVideoMode: v }),
       setPlayers: (players, videoTs) => set({
         players,

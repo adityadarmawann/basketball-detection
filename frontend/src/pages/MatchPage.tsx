@@ -356,6 +356,34 @@ export default function MatchPage() {
               </button>
             )}
 
+            {/* Honest live-connection status (replaces the old silent mock fallback) */}
+            {store.isLive && store.wsStatus !== 'idle' && (
+              <span
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold border ${
+                  store.wsStatus === 'live'
+                    ? 'border-success/40 bg-success/10 text-success'
+                    : store.wsStatus === 'connecting'
+                      ? 'border-amber-300 bg-amber-50 text-amber-600'
+                      : 'border-danger/40 bg-danger/10 text-danger'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    store.wsStatus === 'live'
+                      ? 'bg-success animate-pulse'
+                      : store.wsStatus === 'connecting'
+                        ? 'bg-amber-500 animate-pulse'
+                        : 'bg-danger'
+                  }`}
+                />
+                {store.wsStatus === 'live'
+                  ? 'Live'
+                  : store.wsStatus === 'connecting'
+                    ? 'Menyambung…'
+                    : 'Terputus'}
+              </span>
+            )}
+
             {/* Quarter status badges — shows which quarters already have data */}
             <div className="flex items-center gap-1.5 ml-auto">
               {([1, 2, 3, 4] as const).map((q) => {

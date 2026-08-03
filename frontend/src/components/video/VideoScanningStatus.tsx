@@ -39,7 +39,6 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
 
   useEffect(() => {
     let cancelled = false
-    let devTimer: number | null = null
 
     const poll = async () => {
       try {
@@ -79,20 +78,10 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
         const httpStatus = axiosErr.response?.status
 
         if (httpStatus === 503) {
-          // Backend up but pipeline not available → dev mode simulation (frontend testing)
-          setPhase('dev_mode')
-          let p = 0
-          devTimer = window.setInterval(() => {
-            p += Math.random() * 5 + 2
-            if (p >= 100) {
-              p = 100
-              setProgress(100)
-              setPhase('done')
-              clearInterval(devTimer!)
-            } else {
-              setProgress(Math.round(p))
-            }
-          }, 500)
+          // Backend up but the analysis pipeline is unavailable. Report it
+          // honestly — never fake a completed analysis with invented progress.
+          setPhase('error')
+          setErrorMsg('Pipeline analisis tidak tersedia di server (503). Pastikan backend pipeline aktif, lalu upload ulang video.')
         } else if (httpStatus === 404) {
           // Match not found — backend was restarted or analysis never ran
           setPhase('error')
@@ -112,7 +101,6 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
 
     return () => {
       cancelled = true
-      if (devTimer !== null) clearInterval(devTimer)
     }
   }, [matchId])
 

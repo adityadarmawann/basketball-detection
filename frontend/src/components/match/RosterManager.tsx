@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useRef, useState } from 'react'
+import { ChangeEvent, useRef, useState } from 'react'
 import { Trash2, Plus, Pencil, Check, X, Camera, Upload } from 'lucide-react'
 import axios, { isAxiosError } from 'axios'
 import { useMatchStore } from '../../store/matchStore'

@@ -5,6 +5,7 @@ import { FrameBboxEntry } from '../types'
 import VideoPlayer from '../components/video/VideoPlayer'
 import MatchHeader from '../components/match/MatchHeader'
 import Scoreboard from '../components/dashboard/Scoreboard'
+import { normalizePlayerStats, RawPlayerStats } from '../hooks/useMatchStats'
 
 interface MatchMeta {
   team_a: string
@@ -13,26 +14,12 @@ interface MatchMeta {
   round?: string
 }
 
-interface PlayerStat {
-  track_id?: number
-  jersey_number?: number | null
-  name?: string
-  team?: string
-  pts?: number
-  reb?: number
-  tot_reb?: number
-  ast?: number
-  stl?: number
-  blk?: number
-  blocks?: number
-  eff?: number
-}
-
 interface StatsData {
   score: { team_a: number; team_b: number }
   quarter: number
   game_clock: string
-  player_stats: Record<string, PlayerStat>
+  // Backend nests the box score under total_stats — same shape useMatchStats reads.
+  player_stats: Record<string, RawPlayerStats>
 }
 
 export default function ViewMatchPage() {
@@ -132,9 +119,9 @@ export default function ViewMatchPage() {
   }
 
   const playerRows = stats
-    ? Object.values(stats.player_stats).sort(
-        (a, b) => ((b.eff ?? 0) - (a.eff ?? 0))
-      )
+    ? Object.entries(stats.player_stats)
+        .map(([k, v]) => normalizePlayerStats(Number(k) || 0, v))
+        .sort((a, b) => b.eff - a.eff)
     : []
 
   return (
@@ -212,7 +199,7 @@ export default function ViewMatchPage() {
                   {playerRows.map((p, idx) => (
                     <tr key={idx} className="border-t border-gray-100 hover:bg-gray-50">
                       <td className="px-4 py-2 font-medium">
-                        {p.jersey_number != null ? `#${p.jersey_number}` : `Track ${p.track_id ?? idx}`}
+                        {p.jerseyNumber != null ? `#${p.jerseyNumber}` : `Track ${p.playerId || idx}`}
                         {p.name ? ` · ${p.name}` : ''}
                       </td>
                       <td className="px-4 py-2 text-center">
@@ -226,13 +213,13 @@ export default function ViewMatchPage() {
                           {p.team === 'A' ? teamA : p.team === 'B' ? teamB : (p.team || '—')}
                         </span>
                       </td>
-                      <td className="px-4 py-2 text-center font-bold">{p.pts ?? 0}</td>
-                      <td className="px-4 py-2 text-center">{p.tot_reb ?? p.reb ?? 0}</td>
-                      <td className="px-4 py-2 text-center">{p.ast ?? 0}</td>
-                      <td className="px-4 py-2 text-center">{p.stl ?? 0}</td>
-                      <td className="px-4 py-2 text-center">{p.blocks ?? p.blk ?? 0}</td>
+                      <td className="px-4 py-2 text-center font-bold">{p.pts}</td>
+                      <td className="px-4 py-2 text-center">{p.totReb}</td>
+                      <td className="px-4 py-2 text-center">{p.ast}</td>
+                      <td className="px-4 py-2 text-center">{p.stl}</td>
+                      <td className="px-4 py-2 text-center">{p.blocks}</td>
                       <td className="px-4 py-2 text-center font-bold text-primary">
-                        {(p.eff ?? 0).toFixed(1)}
+                        {p.eff.toFixed(1)}
                       </td>
                     </tr>
                   ))}

@@ -154,6 +154,8 @@ export interface MatchState {
   shotClock: number;
   possession: { teamA: number; teamB: number };
   isLive: boolean;
+  /** Live WebSocket connection state — replaces the old silent mock fallback */
+  wsStatus: 'idle' | 'connecting' | 'live' | 'disconnected';
   isVideoMode: boolean;
   players: Player[];
   playersVideoTs: number;

@@ -1,74 +1,30 @@
 import { useMatchStore } from '../store/matchStore'
+import { useMatchStats } from '../hooks/useMatchStats'
 import MatchHeader from '../components/match/MatchHeader'
 import PlayerStatsTable from '../components/lineup/PlayerStatsTable'
 import QuarterFilter from '../components/match/QuarterFilter'
 import { Download } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import Papa from 'papaparse'
-import { GameEvent, PlayerStats } from '../types'
 
 export default function LineupPage() {
   const store = useMatchStore()
   const [selectedQuarter, setSelectedQuarter] = useState(0)
 
-  const { teamAPlayers, teamBPlayers } = useMemo(() => {
-    if (selectedQuarter === 0) {
-      const all = Object.values(store.stats)
-      return {
-        teamAPlayers: all.filter((p) => p.team === 'A'),
-        teamBPlayers: all.filter((p) => p.team === 'B'),
-      }
-    }
+  // Single source of truth: the backend box score (whole match when quarter=0,
+  // the real per-quarter stats when 1..4).  No client-side reconstruction, no
+  // duplicate EFF formula — normalizePlayerStats() maps the backend numbers and
+  // defers to the backend `eff`.
+  const { playerStats } = useMatchStats(store.matchId, selectedQuarter)
 
-    // Build zeroed-out per-player stats for the selected quarter from events
-    const perPlayer: Record<number, PlayerStats> = {}
-    Object.values(store.stats).forEach((p) => {
-      perPlayer[p.playerId] = {
-        ...p,
-        pts: 0, twoPointMade: 0, twoPointAtt: 0,
-        threePointMade: 0, threePointAtt: 0,
-        ftMade: 0, ftAtt: 0, fgPercent: 0,
-        offReb: 0, defReb: 0, totReb: 0,
-        ast: 0, stl: 0, tov: 0, fouls: 0, blocks: 0,
-        plusMinus: 0, eff: 0,
-      }
-    })
-
-    store.events
-      .filter((e: GameEvent) => e.quarter === selectedQuarter)
-      .forEach((e: GameEvent) => {
-        const entry = Object.values(perPlayer).find(
-          (p) => p.jerseyNumber === e.playerId || p.playerId === e.playerId
-        )
-        if (!entry) return
-        switch (e.eventType) {
-          case 'FGM':
-            if (e.points === 3) { entry.threePointMade++; entry.threePointAtt++ }
-            else { entry.twoPointMade++; entry.twoPointAtt++ }
-            entry.pts += e.points ?? 2
-            break
-          case 'REB': entry.totReb++;  break
-          case 'AST': entry.ast++;     break
-          case 'STL': entry.stl++;     break
-          case 'BLK': entry.blocks++;  break
-          case 'TOV': entry.tov++;     break
-          case 'FOUL': entry.fouls++;  break
-        }
-        const totalAtt = entry.twoPointAtt + entry.threePointAtt
-        entry.fgPercent = totalAtt > 0
-          ? ((entry.twoPointMade + entry.threePointMade) / totalAtt) * 100
-          : 0
-        entry.eff =
-          (entry.pts + entry.totReb + entry.ast + entry.stl + entry.blocks) -
-          (totalAtt - entry.twoPointMade - entry.threePointMade + entry.tov)
-      })
-
-    const all = Object.values(perPlayer)
-    return {
-      teamAPlayers: all.filter((p) => p.team === 'A'),
-      teamBPlayers: all.filter((p) => p.team === 'B'),
-    }
-  }, [store.stats, store.events, selectedQuarter])
+  const teamAPlayers = useMemo(
+    () => Object.values(playerStats).filter((p) => p.team === 'A'),
+    [playerStats],
+  )
+  const teamBPlayers = useMemo(
+    () => Object.values(playerStats).filter((p) => p.team === 'B'),
+    [playerStats],
+  )
 
   const handleQuarterChange = (q: number) => {
     setSelectedQuarter(q)
@@ -85,7 +41,7 @@ export default function LineupPage() {
       '#': p.jerseyNumber,
       Name: p.name,
       Team: p.team,
-      MIN: (p.minutes / 60).toFixed(1),
+      MIN: p.minutes.toFixed(1),
       PTS: p.pts,
       '2P': `${p.twoPointMade}/${p.twoPointAtt}`,
       '3P': `${p.threePointMade}/${p.threePointAtt}`,

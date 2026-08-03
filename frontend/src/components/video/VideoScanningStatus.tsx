@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { CheckCircle, Loader2, AlertTriangle, RefreshCw, Square } from 'lucide-react'
 import axios, { AxiosError } from 'axios'
 
@@ -10,6 +10,11 @@ interface Props {
 
 type Phase = 'connecting' | 'scanning' | 'done' | 'dev_mode' | 'error'
 
+// Tolerate a transient network drop (ERR_NETWORK_CHANGED, brief 5xx) before
+// ever declaring the analysis failed — it keeps running server-side.
+const MAX_POLL_RETRIES = 8      // ~20 s of reconnect attempts (resets on any success)
+const POLL_RETRY_MS    = 2500
+
 export default function VideoScanningStatus({ matchId, onComplete, onReupload }: Props) {
   const [phase, setPhase] = useState<Phase>('connecting')
   const [progress, setProgress] = useState(0)
@@ -19,6 +24,8 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
   const [scanLine, setScanLine] = useState(0)
   const [errorMsg, setErrorMsg] = useState('')
   const [isCancelling, setIsCancelling] = useState(false)
+  const [reconnecting, setReconnecting] = useState(false)
+  const retryRef = useRef(0)
 
   const handleStop = async () => {
     setIsCancelling(true)
@@ -46,6 +53,10 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
           `${import.meta.env.VITE_API_URL}/api/upload/progress/${matchId}`
         )
         if (cancelled) return
+
+        // A poll succeeded → connection is healthy again.
+        retryRef.current = 0
+        if (reconnecting) setReconnecting(false)
 
         const { frames_processed, total_frames, fps_actual, status } = res.data
         setFramesProcessed(frames_processed)
@@ -77,22 +88,36 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
         const axiosErr = err as AxiosError
         const httpStatus = axiosErr.response?.status
 
-        if (httpStatus === 503) {
-          // Backend up but the analysis pipeline is unavailable. Report it
-          // honestly — never fake a completed analysis with invented progress.
-          setPhase('error')
-          setErrorMsg('Pipeline analisis tidak tersedia di server (503). Pastikan backend pipeline aktif, lalu upload ulang video.')
-        } else if (httpStatus === 404) {
-          // Match not found — backend was restarted or analysis never ran
+        // 404 = the match genuinely isn't there (backend restarted / never ran).
+        // That's not transient, so don't spin — report it.
+        if (httpStatus === 404) {
           setPhase('error')
           setErrorMsg('Sesi analisis tidak ditemukan. Backend mungkin di-restart saat proses berjalan. Silakan upload ulang video.')
+          return
+        }
+
+        // Everything else — a dropped/changed network (ERR_NETWORK_CHANGED),
+        // timeout, 503, or a 5xx — is very likely TRANSIENT. The analysis runs
+        // server-side and keeps going regardless of the browser, so retry a few
+        // times ("Menyambung ulang…") before ever declaring failure. One failed
+        // poll must never read as a permanently failed analysis.
+        retryRef.current += 1
+        if (retryRef.current <= MAX_POLL_RETRIES) {
+          setReconnecting(true)
+          setErrorMsg('')
+          setTimeout(poll, POLL_RETRY_MS)
+          return
+        }
+
+        // Only after several consecutive failures do we surface the real reason.
+        setReconnecting(false)
+        setPhase('error')
+        if (httpStatus === 503) {
+          setErrorMsg('Pipeline analisis tidak tersedia di server (503). Pastikan backend pipeline aktif, lalu upload ulang video.')
+        } else if (!axiosErr.response) {
+          setErrorMsg('Koneksi ke server terputus terus-menerus. Cek jaringan client — analisis kemungkinan MASIH berjalan di server; refresh setelah koneksi stabil.')
         } else {
-          setPhase('error')
-          if (!axiosErr.response) {
-            setErrorMsg('Tidak bisa terhubung ke server. Pastikan backend berjalan.')
-          } else {
-            setErrorMsg(`Server error ${httpStatus ?? ''}: ${(axiosErr.response?.data as any)?.detail ?? 'Gagal mengambil status analisis.'}`)
-          }
+          setErrorMsg(`Server error ${httpStatus ?? ''}: ${(axiosErr.response?.data as any)?.detail ?? 'Gagal mengambil status analisis.'}`)
         }
       }
     }
@@ -179,6 +204,12 @@ export default function VideoScanningStatus({ matchId, onComplete, onReupload }:
           <span className="text-sm font-bold text-white">
             {isDone ? 'Analisis Selesai' : isFinalizing ? 'Menyimpan Hasil Analisis...' : 'AI Sedang Menganalisis Video...'}
           </span>
+          {reconnecting && !isDone && (
+            <span className="flex items-center gap-1.5 text-xs px-2 py-0.5 bg-amber-400/20 text-amber-300 rounded-full border border-amber-400/30">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              Menyambung ulang…
+            </span>
+          )}
           {isDevMode && (
             <span className="text-xs px-2 py-0.5 bg-yellow-400/20 text-yellow-300 rounded-full border border-yellow-400/30">
               dev mode

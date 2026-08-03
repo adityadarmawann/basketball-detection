@@ -112,6 +112,17 @@ async def _run_pipeline(
         )
     except Exception as e:
         logger.error("Pipeline error match_id=%s: %s", match_id, e, exc_info=True)
+    finally:
+        # Results are now persisted (frames.json + video + CSV on disk, stats in
+        # Redis, events in Mongo). Free the models + frame buffer so an idle
+        # backend returns to baseline RAM/VRAM. The lightweight processor shell
+        # stays in _processors, so progress/frames/video/csv endpoints keep
+        # serving the finished result from disk — a refresh still lands on the
+        # result and never re-analyses. Models reload only on the next upload.
+        try:
+            processor.release()
+        except Exception as e:
+            logger.warning("processor.release() failed match_id=%s: %s", match_id, e)
 
 
 # ── POST /upload-video ────────────────────────────────────────────────────────

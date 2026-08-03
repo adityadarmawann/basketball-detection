@@ -2903,6 +2903,39 @@ class VideoProcessor:
         self._stop_signal.set()
         self._status = "stopping"
 
+    def release(self) -> None:
+        """Free the heavy per-analysis resources — the CV models and the in-RAM
+        frame buffer — once the results are safely persisted (frames.json + video
+        + CSV on disk, stats in Redis, events in Mongo). Called after
+        process_video() finishes so an idle backend drops back to baseline
+        RAM/VRAM instead of holding a full model set per analysed match forever.
+
+        Deliberately KEEPS the lightweight status/path attributes (_status,
+        _total_frames, _frame_count, _frames_json_path, _output_video_path,
+        _output_csv_path, _current_quarter) so the progress / frames / video / csv
+        endpoints keep serving the finished result from disk after release — a
+        page refresh still lands straight on the result, it does NOT re-analyse.
+        Idempotent and safe to call more than once.
+        """
+        # Big in-RAM frame buffer (one dict per processed frame — tens of MB).
+        self._frame_store = []
+        # Per-analysis model instances (each processor loads its own set).
+        self._detector = None
+        self._pose     = None
+        self._court    = None
+        self._jersey   = None
+        self._action   = None
+        self._tracker  = None
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            logger.debug("release() GPU cleanup skipped: %s", e)
+        logger.info("VideoProcessor released: models + frame buffer freed (idle baseline)")
+
 
 # ── Factory ───────────────────────────────────────────────────────────────────
 

@@ -646,7 +646,23 @@ class ActionClassifier:
                 logits_batch = self.model(pixel_values=batch).logits  # [N, num_classes]
                 probs_batch  = torch.softmax(logits_batch, dim=-1)    # [N, num_classes]
         except Exception as exc:
-            logger.warning("VideoMAE batched inference error: %s", exc)
+            # The bare `%s` was printing an EMPTY message (str(exc) == "") so the
+            # real cause stayed hidden. Log the exception TYPE + a FULL traceback
+            # on the first occurrence (once, to avoid spamming every inference),
+            # then just type+msg afterwards. This reveals whether it's a shape/
+            # dtype mismatch, a CUDA/cuDNN failure, an OOM, etc.
+            if not getattr(self, "_vmae_err_logged", False):
+                self._vmae_err_logged = True
+                logger.warning(
+                    "VideoMAE inference FAILED (first occurrence) — %s: %r | "
+                    "batch=%s dtype=%s device=%s",
+                    type(exc).__name__, exc,
+                    tuple(batch.shape), batch.dtype, batch.device,
+                    exc_info=True,
+                )
+            else:
+                logger.warning("VideoMAE inference error: %s: %r",
+                               type(exc).__name__, exc)
             return {"actions": [
                 {"track_id": p["track_id"], "action": STAND, "action_id": -1,
                  "confidence": 0.5, "source": "rule_based"}

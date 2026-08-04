@@ -765,12 +765,16 @@ class ActionClassifier:
         std  = np.array(_VMAE_STD,  dtype=np.float32)
         sz   = _INPUT_SIZE
 
-        # Sample frame indices first so we only process _T_VMAE frames
+        # Sample _T_VMAE frame indices. ALWAYS linspace — this matches training
+        # exactly (torch.linspace(0, T-1, NUM_FRAMES)); and when the buffer holds
+        # fewer than _T_VMAE frames (low effective fps), it spreads the repeats
+        # evenly instead of freezing on the last frame (the old n<T branch did
+        # `[n-1]*(T-n)`, which duplicated the final frame and killed the motion).
         n = len(frames)
-        if n >= _T_VMAE:
-            idx = np.linspace(0, n - 1, _T_VMAE, dtype=int)
-        else:
-            idx = list(range(n)) + [n - 1] * (_T_VMAE - n)
+        if n <= 0:
+            out[:] = 0.0
+            return
+        idx = np.linspace(0, n - 1, _T_VMAE).round().astype(int)
 
         for j, fi in enumerate(idx):
             frame = frames[fi]
@@ -779,8 +783,21 @@ class ActionClassifier:
             if crop.size == 0:
                 out[j] = 0.0
                 continue
-            if crop.shape[0] != sz or crop.shape[1] != sz:
-                crop = cv2.resize(crop, (sz, sz), interpolation=cv2.INTER_LINEAR)
+            # Letterbox to sz×sz keeping aspect ratio + BLACK pad — MUST match how
+            # the training clips were built (aug-balance: scale
+            # force_original_aspect_ratio=decrease + pad color=black). Plain resize
+            # STRETCHES the player and opens a train/inference domain gap.
+            ch, cw = crop.shape[:2]
+            if ch != sz or cw != sz:
+                s       = min(sz / cw, sz / ch)
+                nw      = max(1, int(round(cw * s)))
+                nh      = max(1, int(round(ch * s)))
+                resized = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_LINEAR)
+                canvas  = np.zeros((sz, sz, 3), dtype=resized.dtype)   # black pad
+                ox      = (sz - nw) // 2
+                oy      = (sz - nh) // 2
+                canvas[oy:oy + nh, ox:ox + nw] = resized
+                crop = canvas
             # BGR→RGB, uint8→float32, /255, normalize — write directly to out[j]
             rgb = crop[:, :, ::-1].astype(np.float32) * (1.0 / 255.0)
             rgb = (rgb - mean) / std       # [H, W, C]

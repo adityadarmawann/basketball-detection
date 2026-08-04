@@ -801,6 +801,22 @@ class VideoProcessor:
         _eff_fps = max(1, round(self._source_fps / PROCESS_STRIDE))
         self._target_fps = _eff_fps
 
+        # Size the action frame buffer to a fixed WALL-CLOCK window (~1 s) so the
+        # clip the VideoMAE model sees spans the SAME duration as the training
+        # clips (CLIP_DURATION=1.0s). A fixed 16-frame buffer would instead span
+        # 16/eff_fps seconds (~1.3s at 12 eff-fps) → the model would see actions
+        # ~30% slower than in training. _fill_input_slice linspace-samples this
+        # window to the 16 frames the model needs. Env-tunable to match whatever
+        # CLIP_DURATION the model was trained at.
+        _action_win_s = float(os.getenv("ACTION_WINDOW_S", "1.0"))
+        _action_buf   = max(8, round(_action_win_s * _eff_fps))
+        if _action_buf != self._frame_buffer.maxlen:
+            self._frame_buffer = deque(self._frame_buffer, maxlen=_action_buf)
+            logger.info(
+                "Action frame buffer = %d frames (~%.2fs window @ %d eff-fps) to match training clip duration",
+                _action_buf, _action_win_s, _eff_fps,
+            )
+
         # Re-initialise ByteTrack with the actual processed fps so its Kalman filter
         # predicts position correctly. Without this, ByteTrack is calibrated for
         # TARGET_FPS but receives frames slower → velocity model overshoots → IoU

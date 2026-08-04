@@ -196,13 +196,24 @@ class ActionClassifier:
                     self.model = model.to(target).eval()
                     if target.startswith("cuda"):
                         self.model.half()
-                    # torch.compile: fuses ViT ops → ~15–30% faster inference
-                    # Falls back silently on PyTorch < 2.0 or unsupported platforms
-                    try:
-                        self.model = torch.compile(self.model, mode="reduce-overhead")
-                        logger.info("VideoMAE torch.compile() applied (reduce-overhead)")
-                    except Exception as _ce:
-                        logger.debug("torch.compile() skipped: %s", _ce)
+                    # torch.compile with mode="reduce-overhead" (CUDA graphs)
+                    # FAILS at inference with an empty-message AssertionError on our
+                    # DYNAMIC batch — N = number of tracked players changes every
+                    # frame (10, 11, …), but CUDA graphs need a STATIC shape. This
+                    # was the real cause of the ~1792 "VideoMAE batched inference
+                    # error" (mislabelled as a driver/cuDNN issue because str(exc)
+                    # was empty). Disabled by default → the model runs eager and
+                    # works with any batch size. Re-enable to experiment via
+                    # ACTION_TORCH_COMPILE=1 (only safe with a fixed batch or a
+                    # dynamic-shape-safe mode).
+                    if os.getenv("ACTION_TORCH_COMPILE", "0") == "1":
+                        try:
+                            self.model = torch.compile(self.model, mode="reduce-overhead")
+                            logger.info("VideoMAE torch.compile() applied (reduce-overhead)")
+                        except Exception as _ce:
+                            logger.debug("torch.compile() skipped: %s", _ce)
+                    else:
+                        logger.info("VideoMAE torch.compile() OFF (dynamic batch); set ACTION_TORCH_COMPILE=1 to enable")
                     self._vmae_processor = VideoMAEImageProcessor.from_pretrained(
                         base_ckpt or "MCG-NJU/videomae-base-finetuned-kinetics"
                     )

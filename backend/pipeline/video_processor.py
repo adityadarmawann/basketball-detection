@@ -808,8 +808,14 @@ class VideoProcessor:
         # ~30% slower than in training. _fill_input_slice linspace-samples this
         # window to the 16 frames the model needs. Env-tunable to match whatever
         # CLIP_DURATION the model was trained at.
+        # FLOOR at FRAME_BUFFER_SIZE (=16 = MODEL_BUFFER_MIN): the VideoMAE model
+        # only runs when the buffer holds ≥16 frames, so the window must never be
+        # sized below that or classify() silently stays in rule-based mode forever.
+        # At low eff-fps (e.g. 15) this gives a ~1.07s window (still within the
+        # training speed-aug range); at higher eff-fps it grows to hold ACTION_WINDOW_S
+        # seconds of frames and linspace-samples 16 from them (matches training).
         _action_win_s = float(os.getenv("ACTION_WINDOW_S", "1.0"))
-        _action_buf   = max(8, round(_action_win_s * _eff_fps))
+        _action_buf   = max(FRAME_BUFFER_SIZE, round(_action_win_s * _eff_fps))
         if _action_buf != self._frame_buffer.maxlen:
             self._frame_buffer = deque(self._frame_buffer, maxlen=_action_buf)
             logger.info(

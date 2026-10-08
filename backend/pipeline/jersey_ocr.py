@@ -46,7 +46,14 @@ except Exception as _e:                                   # pragma: no cover
 
 MODELS_DIR            = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME         = "jersey_no.pt"
-DIGIT_MODEL_FILENAME   = "best-detect-num-v2.pt"
+# Berkas model digit. Dibuat bisa diatur lewat env supaya model hasil latihan
+# baru bisa dicoba TANPA menimpa yang lama, sesuai kebiasaan saklar di proyek ini.
+#   DIGIT_MODEL=best-detect-digit-v3.pt
+# Perhatikan: pemuat di bawah LEBIH MEMILIH berkas .engine dengan nama dasar yang
+# sama kalau ada. Jadi mengganti .pt saja sambil membiarkan .engine lama akan
+# membuat model lama tetap terpakai tanpa pesan apa pun. Memakai nama berkas
+# yang berbeda menghindari jebakan itu sepenuhnya.
+DIGIT_MODEL_FILENAME   = os.getenv("DIGIT_MODEL", "best-detect-num-v2.pt")
 DIGIT_CONF_THRESHOLD   = 0.12   # minimum per-digit detection confidence. LOW on purpose:
                                  # the digit model detects only ONE digit in ~60% of crops
                                  # at 0.20, so 2-digit jerseys (11,16,88) read as a single
@@ -683,6 +690,19 @@ class JerseyOCR:
             if target.startswith("cuda") and engine_path.exists():
                 load_path = engine_path
                 logger.info("TensorRT engine found — loading %s", engine_path.name)
+                # Jaring pengaman: .engine yang lebih TUA dari .pt berarti bobot
+                # baru sudah ditaruh tapi mesinnya belum diekspor ulang, sehingga
+                # model LAMA yang dipakai tanpa ada tanda apa pun.
+                try:
+                    if engine_path.stat().st_mtime < path.stat().st_mtime:
+                        logger.error(
+                            "%s LEBIH TUA dari %s. Mesin TensorRT lama yang akan "
+                            "dipakai, bukan bobot barumu. Ekspor ulang mesinnya, "
+                            "atau hapus berkas .engine itu, atau pakai nama berkas "
+                            "lain lewat DIGIT_MODEL.",
+                            engine_path.name, path.name)
+                except OSError:
+                    pass
             else:
                 load_path = path
 

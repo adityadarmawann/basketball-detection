@@ -16,6 +16,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Modul metode Roboflow dimuat lunak: kalau scipy/numpy tidak ada, pipeline
+# tetap jalan dengan perhitungan lama.
+try:
+    from . import roboflow_methods as _rfm
+    import numpy as _np
+except Exception as _e:                                   # pragma: no cover
+    _rfm = None
+    _np = None
+    logger.info("roboflow_methods tidak tersedia (%s); PATH_CLEAN_METHOD dipaksa none", _e)
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 FPS_DEFAULT     = 30
@@ -26,6 +36,34 @@ MAX_SPEED_KMH   = 36.0       # hard cap — above this is a tracking glitch (hum
 MAX_GAP_MS      = 500        # skip speed sample if gap since last position > this (occlusion/re-id)
 DIR_CHANGE_DEG  = 45.0       # degrees threshold for direction-change count
 MAX_POS_HISTORY = 2000       # position samples kept per player
+
+# ── Pembersihan jalur (saklar) ────────────────────────────────────────────────
+# PATH_CLEAN_METHOD memilih cara jarak dan kecepatan dihitung:
+#   "none"     (bawaan) = akumulasi per frame seperti semula, perilaku lama utuh
+#   "roboflow" = jalur dibersihkan dulu (MAD buang lonjakan, interpolasi celah,
+#                Savitzky-Golay haluskan) lalu jarak diukur dari jalur bersih.
+#                Pada uji internal galat jarak turun dari 533% ke 2,2% dan
+#                percepatan median dari 103 ke 15,2 m/s squared.
+# Perhitungan lama TETAP jalan di balik layar, jadi dua duanya bisa dibandingkan
+# lewat get_live_stats tanpa mengulang proses video.
+PATH_CLEAN_METHOD = os.getenv("PATH_CLEAN_METHOD", "none").strip().lower()
+# Panjang potongan jalur yang diproses sekali jalan, dan ekor yang disimpan
+# supaya penghalusan di batas potongan tidak putus.
+PATH_CLEAN_CHUNK   = int(os.getenv("PATH_CLEAN_CHUNK", "450"))
+PATH_CLEAN_OVERLAP = int(os.getenv("PATH_CLEAN_OVERLAP", "30"))
+# Parameter clean_paths. Nilai ini hasil penyetelan di video uji q1 UBAYA UNESA.
+PATH_CLEAN_SIGMA   = float(os.getenv("PATH_CLEAN_SIGMA", "5.0"))
+PATH_CLEAN_WINDOW  = int(os.getenv("PATH_CLEAN_WINDOW", "15"))
+# Pengaman terakhir Roboflow (path_distance max_step): langkah yang lebih
+# panjang dari ini DIABAIKAN, bukan dihaluskan. Alasannya, clean_paths
+# menghaluskan lonjakan tapi TIDAK menghapus perpindahannya: lompatan re-id
+# 4 meter yang diinterpolasi tetap menyumbang 4 meter ke total jarak. Diukur di
+# data nyata q1 UBAYA UNESA, tanpa pengaman ini total jarak justru naik 5,1
+# persen dibanding perhitungan lama.
+# Nilai 0 berarti pengaman dimatikan. Bawaannya dihitung dari MAX_SPEED_KMH
+# supaya batas fisiknya sama dengan jalur lama, hanya saja diterapkan SETELAH
+# jalur dibersihkan, jadi gerakan cepat yang asli tidak ikut terbuang.
+PATH_CLEAN_MAX_STEP = float(os.getenv("PATH_CLEAN_MAX_STEP", "0"))
 
 MPI_WEIGHTS = {
     "power":      0.25,
@@ -109,6 +147,13 @@ class StatsCalculator:
         self._positions:    dict = {}   # track_id → deque of (x, y, ts)
         self._playing_frames: dict = {} # track_id → int
         self._quarter_speeds: dict = {} # track_id → {quarter → list[float]}
+        # Penampung jalur mentah untuk metode roboflow. Isinya titik (x, y) satu
+        # kuartal berjalan; begitu penuh, potongan dibersihkan lalu jaraknya
+        # dikunci ke _clean_dist dan ekornya disimpan untuk potongan berikutnya.
+        self._clean_buf:     dict = {}   # track_id → list[(x, y)]
+        self._clean_dist:    dict = {}   # track_id → meter terkunci
+        self._clean_qdist:   dict = {}   # track_id → {quarter → meter terkunci}
+        self._clean_speeds:  dict = {}   # track_id → deque m/s dari jalur bersih
         self._quarter_dist:   dict = {} # track_id → {quarter → float}
 
         # Jump heights: track_id → list[float px]
@@ -196,12 +241,38 @@ class StatsCalculator:
 
     def reset_quarter(self, quarter: int) -> None:
         """Advance the current quarter (per-quarter state is lazy-initialised)."""
+        prev_q = self.current_quarter
         self.current_quarter = quarter
         # Clear position history so re-used track IDs from ByteTracker reset
         # don't produce a spurious large distance/speed on the first new frame.
+        # Tutup potongan jalur yang masih menggantung, dan bebankan ke prev_q
+        # yaitu kuartal yang baru saja selesai, bukan ke kuartal baru.
+        if self._clean_on:
+            for tid in list(self._clean_buf):
+                self._clean_flush(tid, prev_q)
         self._prev_pos.clear()
         self._smooth_buf.clear()
         logger.info("Quarter %d started", quarter)
+
+    def on_camera_cut(self) -> None:
+        """Sudut kamera berganti drastis: tutup semua potongan jalur.
+
+        Ini BUKAN kosmetik. Saat sudut berganti, homografi dihitung ulang dan
+        posisi lapangan tiap pemain melompat secara tiba tiba, padahal TIDAK ada
+        celah waktu sama sekali. Jadi pemeriksaan celah MAX_GAP_MS di
+        _update_tracking_stats tidak akan menangkapnya, dan lompatan itu akan
+        tercatat sebagai perpindahan asli. Menutup potongan di sini membuat
+        langkah lintas potongan tidak pernah dihitung.
+
+        _prev_pos juga dikosongkan supaya jalur lama tidak menghitung satu
+        langkah raksasa pada frame pertama setelah sudut berganti.
+        """
+        q = self.current_quarter
+        if self._clean_on:
+            for tid in list(self._clean_buf):
+                self._clean_flush(tid, q)
+        self._prev_pos.clear()
+        self._smooth_buf.clear()
 
     def reset_match(self) -> None:
         self.__init__(fps=self.fps, jump_px_to_cm=self.jump_px_to_cm)
@@ -333,6 +404,17 @@ class StatsCalculator:
             self._positions[tid].append((x, y, ts))
             self._playing_frames[tid] += 1
 
+            # Metode roboflow: kumpulkan titik mentah apa adanya. Celah besar
+            # (oklusi / re-id) memutus potongan karena clean_paths menganggap
+            # jarak antar sampel seragam.
+            if self._clean_on:
+                prev = self._prev_pos.get(tid)
+                if prev is not None and not (0 < ts - prev[2] <= MAX_GAP_MS):
+                    self._clean_flush(tid, q)
+                self._clean_buf[tid].append((x, y))
+                if len(self._clean_buf[tid]) >= PATH_CLEAN_CHUNK:
+                    self._clean_commit(tid, q)
+
             if tid in self._prev_pos:
                 px, py, pts_ms = self._prev_pos[tid]
                 dt_ms = ts - pts_ms
@@ -361,6 +443,100 @@ class StatsCalculator:
 
             self._prev_pos[tid] = (x, y, ts)
 
+    # ── Pembersihan jalur gaya roboflow (aktif lewat PATH_CLEAN_METHOD) ───────
+
+    @property
+    def _clean_on(self) -> bool:
+        """True hanya kalau saklar diminta DAN modulnya benar benar termuat."""
+        return PATH_CLEAN_METHOD == "roboflow" and _rfm is not None
+
+    def _clean_run(self, pts: list) -> "Optional[object]":
+        """Jalankan clean_paths pada satu potongan. Mengembalikan array (N, 2)
+        hasil bersih, atau None kalau titiknya terlalu sedikit."""
+        if _rfm is None or _np is None or len(pts) < 3:
+            return None
+        # clean_paths menunggu bentuk (T, P, 2): T frame, P pemain. Di sini satu
+        # track saja, jadi P = 1.
+        xy = _np.asarray(pts, dtype=_np.float64).reshape(-1, 1, 2)
+        try:
+            cleaned, _edited = _rfm.clean_paths(
+                xy,
+                jump_sigma=PATH_CLEAN_SIGMA,
+                smooth_window=PATH_CLEAN_WINDOW,
+            )
+        except Exception as e:                            # pragma: no cover
+            logger.warning("clean_paths gagal (%s); potongan dipakai mentah", e)
+            return None
+        return cleaned[:, 0, :]
+
+    def _clean_commit(self, tid: int, quarter: int) -> None:
+        """Potongan penuh: kunci jaraknya, sisakan ekor PATH_CLEAN_OVERLAP titik
+        supaya penghalusan di sambungan tidak terputus."""
+        buf = self._clean_buf.get(tid) or []
+        keep = max(2, PATH_CLEAN_OVERLAP)
+        if len(buf) <= keep + 2:
+            return
+        cut = len(buf) - keep                 # langkah terakhir yang dikunci: cut-1 → cut
+        self._clean_add(tid, quarter, buf, upto=cut + 1)
+        self._clean_buf[tid] = buf[cut:]
+
+    def _clean_flush(self, tid: int, quarter: int) -> None:
+        """Tutup potongan terakhir (celah tracking / ganti kuartal / akhir laga)."""
+        buf = self._clean_buf.get(tid) or []
+        if len(buf) >= 2:
+            self._clean_add(tid, quarter, buf, upto=len(buf))
+        self._clean_buf[tid] = []
+
+    def _clean_add(self, tid: int, quarter: int, buf: list, upto: int) -> None:
+        """Bersihkan buf, lalu tambahkan jarak langkah 0..upto-1 ke penampung
+        terkunci. Kecepatan per langkah ikut dicatat untuk MPI."""
+        seg = self._clean_segment(buf, upto)
+        if seg is None:
+            return
+        dist, speeds = seg
+        self._clean_dist[tid] = self._clean_dist.get(tid, 0.0) + dist
+        self._clean_qdist.setdefault(tid, defaultdict(float))[quarter] += dist
+        dq = self._clean_speeds.setdefault(tid, deque(maxlen=MAX_POS_HISTORY))
+        dq.extend(speeds)
+
+    def _clean_segment(self, buf: list, upto: int):
+        """(jarak_meter, list kecepatan m/s) dari potongan yang sudah dibersihkan.
+        Dipakai bersama oleh jalur commit dan jalur pratinjau."""
+        cleaned = self._clean_run(buf)
+        if cleaned is None:
+            return None
+        part = cleaned[:upto]
+        if len(part) < 2:
+            return None
+        steps = _np.linalg.norm(_np.diff(part, axis=0), axis=1)
+        steps = steps[_np.isfinite(steps)]
+        if steps.size == 0:
+            return None
+        # Pengaman max_step gaya Roboflow: langkah yang mustahil secara fisik
+        # dibuang, bukan dihaluskan.
+        batas = (PATH_CLEAN_MAX_STEP if PATH_CLEAN_MAX_STEP > 0
+                 else MAX_SPEED_KMH / 3.6 / max(float(self.fps), 1e-6))
+        steps = steps[steps <= batas]
+        if steps.size == 0:
+            return None
+        dist = float(steps.sum())
+        spd = steps * float(self.fps)          # satu langkah = satu frame
+        return dist, [float(v) for v in spd]
+
+    def _clean_readout(self, tid: int):
+        """Jarak dan kecepatan versi bersih untuk SATU track, tanpa mengubah
+        state. Yang sudah terkunci ditambah pratinjau isi penampung sekarang,
+        jadi angka live tidak pernah dihitung dua kali."""
+        dist = self._clean_dist.get(tid, 0.0)
+        speeds = list(self._clean_speeds.get(tid, deque()))
+        buf = self._clean_buf.get(tid) or []
+        if len(buf) >= 3:
+            seg = self._clean_segment(buf, len(buf))
+            if seg is not None:
+                dist += seg[0]
+                speeds.extend(seg[1])
+        return dist, speeds
+
     def _init_tracking_buffers(self, tid: int) -> None:
         if tid not in self._smooth_buf:
             self._smooth_buf[tid]   = deque(maxlen=SMOOTH_WINDOW)
@@ -371,6 +547,10 @@ class StatsCalculator:
             self._playing_frames[tid]  = 0
             self._quarter_speeds[tid]  = defaultdict(list)
             self._quarter_dist[tid]    = defaultdict(float)
+            self._clean_buf[tid]       = []
+            self._clean_dist[tid]      = 0.0
+            self._clean_qdist[tid]     = defaultdict(float)
+            self._clean_speeds[tid]    = deque(maxlen=MAX_POS_HISTORY)
 
     def _update_pose_stats(self, pose_snapshot: dict) -> None:
         for pose in pose_snapshot.get("poses", []):
@@ -389,6 +569,17 @@ class StatsCalculator:
         """Raw (un-normalised) MPI metrics for one player."""
         speeds = list(self._all_speeds.get(tid, deque()))
         dist   = self._total_dist.get(tid, 0.0)
+        accel  = self._calc_acceleration(tid)
+
+        # Saklar roboflow: ambil jarak dan kecepatan dari jalur yang sudah
+        # dibersihkan. Penampung lama tetap terisi, jadi bisa dibandingkan
+        # kapan saja dengan mematikan saklar.
+        if self._clean_on:
+            c_dist, c_ms = self._clean_readout(tid)
+            if c_ms:
+                dist   = c_dist
+                speeds = [v * 3.6 for v in c_ms]
+                accel  = self._accel_from_ms(c_ms)
 
         avg_spd = (sum(speeds) / len(speeds)) if speeds else 0.0
         max_spd = max(speeds, default=0.0)
@@ -404,7 +595,6 @@ class StatsCalculator:
 
         endurance_raw = (avg_spd / max_spd * 100.0) if max_spd > 0 else 0.0
         fatigue       = self._calc_fatigue(tid)
-        accel         = self._calc_acceleration(tid)
 
         return {
             "distance_m":       round(dist, 3),
@@ -624,7 +814,11 @@ class StatsCalculator:
 
     def _calc_acceleration(self, tid: int) -> float:
         """Mean absolute acceleration in m/s² from raw speed history."""
-        buf = list(self._speed_ms_buf.get(tid, deque()))
+        return self._accel_from_ms(list(self._speed_ms_buf.get(tid, deque())))
+
+    def _accel_from_ms(self, buf: list) -> float:
+        """Percepatan rata rata dari satu deret kecepatan m/s. Dipisah supaya
+        jalur bersih bisa memakai rumus yang sama persis dengan jalur lama."""
         if len(buf) < 2:
             return 0.0
         dt     = 1.0 / self.fps

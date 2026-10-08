@@ -32,6 +32,18 @@ except ImportError:      # standalone/script import
 
 logger = logging.getLogger(__name__)
 
+try:
+    from .roboflow_methods import ConsecutiveValueTracker as _ConsecTracker
+except Exception as _e:                                   # pragma: no cover
+    _ConsecTracker = None
+    logger.info("ConsecutiveValueTracker tidak tersedia (%s)", _e)
+
+try:
+    from .team_siglip import TeamClassifierSigLIP as _SigLIPTeam
+except Exception as _e:                                   # pragma: no cover
+    _SigLIPTeam = None
+    logger.info("TeamClassifierSigLIP tidak tersedia (%s)", _e)
+
 MODELS_DIR            = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME         = "jersey_no.pt"
 DIGIT_MODEL_FILENAME   = "best-detect-num-v2.pt"
@@ -250,6 +262,49 @@ BLUR_THRESHOLD    = 0.0   # legacy hard-skip disabled — replaced by soft blur
 # still letting genuine reads accumulate across a fast play.
 MIN_VOTE_WEIGHT    = 0.05  # floor per weighted vote (keeps a read from vanishing)
 MIN_CONFIRM_WEIGHT = 0.6   # leading candidate's summed weight required to confirm
+
+# ── Validator nomor punggung (saklar) ────────────────────────────────────────
+# NUMBER_VALIDATOR:
+#   "weighted"    (bawaan) = pemilihan berbobot yang sudah ada: bobot keyakinan
+#                  dikali kualitas ketajaman, histeresis, flush saat zoom, dan
+#                  koreksi kalau DISAGREE_N bacaan berturut turut tidak setuju.
+#   "consecutive" = cara Roboflow: nomor dikunci setelah NUMBER_CONSECUTIVE_N
+#                  bacaan BERTURUT TURUT sama, lalu tidak pernah berubah lagi.
+#                  Lebih presisi, lebih lambat terkonfirmasi, dan tidak bisa
+#                  pulih sendiri kalau kuncian pertamanya salah.
+# Dua duanya diisi serentak, jadi perbandingannya bisa dilihat tanpa memproses
+# ulang video (lihat validator_debug()).
+NUMBER_VALIDATOR   = os.getenv("NUMBER_VALIDATOR", "weighted").strip().lower()
+NUMBER_CONSECUTIVE_N = int(os.getenv("NUMBER_CONSECUTIVE_N", "3"))
+# Lepas kuncian nomor saat sudut kamera berganti drastis.
+# Alasannya penting: validator consecutive dirancang Roboflow untuk MENGUNCI
+# sekali lalu tidak pernah berubah, dan itu masuk akal pada rekaman satu kamera
+# statis. Di campus league sudut kamera berubah tiap beberapa detik, dan saat
+# itu terjadi track_id biasanya diacak ulang, sehingga nomor yang terkunci bisa
+# menempel ke orang yang berbeda sampai akhir pertandingan tanpa pernah
+# terkoreksi. Jadi kuncian dilepas setiap ganti sudut, dan nomor dibaca ulang.
+# Setel 0 kalau kameranya memang statis dan ingin perilaku Roboflow asli.
+NUMBER_UNLOCK_ON_CUT = os.getenv("NUMBER_UNLOCK_ON_CUT", "1") == "1"
+
+# ── Metode klasifikasi tim (saklar) ──────────────────────────────────────────
+# TEAM_METHOD:
+#   "lab"    (bawaan) = proyeksi sumbu LAB yang sudah terukur di campus league,
+#            biayanya mikrodetik per potongan.
+#   "siglip" = sematan SigLIP lalu KMeans dua kelompok, cara roboflow/sports.
+#            Lebih tahan terhadap seragam bermotif dan cahaya aneh, TAPI di CPU
+#            biayanya sekitar 83 ms per potongan, jadi tidak mungkin dipakai di
+#            setiap frame untuk sepuluh pemain. Karena itu SigLIP dijalankan
+#            berselang (TEAM_SIGLIP_EVERY) dan sisanya tetap LAB; dua duanya
+#            masuk ke kotak suara yang sama, jadi hasilnya tidak berkelahi.
+#   Label A/B TIDAK ditentukan KMeans, tapi diwarisi dari suara LAB saat
+#   pembibitan, supaya A dan B tidak pernah tertukar di tengah pertandingan.
+TEAM_METHOD        = os.getenv("TEAM_METHOD", "lab").strip().lower()
+TEAM_SIGLIP_EVERY  = int(os.getenv("TEAM_SIGLIP_EVERY", "5"))
+TEAM_SIGLIP_SEED   = int(os.getenv("TEAM_SIGLIP_SEED", "40"))   # potongan pembibitan
+# Selisih jarak kelompok yang dianggap meyakinkan. Sejajar dengan peran
+# TEAM_CONFIDENT_MARGIN di jalur LAB: di bawah ini suaranya tetap dihitung tapi
+# tidak boleh mengunci atau memecah identitas track.
+SIGLIP_CONFIDENT_MARGIN = float(os.getenv("SIGLIP_CONFIDENT_MARGIN", "0.25"))
                            # (with VOTE_THRESHOLD reads also required); ~two 0.3 reads
 # Blur → vote-weight mapping (Laplacian-variance sharpness; see _blur_score):
 BLUR_SHARP_FULL    = 200.0 # >= this = fully sharp, weight 1.0
@@ -461,6 +516,11 @@ class JerseyOCR:
         # otherwise stateless, so without this a challenger only has to tie to take over.
         # Dropped by both flushes, so a wrong incumbent is still correctable.
         self._confirmed_num: dict[int, int] = {}
+        # Validator gaya Roboflow: kunci setelah N bacaan berturut turut sama.
+        # Selalu diisi kalau modulnya ada supaya bisa dibandingkan; yang dipakai
+        # untuk keluaran ditentukan NUMBER_VALIDATOR.
+        self._consec = (_ConsecTracker(n_consecutive=NUMBER_CONSECUTIVE_N)
+                        if _ConsecTracker is not None else None)
 
         # Team classification
         # _track_team: current best team per track — updated every frame, NOT a permanent lock.
@@ -496,6 +556,13 @@ class JerseyOCR:
                            else np.array(_LAB_SCALE_DEFAULT, dtype=np.float64))
         self._lab_samples: list = []      # LAB medians collected until scale freezes
         self._team_axis = None            # cache: (fingerprint, As, axis, scale, tB, thr, cmargin)
+        # Jalur SigLIP (aktif lewat TEAM_METHOD=siglip). Dibuat hanya kalau
+        # diminta, jadi jalur LAB sama sekali tidak terbebani.
+        self._siglip = (_SigLIPTeam()
+                        if TEAM_METHOD == "siglip" and _SigLIPTeam is not None
+                        else None)
+        self._siglip_seed:   list = []     # [(potongan, label LAB)] untuk pembibitan
+        self._siglip_calls:  int  = 0      # pencacah untuk penjadwalan berselang
 
         # Uniqueness guard: (team, jersey_number) → canonical track_id.
         # When two live tracks both read the same (team, number), only the first
@@ -817,7 +884,29 @@ class JerseyOCR:
             # background) or the heuristic chest strip (digits NOT centred). Only the former
             # may have the DIGIT_CENTRE_FRAC filter applied — see _parse_digit_result.
             crop_centred = False
-            if _frame_num_boxes:
+
+            # Prioritas 0: kotak nomor yang SUDAH diberikan detektor RF-DETR dan
+            # sudah dicocokkan ke pemain ini dengan Mask IoS di
+            # detector_rfdetr.attach_detection_classes. Kalau ada, tidak perlu
+            # mencari cocokan apa pun lagi. Kunci ini hanya muncul kalau
+            # DETECTOR_METHOD=rfdetr, jadi jalur YOLO tidak terpengaruh sama
+            # sekali. Efek sampingnya: dengan RF-DETR, model jersey_no.pt tidak
+            # lagi diperlukan untuk melokalisasi nomor.
+            _nb = player.get("number_bbox")
+            if _nb:
+                nx1f, ny1f, nx2f, ny2f = [int(v) for v in _nb]
+                bw, bh = nx2f - nx1f, ny2f - ny1f
+                px, py = int(bw * NUMBER_CROP_PAD), int(bh * NUMBER_CROP_PAD)
+                nc = frame[
+                    max(0, ny1f - py):min(h_frame, ny2f + py),
+                    max(0, nx1f - px):min(w_frame, nx2f + px),
+                ]
+                if nc.size > 0:
+                    number_crop = nc
+                    crop_centred = True     # dibangun di sekitar kotak nomor
+                    logger.debug("track %d: kotak nomor dari RF-DETR", track_id)
+
+            if number_crop is None and _frame_num_boxes:
                 best_match, best_ratio = None, 0.0
                 for (nx1f, ny1f, nx2f, ny2f, _nconf) in _frame_num_boxes:
                     ix1 = max(x1c, nx1f); iy1 = max(y1c, ny1f)
@@ -1419,6 +1508,11 @@ class JerseyOCR:
                 self._votes[track_id] = deque(maxlen=MAX_VOTE_HISTORY)
             self._votes[track_id].append((candidate, max(float(weight), MIN_VOTE_WEIGHT)))
 
+        # Validator berturut turut ikut diberi SEMUA bacaan, termasuk None, karena
+        # bacaan kosong memang memutus rentetan menurut cara Roboflow.
+        if self._consec is not None:
+            self._consec.update([track_id], [candidate])
+
         return self._current_confirmed(track_id)
 
     def _resolve_votes(
@@ -1506,7 +1600,32 @@ class JerseyOCR:
 
         return confirmed, confidence
 
+    def _consec_confirmed(self, track_id: int) -> Optional[int]:
+        """Nomor yang sudah dikunci validator berturut turut, atau None."""
+        if self._consec is None:
+            return None
+        val = self._consec.get_validated(track_id)
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+
+    def validator_debug(self, track_id: int) -> dict:
+        """Dua hasil validator berdampingan, untuk membandingkan tanpa proses ulang."""
+        w_num, w_conf = (self._resolve_votes(
+            self._votes[track_id], self._confirmed_num.get(track_id))
+            if self._votes.get(track_id) else (None, 0.0))
+        return {
+            "aktif":       NUMBER_VALIDATOR,
+            "weighted":    {"nomor": w_num, "keyakinan": round(w_conf, 3)},
+            "consecutive": {"nomor": self._consec_confirmed(track_id)},
+        }
+
     def _current_confirmed(self, track_id: int) -> Optional[int]:
+        if NUMBER_VALIDATOR == "consecutive" and self._consec is not None:
+            return self._consec_confirmed(track_id)
         if track_id not in self._votes or not self._votes[track_id]:
             return None
         confirmed, _ = self._resolve_votes(
@@ -1515,6 +1634,8 @@ class JerseyOCR:
 
     def _vote_confidence(self, track_id: int) -> float:
         """Weight share of the leading candidate [0.0, 1.0]."""
+        if NUMBER_VALIDATOR == "consecutive" and self._consec is not None:
+            return 1.0 if self._consec_confirmed(track_id) is not None else 0.0
         if track_id not in self._votes or not self._votes[track_id]:
             return 0.0
         _, confidence = self._resolve_votes(
@@ -1523,6 +1644,10 @@ class JerseyOCR:
 
     def _vote_status(self, track_id: int) -> tuple[Optional[int], float]:
         """Return (confirmed_number, confidence) using weighted vote resolution."""
+        if NUMBER_VALIDATOR == "consecutive" and self._consec is not None:
+            num = self._consec_confirmed(track_id)
+            # Sudah terkunci berarti pasti menurut cara ini, jadi keyakinannya 1.
+            return num, (1.0 if num is not None else 0.0)
         if track_id not in self._votes or not self._votes[track_id]:
             return None, 0.0
         return self._resolve_votes(
@@ -1540,6 +1665,8 @@ class JerseyOCR:
         """
         self._votes.clear()
         self._confirmed_num.clear()
+        if self._consec is not None:
+            self._consec.reset_all()
         self._track_team.clear()
         self._track_team_votes.clear()
         self._track_color_dist.clear()
@@ -1558,9 +1685,13 @@ class JerseyOCR:
         if track_id is None:
             self._votes.clear()
             self._confirmed_num.clear()
+            if self._consec is not None:
+                self._consec.reset_all()
         else:
             self._votes.pop(track_id, None)
             self._confirmed_num.pop(track_id, None)
+            if self._consec is not None:
+                self._consec.reset_id(track_id)
 
     # ------------------------------------------------------------------
     # Team classification (K-Means HSV)
@@ -1709,6 +1840,14 @@ class JerseyOCR:
         self._track_team_votes[track_id] = deque([(new_team, 1.0)], maxlen=self._TEAM_VOTE_HISTORY)
         self._track_color_dist.pop(track_id, None)   # new person → re-judge not-a-team from scratch
         self._team_rejected.discard(track_id)
+        # WAJIB untuk NUMBER_VALIDATOR=consecutive. Validator itu MENGUNCI nomor
+        # dan tidak pernah mengubahnya lagi, sesuai rancangan Roboflow. Tapi di
+        # sini sudah terbukti orang di bawah track_id ini BERGANTI, jadi kuncian
+        # lamanya milik orang lain. Tanpa pelepasan ini, pemain baru akan
+        # memakai nomor pemain sebelumnya sampai akhir pertandingan, dan itu
+        # tidak akan pernah terkoreksi sendiri.
+        if self._consec is not None:
+            self._consec.reset_id(track_id)
         logger.info("track %d: identity SPLIT — team→%s (player changed under id)",
                     track_id, new_team)
 
@@ -1840,6 +1979,59 @@ class JerseyOCR:
         return self._team_axis
 
     def _team_vote_confident(self, player_crop: np.ndarray):
+        """Pemilah metode tim. Isi perhitungannya ada di _lab_vote_confident
+        (metode bawaan) dan _siglip_vote_confident.
+
+        Keluarannya selalu bentuk yang sama, (vote, confident, conf), jadi
+        seluruh logika kunci tim, pemisahan identitas, dan penolakan wasit di
+        atasnya tidak perlu tahu metode mana yang sedang dipakai.
+        """
+        if self._siglip is not None:
+            return self._siglip_vote_confident(player_crop)
+        return self._lab_vote_confident(player_crop)
+
+    def _siglip_vote_confident(self, player_crop: np.ndarray):
+        """Jalur SigLIP, dengan pembibitan label dari LAB dan penjadwalan berselang.
+
+        Tahap 1 (pembibitan): selama pengelompok belum terlatih, suara tetap dari
+        LAB, dan potongan yang keyakinannya tinggi dikumpulkan bersama labelnya.
+        Begitu TEAM_SIGLIP_SEED potongan terkumpul dan dua tim sama sama terwakili,
+        pengelompok dilatih sekali.
+
+        Tahap 2 (jalan): SigLIP dipanggil setiap TEAM_SIGLIP_EVERY potongan saja,
+        karena di CPU satu potongan sekitar 83 ms. Panggilan di antaranya dilayani
+        LAB. Keduanya mengisi kotak suara yang sama.
+        """
+        lab_vote, lab_ok, lab_conf = self._lab_vote_confident(player_crop)
+
+        if not self._siglip.siap:
+            if lab_vote is not None and lab_ok and player_crop is not None:
+                th, tw = player_crop.shape[:2]
+                chest = player_crop[int(th * 0.20):int(th * 0.50),
+                                    int(tw * 0.15):int(tw * 0.85)]
+                if chest.size > 0 and len(self._siglip_seed) < TEAM_SIGLIP_SEED:
+                    self._siglip_seed.append((chest.copy(), lab_vote))
+            if len(self._siglip_seed) >= TEAM_SIGLIP_SEED:
+                labels = [l for _, l in self._siglip_seed]
+                # Perlu dua tim terwakili, kalau tidak KMeans akan memecah satu tim
+                # jadi dua lalu salah menamai.
+                if labels.count("A") >= 5 and labels.count("B") >= 5:
+                    if not self._siglip.fit([c for c, _ in self._siglip_seed], labels):
+                        self._siglip_seed = self._siglip_seed[len(self._siglip_seed) // 2:]
+                else:
+                    self._siglip_seed = self._siglip_seed[TEAM_SIGLIP_SEED // 2:]
+            return lab_vote, lab_ok, lab_conf
+
+        self._siglip_calls += 1
+        if TEAM_SIGLIP_EVERY > 1 and (self._siglip_calls % TEAM_SIGLIP_EVERY) != 0:
+            return lab_vote, lab_ok, lab_conf
+
+        vote, conf = self._siglip.predict_one_conf(player_crop)
+        if vote is None:
+            return lab_vote, lab_ok, lab_conf
+        return vote, (conf >= SIGLIP_CONFIDENT_MARGIN), conf
+
+    def _lab_vote_confident(self, player_crop: np.ndarray):
         """Return (vote, confident, conf) for one crop, or (None, False, 0.0).
 
         `conf` ∈ [0,1] is the CONTINUOUS decision margin (|t - threshold| / margin,
@@ -1893,6 +2085,47 @@ class JerseyOCR:
         conf = (min(1.0, margin / TEAM_CONFIDENT_MARGIN)
                 if TEAM_CONFIDENT_MARGIN > 1e-6 else 1.0)
         return ("A" if da <= db else "B"), (margin >= TEAM_CONFIDENT_MARGIN), conf
+
+    def on_camera_cut(self) -> None:
+        """Sudut kamera berganti drastis: segarkan kuncian identitas.
+
+        Yang DILEPAS:
+          - kuncian nomor validator consecutive, karena track_id kemungkinan
+            besar diacak ulang sehingga kuncian lama bisa salah orang
+          - riwayat bacaan terakhir, supaya koreksi DISAGREE_N tidak memakai
+            bacaan dari sudut kamera yang sudah tidak ada
+          - keyakinan bacaan terbaik, supaya pembacaan dari sudut baru yang
+            lebih jelas tidak kalah oleh rekor dari sudut lama
+
+        Yang TIDAK dilepas, dan ini disengaja:
+          - warna tim, karena seragam tidak berubah saat kamera berpindah
+          - suara nomor berbobot, karena jalur weighted sudah punya mekanisme
+            koreksi sendiri lewat histeresis dan flush, jadi membuangnya hanya
+            akan memperlambat konfirmasi tanpa menambah ketepatan
+        """
+        if not NUMBER_UNLOCK_ON_CUT:
+            return
+        n = 0
+        if self._consec is not None:
+            n = len(self._consec.validated_dict())
+            self._consec.reset_all()
+
+        # DIUKUR: mengosongkan dua penampung di bawah ini pada jalur weighted
+        # MENGUBAH perilaku lama. Pada 300 frame video uji, bacaan nomor turun
+        # dari 736 ke 612 dan nomor unik dari 20 ke 19, padahal semua saklar
+        # mati. Sebabnya jalur weighted memakai _best_read_conf untuk mekanisme
+        # peningkatan keyakinan dan _recent_reads untuk koreksi DISAGREE_N, dan
+        # keduanya memang DIRANCANG bertahan melewati perpindahan kamera.
+        # Jadi pengosongan hanya berlaku untuk jalur consecutive, yang memang
+        # tidak punya mekanisme koreksi sendiri. Janji "bawaan sama dengan
+        # perilaku lama" harus tetap benar.
+        if NUMBER_VALIDATOR == "consecutive":
+            self._recent_reads.clear()
+            self._best_read_conf.clear()
+
+        if n:
+            logger.info("Ganti sudut kamera: %d kuncian nomor dilepas, "
+                        "nomor akan dibaca ulang", n)
 
     def is_not_team(self, track_id: int) -> bool:
         """True when this track has enough colour evidence that it belongs to NEITHER
@@ -1978,6 +2211,11 @@ class JerseyOCR:
         self._team_rejected.clear()
         self._team_lock.clear()          # colors recomputed → invalidate locks (fix C)
         self._team_disagree.clear()
+        # Jangkar LAB berubah, sedangkan nama A/B SigLIP diwarisi dari suara LAB.
+        # Bibit ulang supaya penamaannya tidak terbalik.
+        if self._siglip is not None:
+            self._siglip.reset()
+            self._siglip_seed.clear()
 
         logger.info(
             "Team colors calibrated (%d players, clusters %d+%d): A=%s  B=%s",
@@ -1999,6 +2237,11 @@ class JerseyOCR:
         self._team_rejected.clear()
         self._team_lock.clear()          # anchor changed → invalidate locks (fix C)
         self._team_disagree.clear()
+        # Jangkar LAB berubah, sedangkan nama A/B SigLIP diwarisi dari suara LAB.
+        # Bibit ulang supaya penamaannya tidak terbalik.
+        if self._siglip is not None:
+            self._siglip.reset()
+            self._siglip_seed.clear()
 
     def inherit_team(self, new_tid: int, old_tid: int) -> None:
         """Carry team AND accumulated OCR votes from old_tid to new_tid.
@@ -2032,6 +2275,12 @@ class JerseyOCR:
         if old_tid in self._team_lock:
             self._team_lock[new_tid] = self._team_lock[old_tid]
         self._team_disagree.pop(new_tid, None)
+
+        # Kuncian validator berturut turut ikut pindah. Ini tambahan kami di luar
+        # Roboflow: di sana track_id tidak pernah pecah sebanyak ini, jadi tanpa
+        # transfer kuncian sebuah nomor bisa hilang setiap kamera berpindah.
+        if self._consec is not None:
+            self._consec.transfer(old_tid, new_tid)
 
         # ── Fix #2: pool OCR number votes across the fragment ────────────────
         old_votes = self._votes.get(old_tid)

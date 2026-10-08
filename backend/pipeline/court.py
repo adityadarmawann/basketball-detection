@@ -15,6 +15,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+try:
+    from .roboflow_methods import KeyPointsSmoother as _KPSmoother
+except Exception as _e:                                   # pragma: no cover
+    _KPSmoother = None
+    logger.info("KeyPointsSmoother tidak tersedia (%s)", _e)
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -138,7 +144,42 @@ HIGH_CONF_LABELS = {1, 2, 10, 25, 34, 35}
 H_SKIP_LABELS = {40}
 
 MIN_KEYPOINTS    = 4      # minimum untuk cv2.findHomography (OpenCV wajib ≥4 titik)
+
+# ── Penghalusan keypoint sebelum homografi (saklar) ──────────────────────────
+# KEYPOINT_SMOOTH_METHOD:
+#   "none"     (bawaan) = keypoint dipakai apa adanya, lalu matriks H dihaluskan
+#                EMA seperti semula.
+#   "roboflow" = keypoint dirata rata berjalan DULU (yang keyakinannya rendah
+#                jadi NaN, bukan nol, supaya tidak menarik rata rata ke titik
+#                asal), baru RANSAC. Penghalusan EMA pada H tetap jalan, jadi
+#                dua lapis. Cocok saat kamera statis; kalau kamera sering
+#                berpindah cepat, naikkan ambang atau matikan.
+KEYPOINT_SMOOTH_METHOD = os.getenv("KEYPOINT_SMOOTH_METHOD", "none").strip().lower()
+KEYPOINT_SMOOTH_LEN    = int(os.getenv("KEYPOINT_SMOOTH_LEN", "3"))
 CAMERA_MOVE_PX   = 20.0  # threshold deteksi kamera bergerak
+# Ambang PERPINDAHAN DRASTIS, yaitu ganti sudut atau potongan kamera, bukan
+# panning halus. Di rekaman campus league sudut kamera sering berubah tiap
+# beberapa detik, dan saat itu terjadi homografi lama langsung tidak sah DAN
+# track_id biasanya diacak ulang. Jadi kejadian ini perlu sinyal sendiri yang
+# terpisah dari CAMERA_MOVE_PX, supaya hilir (kuncian nomor punggung dan
+# penampung jarak) bisa menyegarkan diri dengan cepat.
+#
+# DIUKUR DI REKAMAN NYATA, q1 UBAYA UNESA 60 detik, 279 pengukuran
+# (eksperimen/05_ukur_ganti_sudut.py). Sebaran geser piksel rata rata:
+#     persentil 50 :  16,5 px      persentil 95 :  164,0 px
+#     persentil 75 :  33,8 px      persentil 99 :  408,8 px
+#     persentil 90 :  79,2 px      maksimum     :  584,9 px
+# Dengan ambang 120 px, ganti sudut terdeteksi 20 kali dalam 60 detik, yaitu
+# sekali per 3,0 detik. Itu cocok dengan pengamatan di lapangan bahwa sudut
+# kamera campus league berubah tiap beberapa detik.
+# Pilihan lain kalau perlu disetel:
+#      80 px -> sekali per 2,1 detik (lebih galak, kuncian sering dilepas)
+#     200 px -> sekali per 5,5 detik (lebih longgar)
+#     300 px -> sekali per 15 detik (hanya potongan kamera yang ekstrem)
+# Jangan turunkan di bawah 80 px: dengan NUMBER_CONSECUTIVE_N=3 dan OCR tiap
+# frame, konfirmasi ulang butuh sekitar 0,25 detik, jadi jendela yang lebih
+# pendek dari sekitar 2 detik membuat nomor tidak pernah selesai terkunci.
+COURT_CUT_PX     = float(os.getenv("COURT_CUT_PX", "120"))
 H_EMA_ALPHA      = 0.35  # EMA weight for new H (higher = faster response, more noise)
 
 
@@ -166,7 +207,16 @@ class CourtMapper:
         self._H_inv: Optional[np.ndarray] = None  # court → pixel (EMA-smoothed)
         self._H_raw: Optional[np.ndarray] = None  # last raw RANSAC result (court→pixel)
         self._prev_pixels: Optional[dict[int, list[float]]] = None  # for shift check
+        # Perata keypoint gaya roboflow. Dibuat hanya kalau saklarnya hidup,
+        # jadi jalur bawaan sama sekali tidak tersentuh.
+        self._kp_smoother = (
+            _KPSmoother(length=KEYPOINT_SMOOTH_LEN)
+            if KEYPOINT_SMOOTH_METHOD == "roboflow" and _KPSmoother is not None
+            else None
+        )
         self._frame_shape: tuple[int, int] = (720, 1280)  # (h, w) updated each frame
+        self._geser_terakhir: Optional[float] = None   # geser piksel rata rata
+        self._cut_terakhir: bool = False               # ganti sudut terdeteksi
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -269,6 +319,39 @@ class CourtMapper:
                 "ransac_outlier":  label_id in H_SKIP_LABELS,  # pre-excluded, shown orange
             })
 
+        if self._kp_smoother is not None:
+            keypoints = self._smooth_keypoints(keypoints)
+
+        return keypoints
+
+    def _smooth_keypoints(self, keypoints: list[dict]) -> list[dict]:
+        """Rata rata berjalan posisi piksel keypoint (metode roboflow).
+
+        Keypoint yang sudah ditandai occluded dikirim sebagai NaN, jadi tidak
+        ikut menarik rata rata. Kalau rata ratanya NaN (belum pernah terlihat
+        dalam jendela ini), posisi mentah frame ini dipakai kembali supaya
+        tampilan diagnostik tidak kehilangan titik.
+        """
+        if not keypoints:
+            return keypoints
+        xy = np.array([kp["pixel_pos"] for kp in keypoints], dtype=np.float64)
+        # occluded -> keyakinan 0 supaya dibuang oleh ambang 0,5 di bawah
+        conf = np.array(
+            [0.0 if kp["occluded"] else float(kp["confidence"]) for kp in keypoints],
+            dtype=np.float64,
+        ).reshape(-1, 1).repeat(2, axis=1)
+        out = self._kp_smoother.update(xy, confidence=conf, conf_threshold=0.5)
+        for kp, row in zip(keypoints, out):
+            # Posisi MENTAH wajib disimpan. Deteksi perpindahan kamera memakai
+            # ini, bukan yang sudah dihaluskan, karena penghalusan justru
+            # menahan lonjakan dan itu akan MENYAMARKAN ganti sudut kamera,
+            # yaitu persis kejadian yang paling perlu terdeteksi cepat.
+            kp["pixel_pos_raw"] = list(kp["pixel_pos"])
+            if np.isfinite(row).all():
+                kp["pixel_pos"] = [float(row[0]), float(row[1])]
+                kp["smoothed"] = True
+            else:
+                kp["smoothed"] = False
         return keypoints
 
     # ------------------------------------------------------------------
@@ -386,10 +469,14 @@ class CourtMapper:
 
         return self._H
 
-    def _camera_moved(self, keypoints: list[dict]) -> bool:
-        """Return True if avg pixel shift since last H compute > CAMERA_MOVE_PX."""
+    def _pixel_shift(self, keypoints: list[dict]) -> Optional[float]:
+        """Geser piksel rata rata sejak H terakhir dihitung, atau None.
+
+        Memakai pixel_pos_raw bila ada, supaya pengukuran ini tidak terpengaruh
+        penghalusan keypoint. Lihat alasannya di _smooth_keypoints.
+        """
         if self._prev_pixels is None:
-            return True
+            return None
 
         shifts: list[float] = []
         for kp in keypoints:
@@ -397,13 +484,33 @@ class CourtMapper:
                 continue
             prev = self._prev_pixels.get(kp["point_id"])
             if prev is not None:
-                dx = kp["pixel_pos"][0] - prev[0]
-                dy = kp["pixel_pos"][1] - prev[1]
-                shifts.append(math.hypot(dx, dy))
+                pos = kp.get("pixel_pos_raw") or kp["pixel_pos"]
+                shifts.append(math.hypot(pos[0] - prev[0], pos[1] - prev[1]))
 
         if not shifts:
-            return False
-        return (sum(shifts) / len(shifts)) > CAMERA_MOVE_PX
+            return None
+        return sum(shifts) / len(shifts)
+
+    def _camera_moved(self, keypoints: list[dict]) -> bool:
+        """Return True if avg pixel shift since last H compute > CAMERA_MOVE_PX."""
+        geser = self._pixel_shift(keypoints)
+        if geser is None:
+            # None karena belum ada acuan berarti memang harus kalibrasi.
+            return self._prev_pixels is None
+        self._geser_terakhir = geser
+        return geser > CAMERA_MOVE_PX
+
+    def camera_cut(self, keypoints: list[dict]) -> bool:
+        """True kalau pergeserannya sebesar GANTI SUDUT, bukan panning halus.
+
+        Dipisahkan dari _camera_moved karena akibatnya berbeda: panning cuma
+        butuh homografi dihitung ulang, sedangkan ganti sudut membuat kuncian
+        identitas di hilir ikut tidak sah.
+        """
+        geser = self._geser_terakhir
+        if geser is None:
+            geser = self._pixel_shift(keypoints)
+        return geser is not None and geser > COURT_CUT_PX
 
     # ------------------------------------------------------------------
     # Geometric fallback & coverage validation
@@ -558,11 +665,25 @@ class CourtMapper:
         self._frame_shape = (frame.shape[0], frame.shape[1])
         keypoints = self.detect_keypoints(frame)
 
+        self._geser_terakhir = None            # diisi ulang oleh _camera_moved
         camera_moved = self._camera_moved(keypoints)
+        self._cut_terakhir = camera_moved and self.camera_cut(keypoints)
+        if self._cut_terakhir:
+            logger.info(
+                "Court: GANTI SUDUT terdeteksi, geser %.0f px (ambang %.0f). "
+                "Kuncian identitas di hilir akan disegarkan.",
+                self._geser_terakhir or -1.0, COURT_CUT_PX)
         needs_calib  = self._H is None or camera_moved
         if camera_moved and self._H_raw is not None:
             # Reset EMA history so the new camera angle doesn't blend with old
             self._H_raw = None
+            # Alasan yang sama berlaku untuk perata keypoint: begitu kamera
+            # berpindah, posisi piksel dari sudut LAMA tidak lagi sah untuk
+            # dirata ratakan dengan yang baru. Tanpa ini, beberapa frame
+            # pertama setelah panning akan memakai rata rata dua sudut kamera
+            # sekaligus, dan homografinya salah justru di saat paling kritis.
+            if self._kp_smoother is not None:
+                self._kp_smoother.reset()
             logger.debug("Camera moved — EMA H reset")
         if needs_calib:
             prev_H = self._H
@@ -596,6 +717,9 @@ class CourtMapper:
             "court_keypoints":    keypoints,
             "is_calibrated":      calibrated,
             "keypoints_detected": visible_count,
+            # Dipakai hilir untuk menyegarkan kuncian identitas dengan cepat.
+            "camera_cut":         self._cut_terakhir,
+            "pixel_shift":        self._geser_terakhir,
         }
 
     # ------------------------------------------------------------------
@@ -610,6 +734,11 @@ class CourtMapper:
         self._H_inv = None
         self._H_raw = None
         self._prev_pixels = None
+        # Perata keypoint menyimpan beberapa frame terakhir. Kalau tidak ikut
+        # dikosongkan, posisi dari kalibrasi LAMA masih tercampur ke rata rata
+        # beberapa frame pertama setelah reset, dan homografi barunya melenceng.
+        if self._kp_smoother is not None:
+            self._kp_smoother.reset()
         logger.info("CourtMapper calibration reset")
 
     def save_calibration(self, path: Optional[str] = None) -> None:

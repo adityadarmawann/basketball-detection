@@ -44,3 +44,6 @@ env/
 uploads/
 data/
 models/*.pt
+
+# Artefak unduhan otomatis ultralytics saat uji (coco8 dll), bukan data proyek
+datasets/

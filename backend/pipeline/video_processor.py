@@ -1312,6 +1312,16 @@ class VideoProcessor:
                         self._court_ok_ms = timestamp_ms   # patokan awal
 
                 if court_ran and (court.get("camera_cut") or _kembali):
+                    # Pelacak SAM2 perlu tahu agar menjadwalkan pendaftaran
+                    # ulang objek. Ditunda beberapa frame di dalam sana, karena
+                    # frame ganti sudut itu sendiri gambarnya paling kabur.
+                    # ByteTrack tidak punya metode ini, jadi dilewati diam diam.
+                    _oc = getattr(self._tracker, "on_camera_cut", None)
+                    if callable(_oc):
+                        try:
+                            _oc()
+                        except Exception as e:
+                            logger.debug("on_camera_cut tracker: %s", e)
                     if self._jersey is not None:
                         try:
                             self._jersey.on_camera_cut()

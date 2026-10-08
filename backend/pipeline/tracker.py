@@ -53,6 +53,18 @@ _PARTIAL_INHERIT_IOU = 0.35
 # ~0.5 s of airtime: 15 frames at the 30 fps processed rate. 0 disables.
 _COAST_FRAMES = int(os.getenv("TRACK_COAST_FRAMES", "15"))
 
+# ── Pilihan mesin pelacak (saklar) ───────────────────────────────────────────
+# Diukur di RTX 3060 Ti, 40 detik video 60 fps:
+#   bytetrack  2 ms per frame
+#   sam2     186 ms per frame dengan autocast bfloat16, memori puncak 1,11 GB
+# Catatan penting soal ByteTrack: 5.295 track_id dalam 17,5 menit BUKAN bug,
+# melainkan sisi lain dari tawar menawar yang disengaja. Setelan longgar lama
+# (match_thresh 0.8, buffer 450) memberi track panjang tapi satu track_id
+# menempel ke 2,38 nomor punggung berbeda. Setelan ketat sekarang memberi track
+# murni tapi pendek. ByteTrack tidak bisa memberi keduanya; SAM2 bisa, karena
+# melacak bentuk masker dan bukan tumpang tindih kotak.
+TRACKER_METHOD = os.getenv("TRACKER_METHOD", "bytetrack").strip().lower()
+
 
 def _center(x1: float, y1: float, x2: float, y2: float) -> list[float]:
     return [(x1 + x2) / 2.0, (y1 + y2) / 2.0]
@@ -654,11 +666,30 @@ def create_tracker(
     tracker_type: str = "bytetrack",
     device: Optional[str] = None,
     frame_rate: int = 25,
-) -> PlayerTracker:
+):
     """
-    Create a PlayerTracker instance (not yet initialized).
+    Create a tracker instance (not yet initialized).
     Call tracker.initialize(frame.shape) before the first update().
+
+    TRACKER_METHOD memilih mesinnya:
+      "bytetrack" (bawaan) = ByteTrack yang sekarang, 2 ms per frame.
+      "sam2"               = pelacakan berbasis masker SAM2, 186 ms per frame.
+                             Track lebih panjang DAN tetap murni, tapi 93 kali
+                             lebih lambat, jadi untuk pemrosesan luring saja.
+                             Rinciannya di pipeline/tracker_sam2.py.
+    Kalau jalur sam2 gagal dibuat, fungsi ini JATUH KEMBALI ke ByteTrack dan
+    mencatat alasannya, supaya menyalakan saklar tidak pernah mematikan pipeline.
     """
+    if TRACKER_METHOD == "sam2":
+        try:
+            from .tracker_sam2 import create_sam2_tracker
+            t = create_sam2_tracker(frame_rate=frame_rate)
+            logger.info("TRACKER_METHOD=sam2 aktif (%s)", os.getenv("SAM2_MODEL", "sam2_t.pt"))
+            return t
+        except Exception as e:
+            logger.warning("TRACKER_METHOD=sam2 diminta tapi gagal (%s). "
+                           "Kembali ke ByteTrack.", e)
+
     return PlayerTracker(
         tracker_type=tracker_type,
         device=device,

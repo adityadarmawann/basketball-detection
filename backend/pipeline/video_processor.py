@@ -66,6 +66,13 @@ def _rel_or_abs(mod: str, attr: str):
 
 
 _create_detector   = _rel_or_abs("detector",          "create_detector")
+try:
+    from .detector_rfdetr import attach_detection_classes as _attach_detection_classes
+except Exception:                                         # pragma: no cover
+    try:
+        from detector_rfdetr import attach_detection_classes as _attach_detection_classes
+    except Exception:
+        _attach_detection_classes = None
 _create_tracker    = _rel_or_abs("tracker",            "create_tracker")
 _create_court      = _rel_or_abs("court",              "create_court_mapper")
 _create_pose       = _rel_or_abs("pose",               "create_pose_estimator")
@@ -1226,6 +1233,14 @@ class VideoProcessor:
                 frame_data["tracking"] = tracking
                 tracked_players = tracking.get("tracked_players", [])
                 ball_info       = tracking.get("tracked_ball")
+                # Pelacak membangun dict pemain yang BARU dan tidak membawa
+                # kunci tambahan dari deteksi, dan ByteTrack juga mengurutkan
+                # ulang serta menyaring deteksi. Jadi kelas aksi dan kotak nomor
+                # dari RF-DETR harus dipasangkan kembali lewat IoU. Dengan
+                # detektor YOLO fungsi ini langsung kembali tanpa bekerja, jadi
+                # aman dipanggil tanpa syarat.
+                if _attach_detection_classes is not None and tracked_players:
+                    _attach_detection_classes(detections, tracked_players)
                 # When ByteTrack re-assigns a track_id, inherit team from old ID
                 # so bbox colour doesn't flicker during the 3-vote accumulation window.
                 if self._jersey and self._tracker._newly_inherited:
@@ -1251,6 +1266,26 @@ class VideoProcessor:
                     court = self._last_court_result
                 frame_data["court"] = court
                 court_ran = (frame_id % COURT_EVERY_N_FRAMES == 0)
+
+                # ── Ganti sudut kamera: segarkan kuncian identitas CEPAT ──
+                # Di rekaman campus league sudut kamera berubah tiap beberapa
+                # detik. Saat itu terjadi, homografi dihitung ulang, posisi
+                # lapangan melompat tanpa celah waktu, dan track_id biasanya
+                # diacak ulang. Dua akibatnya ditangani di sini: kuncian nomor
+                # punggung dilepas supaya tidak menempel ke orang yang salah,
+                # dan potongan jalur ditutup supaya lompatan posisi tidak
+                # tercatat sebagai perpindahan asli.
+                if court_ran and court.get("camera_cut"):
+                    if self._jersey is not None:
+                        try:
+                            self._jersey.on_camera_cut()
+                        except Exception as e:
+                            logger.debug("on_camera_cut jersey: %s", e)
+                    if self._stats is not None:
+                        try:
+                            self._stats.on_camera_cut()
+                        except Exception as e:
+                            logger.debug("on_camera_cut stats: %s", e)
                 if court.get("is_calibrated"):
                     for player in tracked_players:
                         pc = player.get("center")

@@ -47,6 +47,32 @@ ACTION_NAMES: dict[int, str] = {
     7: "Run",           # rule-based only (model has no run class)
 }
 ACTION_IDS: dict[str, int] = {v: k for k, v in ACTION_NAMES.items()}
+
+# ── Sumber aksi (saklar) ─────────────────────────────────────────────────────
+# ACTION_SOURCE:
+#   "videomae" (bawaan) = seperti sekarang, model VideoMAE lalu aturan.
+#   "detector" = aksi diambil dari KELAS DETEKSI RF-DETR untuk pemain yang
+#                punya kelas aksi, dan pemain lainnya tetap dilayani jalur
+#                aturan yang sudah ada.
+#
+# PENTING, jangan salah harap: taksonomi 10 kelas RF-DETR hanya mencakup
+# possession, jump-shot, layup-dunk, dan shot-block. Dribble, pass, catch, dan
+# steal TIDAK ada di sana. Jadi menyalakan ACTION_SOURCE=detector menggantikan
+# VideoMAE untuk urusan TEMBAKAN saja, bukan untuk seluruh daftar aksi. Sisanya
+# tetap dari aturan, dan itu memang perilaku yang diinginkan.
+ACTION_SOURCE = os.getenv("ACTION_SOURCE", "videomae").strip().lower()
+
+# Id untuk aksi yang hanya ada di RF-DETR. Sengaja diberi nomor 20 ke atas
+# supaya TIDAK bertabrakan dengan ACTION_NAMES 0 sampai 7, karena panjang
+# ACTION_NAMES ikut menentukan jumlah kelas kepala model VideoMAE
+# (len(self._action_classes)); menambah entri di sana akan membuat bobot
+# VideoMAE gagal dimuat.
+DETECTOR_ACTION_IDS: dict = {
+    "Shoot":      ACTION_IDS["Shoot"],   # sudah ada, pakai id yang sama
+    "possession": 20,
+    "layup_dunk": 21,
+    "block":      22,
+}
 STAND = "Stand"
 
 # ── Rule-based thresholds ────────────────────────────────────────────────────
@@ -338,6 +364,30 @@ class ActionClassifier:
 
         self._update_state(tracked_players, ball_info)
 
+        # ── Jalur kelas deteksi (RF-DETR) ──
+        # Pemain yang kotaknya sudah dilabeli kelas aksi oleh detektor dilayani
+        # langsung di sini dan TIDAK perlu inferensi model apa pun. Pemain yang
+        # kelasnya cuma "player" diteruskan ke jalur di bawah, jadi dribble,
+        # pass, catch, dan steal tetap terdeteksi oleh aturan.
+        aksi_detektor: list = []
+        if ACTION_SOURCE == "detector":
+            sisa = []
+            for player in tracked_players:
+                nama = player.get("action")
+                if nama and nama in DETECTOR_ACTION_IDS:
+                    aksi_detektor.append({
+                        "track_id":   player["track_id"],
+                        "action":     nama,
+                        "action_id":  DETECTOR_ACTION_IDS[nama],
+                        "confidence": float(player.get("confidence", 1.0)),
+                        "source":     "detector",
+                    })
+                else:
+                    sisa.append(player)
+            if not sisa:
+                return {"actions": aksi_detektor}
+            tracked_players = sisa
+
         # ── Model path ──
         if (
             self._model_mode
@@ -346,7 +396,10 @@ class ActionClassifier:
             and len(frame_buffer) >= MODEL_BUFFER_MIN
         ):
             try:
-                return self._model_inference(frame_buffer, tracked_players)
+                hasil = self._model_inference(frame_buffer, tracked_players)
+                if aksi_detektor:
+                    hasil["actions"] = aksi_detektor + hasil.get("actions", [])
+                return hasil
             except Exception as exc:
                 logger.warning("Model inference failed (%s) — falling back to rules", exc)
 
@@ -396,7 +449,7 @@ class ActionClassifier:
         if self._pass_fired_countdown == 0:
             self._pass_fired = False
 
-        return {"actions": actions}
+        return {"actions": aksi_detektor + actions}
 
     # ── State update ─────────────────────────────────────────────────────────
 

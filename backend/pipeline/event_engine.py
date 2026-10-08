@@ -83,6 +83,27 @@ BLK_COOLDOWN_F         = 45     # frames before another BLK can fire (same as FG
 BLK_SHOT_WINDOW_F      = 20     # Path-1 BLK only fires when shot attempt ≤ 20 frames ago
 BLK_PATH2_WINDOW_F     = 12     # Path-2 proximity check extends to 12 frames after shot
 
+# ── Sumber keputusan masuk atau tidak (saklar) ───────────────────────────────
+# SHOT_METHOD:
+#   "legacy"   (bawaan) = seperti sekarang: bola masuk zona ring selama
+#              FG_ZONE_DWELL_F frame untuk MADE_FG, dan habisnya
+#              FG_MISS_TIMEOUT_F tanpa MADE untuk MISSED_FG. Masalahnya MISSED
+#              dinyatakan TANPA bukti positif apa pun, hanya karena waktu habis.
+#   "roboflow" = ShotEventTracker: MADE harus DIBUKTIKAN kelas deteksi
+#              `ball-in-basket` dua frame berturut turut, dan tembakan baru
+#              diakui setelah tiga frame berturut turut.
+#
+# Yang digantikan HANYA MADE_FG dan MISSED_FG. Blok, rebound, asis, dan
+# penguasaan bola tetap dari mesin yang sekarang, karena ShotEventTracker tidak
+# mengurus itu. Jadi saklar ini mengganti satu keputusan, bukan seluruh mesin.
+#
+# PRASYARAT: detektor harus punya kelas ball-in-basket, player-jump-shot, dan
+# player-layup-dunk, yaitu RF-DETR 10 kelas. Dengan detektor YOLO 5 kelas yang
+# sekarang, masukannya selalu kosong sehingga tidak ada tembakan yang terbit.
+# Karena itu saklar ini MENOLAK menyala kalau detektornya belum menyediakannya,
+# dan mencatat alasannya sekali saja.
+SHOT_METHOD = os.getenv("SHOT_METHOD", "legacy").strip().lower()
+
 STEAL_DIST_PX          = 150    # generous — needs 2-player proximity
 STEAL_DIST_M           = 2.5
 
@@ -138,6 +159,17 @@ class EventEngine:
                                        "duration_frames": 0}
         self.last_passer:     Optional[int]  = None
         self.last_shot_pos:   Optional[list] = None
+        # Jalur roboflow untuk keputusan masuk atau tidak. Dibuat hanya kalau
+        # saklarnya hidup, jadi jalur lama sama sekali tidak terbebani.
+        self._shot_tracker = None
+        self._shot_warned  = False
+        if SHOT_METHOD == "roboflow":
+            try:
+                from .roboflow_methods import ShotEventTracker
+                self._shot_tracker = ShotEventTracker.from_fps(fps)
+                logger.info("SHOT_METHOD=roboflow aktif (fps %.1f)", fps)
+            except Exception as e:
+                logger.warning("ShotEventTracker tidak tersedia (%s)", e)
         self.events_history:  deque = deque(maxlen=300)
         self.ball_trajectory: deque = deque(maxlen=30)
         self.frame_count:     int   = 0
@@ -228,6 +260,15 @@ class EventEngine:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+        # Parameter ShotEventTracker (tenggat 1,7 detik, jeda 0,5 detik)
+        # diturunkan dari fps, jadi harus ikut disesuaikan.
+        if self._shot_tracker is not None:
+            try:
+                from .roboflow_methods import ShotEventTracker
+                self._shot_tracker = ShotEventTracker.from_fps(self.fps)
+            except Exception as e:
+                logger.warning("ShotEventTracker gagal disesuaikan (%s)", e)
+
     def process(self, frame_data: dict) -> list:
         """
         Analyse one frame of pipeline data.
@@ -236,6 +277,75 @@ class EventEngine:
         """
         if not frame_data:
             return []
+
+        hasil = self._process_legacy(frame_data)
+        if self._shot_tracker is None:
+            return hasil
+        # Jalur roboflow: buang keputusan masuk atau tidak dari mesin lama,
+        # ganti dengan yang terbukti kelas deteksi. Kejadian lain dibiarkan.
+        tembakan = self._shot_roboflow(frame_data)
+        if tembakan is None:
+            return hasil
+        return [e for e in hasil
+                if str(e.get("type", "")).upper() not in ("MADE_FG", "MISSED_FG")
+                ] + tembakan
+
+    def _shot_roboflow(self, frame_data: dict):
+        """Suapi ShotEventTracker dengan kelas deteksi RF-DETR.
+
+        None berarti detektornya belum menyediakan kelas yang diperlukan, jadi
+        pemanggil harus memakai hasil mesin lama apa adanya.
+        """
+        dets = frame_data.get("detections", {}) or {}
+        if "balls_in_basket" not in dets:
+            if not self._shot_warned:
+                self._shot_warned = True
+                logger.warning(
+                    "SHOT_METHOD=roboflow diminta tapi detektor tidak memberi "
+                    "kelas ball-in-basket. Butuh DETECTOR_METHOD=rfdetr dengan "
+                    "model 10 kelas. Sementara ini keputusan masuk atau tidak "
+                    "tetap dari mesin lama.")
+            return None
+
+        players = (frame_data.get("tracking", {}) or {}).get("tracked_players", [])
+        ada_jump  = any(p.get("action") == "Shoot"      for p in players)
+        ada_layup = any(p.get("action") == "layup_dunk" for p in players)
+        ada_masuk = bool(dets.get("balls_in_basket"))
+
+        mentah = self._shot_tracker.update(
+            frame_index=self.frame_count,
+            has_jump_shot=ada_jump,
+            has_layup_dunk=ada_layup,
+            has_ball_in_basket=ada_masuk,
+        )
+        quarter = int(frame_data.get("quarter", 1))
+        ts_ms   = int(frame_data.get("timestamp_ms", 0))
+        keluar = []
+        for ev in mentah:
+            jenis = str(ev.get("event", "")).upper()
+            if jenis not in ("MADE", "MISSED"):
+                continue           # START hanya penanda internal, bukan kejadian
+            keluar.append({
+                "type":       "MADE_FG" if jenis == "MADE" else "MISSED_FG",
+                "track_id":   self._shooter_terakhir(players),
+                "quarter":    quarter,
+                "timestamp_ms": ts_ms,
+                "points":     2,   # 2 atau 3 masih ditentukan posisi, lihat catatan
+                "source":     "roboflow_shot_tracker",
+                "shot_type":  ev.get("shot_type"),
+            })
+        return keluar
+
+    @staticmethod
+    def _shooter_terakhir(players: list):
+        """Penembak = pemain yang kelas deteksinya menembak. Kalau tidak ada,
+        None, dan statistik akan memperlakukannya sebagai tembakan tim."""
+        for p in players:
+            if p.get("action") in ("Shoot", "layup_dunk"):
+                return p.get("track_id")
+        return None
+
+    def _process_legacy(self, frame_data: dict) -> list:
 
         self.frame_count += 1
 
@@ -1188,6 +1298,18 @@ class EventEngine:
         self.events_history   = deque(maxlen=300)
         self.ball_trajectory  = deque(maxlen=30)
         self.frame_count      = 0
+
+        # WAJIB: ShotEventTracker menyimpan NOMOR FRAME ABSOLUT
+        # (shot_start_frame, shot_deadline_frame, last_made_frame). Karena
+        # frame_count di atas dikembalikan ke 0, tracker lama akan menyimpan
+        # tenggat yang selamanya berada di "masa depan" sehingga tidak pernah
+        # menerbitkan tembakan lagi setelah batas kuartal. Jadi dibuat ulang.
+        if self._shot_tracker is not None:
+            try:
+                from .roboflow_methods import ShotEventTracker
+                self._shot_tracker = ShotEventTracker.from_fps(self.fps)
+            except Exception as e:
+                logger.warning("ShotEventTracker gagal dibuat ulang (%s)", e)
 
         self._poss_candidate     = None
         self._poss_frames        = 0

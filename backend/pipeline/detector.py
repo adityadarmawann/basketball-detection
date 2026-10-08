@@ -18,6 +18,15 @@ DEFAULT_CLASS_NAMES = ["player", "ball", "referee", "hoop", "backboard"]
 MODELS_DIR = os.getenv("MODELS_PATH", os.path.join(os.path.dirname(__file__), "..", "models"))
 MODEL_FILENAME = "best-object-basketball.pt"
 
+# ── Pilihan mesin detektor (saklar) ──────────────────────────────────────────
+# DETECTOR_METHOD:
+#   "yolo"   (bawaan) = YOLOv8 5 kelas yang sekarang dipakai.
+#   "rfdetr" = RF-DETR 10 kelas, yang aksinya ikut jadi kelas deteksi.
+# Jalur rfdetr sudah siap tapi butuh bobot hasil training sendiri; sampai itu
+# ada, saklar ini biarkan di yolo. Resep training ada di
+# basketball-roboflow/catatan-model-baru-dan-training.txt bagian DUA.
+DETECTOR_METHOD = os.getenv("DETECTOR_METHOD", "yolo").strip().lower()
+
 
 def _bbox_center(x1: float, y1: float, x2: float, y2: float) -> list[float]:
     return [(x1 + x2) / 2, (y1 + y2) / 2]
@@ -230,8 +239,25 @@ def create_detector(
     models_path: Optional[str] = None,
     conf_threshold: float = float(os.getenv("DETECTOR_CONF", "0.25")),
     iou_threshold: float = 0.45,
-) -> BasketballDetector:
-    """Factory — create and load a BasketballDetector in one call."""
+):
+    """Factory — create and load a detector in one call.
+
+    DETECTOR_METHOD menentukan mesinnya. Keluaran detect() dua duanya sebentuk,
+    jadi pelacak, homografi, pose, dan statistik tidak perlu tahu bedanya.
+    Kalau jalur rfdetr gagal (bobot belum ada, paket belum terpasang), fungsi
+    ini JATUH KEMBALI ke YOLO dan mencatat alasannya, supaya menyalakan saklar
+    terlalu dini tidak mematikan pipeline.
+    """
+    if DETECTOR_METHOD == "rfdetr":
+        try:
+            from .detector_rfdetr import create_rfdetr_detector
+            return create_rfdetr_detector(
+                models_path=models_path, conf_threshold=conf_threshold)
+        except Exception as e:
+            logger.warning(
+                "DETECTOR_METHOD=rfdetr diminta tapi gagal (%s). "
+                "Kembali ke YOLO.", e)
+
     model_file = os.path.join(models_path or MODELS_DIR, MODEL_FILENAME)
     detector = BasketballDetector(
         model_path=model_file,

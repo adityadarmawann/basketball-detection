@@ -47,3 +47,7 @@ models/*.pt
 
 # Artefak unduhan otomatis ultralytics saat uji (coco8 dll), bukan data proyek
 datasets/
+
+# Bobot SAM2 diunduh otomatis ultralytics saat TRACKER_METHOD=sam2
+models/sam2*.pt
+sam2*.pt

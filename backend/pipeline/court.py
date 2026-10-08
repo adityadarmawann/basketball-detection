@@ -243,6 +243,11 @@ for _k in _periksa_tabel_keypoint():
 
 MIN_KEYPOINTS    = 4      # minimum untuk cv2.findHomography (OpenCV wajib ≥4 titik)
 
+# Taksiran galat posisi lapangan, dipasang dari pengukuran di dua video uji
+# (1.706 pengamatan ekstrapolasi). Lihat perkiraan_galat_m().
+EKSTRAP_GALAT_DASAR = float(os.getenv("EKSTRAP_GALAT_DASAR", "0.20"))
+EKSTRAP_GALAT_PER_M = float(os.getenv("EKSTRAP_GALAT_PER_M", "0.12"))
+
 # ── Penghalusan keypoint sebelum homografi (saklar) ──────────────────────────
 # KEYPOINT_SMOOTH_METHOD:
 #   "none"     (bawaan) = keypoint dipakai apa adanya, lalu matriks H dihaluskan
@@ -315,6 +320,10 @@ class CourtMapper:
         self._frame_shape: tuple[int, int] = (720, 1280)  # (h, w) updated each frame
         self._geser_terakhir: Optional[float] = None   # geser piksel rata rata
         self._cut_terakhir: bool = False               # ganti sudut terdeteksi
+        # Lambung cembung koordinat lapangan dari inlier homografi terakhir.
+        # Dipakai menaksir seberapa jauh sebuah posisi harus DIEKSTRAPOLASI di
+        # luar bukti yang ada. Lihat perkiraan_galat_m().
+        self._lambung_inlier: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -558,6 +567,20 @@ class CourtMapper:
         self._H     = H_smoothed_px2ct          # pixel → court (smoothed)
         self._H_inv = smoothed_ct2px            # court → pixel (smoothed)
 
+        # Simpan wilayah lapangan yang benar benar didukung keypoint inlier.
+        # Diukur di dua video uji: sorotan kamera hanya mencakup median 9,1 m
+        # dari 28 m panjang lapangan, dan TIDAK PERNAH ada satu frame pun yang
+        # mencakup lebih dari 24 m atau memperlihatkan kedua ring sekaligus.
+        # Jadi homografi hampir selalu dipasang dari satu irisan lalu dipakai
+        # untuk seluruh lapangan, dan itu sumber galat terbesar di jalur court.
+        try:
+            titik = np.array([kp["court_pos"] for kp in inlier_kps],
+                             dtype=np.float32)
+            self._lambung_inlier = (cv2.convexHull(titik).reshape(-1, 2)
+                                    if len(titik) >= 3 else titik)
+        except Exception:
+            self._lambung_inlier = None
+
         # Update pixel cache for camera-move detection
         self._prev_pixels = {
             kp["point_id"]: kp["pixel_pos"]
@@ -703,6 +726,46 @@ class CourtMapper:
         if not (-2.0 <= x <= COURT_W + 2.0 and -2.0 <= y <= COURT_H + 2.0):
             return None
         return [x, y]
+
+    def jarak_ekstrapolasi(self, court_pos: list[float]) -> Optional[float]:
+        """Berapa meter posisi ini berada DI LUAR wilayah yang didukung keypoint.
+
+        Nol berarti posisinya berada di dalam lambung titik inlier, yaitu
+        ditopang bukti langsung. Makin besar, makin jauh homografi harus
+        diekstrapolasi dan makin tidak bisa dipercaya angkanya.
+        None kalau belum ada kalibrasi.
+        """
+        if self._lambung_inlier is None or len(self._lambung_inlier) < 3:
+            return None
+        try:
+            d = cv2.pointPolygonTest(
+                self._lambung_inlier.astype(np.float32),
+                (float(court_pos[0]), float(court_pos[1])), True)
+        except Exception:
+            return None
+        return max(0.0, -float(d))      # di dalam -> 0
+
+    def perkiraan_galat_m(self, court_pos: list[float]) -> Optional[float]:
+        """Taksiran galat posisi dalam meter, dari jarak ekstrapolasinya.
+
+        Rumusnya BUKAN tebakan. Diukur di dua video uji dengan memasang
+        homografi hanya dari separuh titik lalu meramalkan titik di luarnya,
+        1.706 pengamatan:
+
+            di dalam irisan (tinggal satu)  0,203 m
+            2 sampai 4 m di luar           0,494 m
+            4 sampai 6 m                   0,819 m
+            6 sampai 10 m                  1,210 m
+            10 sampai 30 m                 2,449 m
+
+        Kemiringannya sekitar 0,12 m galat per meter ekstrapolasi, dengan dasar
+        0,20 m yaitu ketepatan homografi itu sendiri. Angka ini TAKSIRAN untuk
+        memberi tahu hilir seberapa boleh percaya, bukan koreksi.
+        """
+        d = self.jarak_ekstrapolasi(court_pos)
+        if d is None:
+            return None
+        return round(EKSTRAP_GALAT_DASAR + EKSTRAP_GALAT_PER_M * d, 3)
 
     def court_to_pixel(self, court_pos: list[float]) -> Optional[list[float]]:
         """[x_meter, y_meter] → [px, py].  None if not calibrated."""

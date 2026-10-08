@@ -1327,6 +1327,19 @@ class VideoProcessor:
                         pc = player.get("center")
                         if pc:
                             player["court_pos"] = self._court.pixel_to_court(pc)
+                            # TAMBAHAN, tidak mengubah court_pos sama sekali.
+                            # Sorotan kamera hanya mencakup median 9,1 m dari
+                            # 28 m, jadi posisi pemain yang jauh dari titik
+                            # lapangan yang terlihat adalah hasil ekstrapolasi.
+                            # Terukur: galat median 2,4 m pada jarak 10 m ke
+                            # atas, dibanding 0,20 m di dalam irisan. Dua
+                            # angka di bawah memberi tahu hilir seberapa boleh
+                            # percaya, tanpa membuang apa pun.
+                            if player["court_pos"] is not None:
+                                player["court_extrap_m"] = (
+                                    self._court.jarak_ekstrapolasi(player["court_pos"]))
+                                player["court_err_m"] = (
+                                    self._court.perkiraan_galat_m(player["court_pos"]))
                     if ball_info:
                         bc = ball_info.get("center")
                         if bc:

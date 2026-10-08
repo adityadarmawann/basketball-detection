@@ -276,7 +276,13 @@ def _open_video_cap(video_path: str):
         logger.debug("NVDEC unavailable (%s) — using CPU decode", _e)
 
     cap = cv2.VideoCapture(video_path)
-    cap._nvdec = False
+    # QA-AUDIT 2026-09-18 minimal patch: opencv>=4.10 forbids setting attributes
+    # on cv2.VideoCapture (AttributeError) — this crashed the whole CPU/software
+    # decode fallback. _frame_grabber already uses getattr(cap, "_nvdec", False).
+    try:
+        cap._nvdec = False
+    except AttributeError:
+        pass
     return cap
 
 

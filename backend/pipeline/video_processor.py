@@ -222,6 +222,10 @@ FPS_DEFAULT          = 30
 # OCR: jersey number is stable once confirmed → run every 30 frames
 PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every 2nd frame → 15fps from 30fps source
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
+# Lapangan hilang selama ini lalu kembali dianggap ganti sudut, walau geser
+# pikselnya kecil. Lihat aturan kamera di
+# basketball-roboflow/catatan-model-baru-dan-training.txt bagian SEMBILAN.
+COURT_LOST_REFRESH_S  = float(os.getenv("COURT_LOST_REFRESH_S", "3.0"))
 POSE_EVERY_N_FRAMES   = int(os.getenv("POSE_EVERY_N",     "2"))   # player pose estimation stride
 OCR_EVERY_N_FRAMES    = int(os.getenv("OCR_EVERY_N",     "15"))   # fallback default; overridden at runtime
 ACTION_EVERY_N_FRAMES = int(os.getenv("ACTION_EVERY_N",  "10"))   # action classifier interval
@@ -429,6 +433,14 @@ class VideoProcessor:
         self._last_pose_result:   dict = {"poses": []}
         # Sticky courtPos cache: {track_id → [x,y]} — last known valid position per player
         self._last_court_pos:     dict = {}
+        # Kapan terakhir lapangan berhasil dikalibrasi. Dipakai mendeteksi
+        # kamera meninggalkan lapangan lama lalu kembali.
+        self._court_ok_ms: Optional[int] = None
+        # Apakah lapangan PERNAH terkalibrasi. Tanpa ini, video yang dibuka
+        # dengan sorotan bukan lapangan selama puluhan detik akan menganggap
+        # kalibrasi PERTAMA sebagai "kembali dari hilang", padahal tidak ada
+        # identitas apa pun yang perlu disegarkan.
+        self._court_pernah_ok: bool = False
         # Sticky team cache: {track_id → "A"|"B"} — persists even when OCR not running
         self._last_known_team:    dict = {}
         # Roster-anchored team color calibration: accumulate torso HSV samples from
@@ -1275,7 +1287,31 @@ class VideoProcessor:
                 # punggung dilepas supaya tidak menempel ke orang yang salah,
                 # dan potongan jalur ditutup supaya lompatan posisi tidak
                 # tercatat sebagai perpindahan asli.
-                if court_ran and court.get("camera_cut"):
+                # Lapangan hilang lama lalu kembali. Ini kasus yang TIDAK
+                # tertangkap geser piksel: saat kamera menyorot bangku, huddle,
+                # atau meja panitia, tidak ada keypoint sehingga _prev_pixels
+                # membeku. Kalau kamera lalu kembali ke posisi yang mirip,
+                # gesernya kecil dan tidak ada ganti sudut yang terdeteksi,
+                # padahal setelah time out atau pergantian pemain orang di layar
+                # bisa sepenuhnya berbeda.
+                _kembali = False
+                if court_ran:
+                    if court.get("is_calibrated"):
+                        if (self._court_pernah_ok
+                                and self._court_ok_ms is not None
+                                and timestamp_ms - self._court_ok_ms
+                                > COURT_LOST_REFRESH_S * 1000.0):
+                            _kembali = True
+                            logger.info(
+                                "Court: lapangan hilang %.1f detik lalu kembali, "
+                                "kuncian identitas disegarkan",
+                                (timestamp_ms - self._court_ok_ms) / 1000.0)
+                        self._court_ok_ms = timestamp_ms
+                        self._court_pernah_ok = True
+                    elif self._court_ok_ms is None:
+                        self._court_ok_ms = timestamp_ms   # patokan awal
+
+                if court_ran and (court.get("camera_cut") or _kembali):
                     if self._jersey is not None:
                         try:
                             self._jersey.on_camera_cut()

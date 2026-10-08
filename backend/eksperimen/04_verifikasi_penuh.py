@@ -85,13 +85,19 @@ def main() -> int:
 
     cap = cv2.VideoCapture(video)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    # VERIF_START memungkinkan menguji SEGMEN tertentu, misalnya bagian yang
+    # memuat time out, tanpa memproses seluruh video dari awal.
+    mulai = int(os.getenv("VERIF_START", "0"))
+    if mulai:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, mulai)
+        print(f"  mulai dari frame        = {mulai} ({mulai/fps:.0f} detik)")
 
     c = dict(pemain=0, bola=0, wasit=0, ring=0, kalib=0, pose=0,
              nomor=0, tim=0, aksi=0, kejadian=0, frame=0, galat=0)
     nomor_unik, tim_unik, tid_unik = set(), set(), set()
     t0 = time.time()
-    fid = 0
-    while fid < n_frame:
+    fid = mulai
+    while fid < mulai + n_frame:
         ok, frame = cap.read()
         if not ok:
             break

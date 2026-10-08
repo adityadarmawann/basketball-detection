@@ -62,65 +62,105 @@ LABEL_TO_COURT: dict[int, list[float]] = {
     8:  [0.0,    0.0],   # corner bottom-left
     34: [28.0,  15.0],   # corner top-right
     41: [28.0,   0.0],   # corner bottom-right
-    15: [9.3,   15.0],   # top boundary left-center
-    25: [18.7,  15.0],   # top boundary right-center
-    17: [9.3,    0.0],   # bottom boundary left-center
-    27: [18.7,   0.0],   # bottom boundary right-center
+    # Titik 15/17/25/27 BUKAN titik acuan sembarangan di garis samping. Di
+    # lable_court.jpg keempatnya duduk tepat di tanda garis yang mencuat KELUAR
+    # lapangan, yaitu garis lemparan ke dalam.
+    #
+    # Nilainya DIUKUR DARI MODELNYA, bukan dari standar. Caranya: homografi
+    # dibangun HANYA dari titik yang koordinatnya sudah pasti (sudut, paint,
+    # ring, garis lemparan bebas), lalu prediksi model untuk titik ini
+    # diproyeksikan ke meter. Hasilnya pada 41 frame q1 UBAYA UNESA:
+    #     titik 15 -> 9,143 m  (25 sampel)
+    #     titik 25 -> 18,895 m (21 sampel)
+    #
+    # Jadi yang dideteksi model secara FISIK berada di 9,11 m, bukan di 8,325 m
+    # seperti standar FIBA. Memaksa angka FIBA justru memasukkan galat 0,8 m,
+    # karena model TIDAK PERNAH memprediksi titik di 8,325 m. Tabel ini harus
+    # menyatakan di mana fitur yang dideteksi model benar benar berada, bukan di
+    # mana standar mengatakan fitur itu seharusnya berada.
+    #
+    # Diuji ujung ke ujung pada 42 frame nyata, galat proyeksi median:
+    #     9,11 dan 18,89 (dipakai)  0,118 m
+    #     9,30 dan 18,70 (kode lama) 0,129 m
+    #     8,325 dan 19,675 (FIBA)    0,142 m
+    15: [9.110, 15.0],   # garis lemparan ke dalam, atas kiri
+    25: [18.890, 15.0],  # garis lemparan ke dalam, atas kanan
+    17: [9.110,  0.0],   # garis lemparan ke dalam, bawah kiri
+    27: [18.890, 0.0],   # garis lemparan ke dalam, bawah kanan
     # ── Center line ─────────────────────────────────────────────────────
     19: [14.0,  15.0],   # center top
     23: [14.0,   0.0],   # center bottom
     21: [14.0,   7.5],   # center court
-    # ── Left paint area ──────────────────────────────────────────────────
-    # The CL court has TWO sets of paint lines: outer (old/non-standard) and
-    # inner (FIBA 4.9m).  In the image, from top-to-bottom on the left baseline:
-    #   2 (outer top, y=11.35) → 4 (FIBA inner top, y=9.95)
-    #   5 (FIBA inner bottom, y=5.05) → 7 (outer bottom, y=3.65)
-    # Giving them DISTINCT court y-values is critical — RANSAC collapses if two
-    # keypoints share the same court coordinate but have different pixel positions.
-    2:  [0.0,    11.35], # baseline left, outer top paint
-    4:  [0.0,     9.95], # baseline left, FIBA inner top paint
-    5:  [0.0,     5.05], # baseline left, FIBA inner bottom paint
-    7:  [0.0,     3.65], # baseline left, outer bottom paint
-    10: [5.8,    11.35], # left FT line, outer top corner
-    12: [5.8,     9.95], # left FT line, FIBA inner top corner
-    13: [5.8,     7.5],  # free throw line center
-    14: [5.8,     5.05], # left FT line, FIBA inner bottom corner
-    11: [5.8,     3.65], # left FT line, outer bottom corner
-    9:  [1.575,   7.5],  # hoop left
-    16: [8.325,   7.5],  # left 3PT arc tangent = 1.575 + 6.75
-    # ── Right paint area ─────────────────────────────────────────────────
-    # Mirror of left side. From top-to-bottom on right baseline:
-    #   35 (outer top) → 37 (FIBA inner top) … 38 (FIBA inner bottom) → 40 (outer bottom)
-    35: [28.0,   11.35], # baseline right, outer top paint
-    37: [28.0,    9.95], # baseline right, FIBA inner top paint
-    38: [28.0,    5.05], # baseline right, FIBA inner bottom paint
-    40: [28.0,    3.65], # baseline right, outer bottom paint
-    31: [22.2,   11.35], # right FT line, outer top corner
-    28: [22.2,    9.95], # right FT line, FIBA inner top corner
-    29: [22.2,    7.5],  # free throw line center
-    30: [22.2,    5.05], # right FT line, FIBA inner bottom corner
-    32: [22.2,    3.65], # right FT line, outer bottom corner
-    33: [26.425,  7.5],  # hoop right
-    26: [19.675,  7.5],  # right 3PT arc tangent = 28.0 - 8.325
+    # ── Sisi kiri: GARIS TIGA ANGKA dan PAINT ────────────────────────────
+    # KOREKSI 8 Oktober 2026. Kode lama mengira 2, 7, 10, 11 adalah "paint
+    # luar" dan menaruhnya di y=11,35 dan y=3,65 dengan x=5,8. Itu SALAH.
+    # Diperiksa ke test-video/court/lable_court.jpg dengan mendeteksi 33 dot
+    # secara terprogram: dari titik 2 ada garis lurus mendatar ke titik 10,
+    # lalu MELENGKUNG jadi busur. Itu garis tiga angka, bukan paint. Garis
+    # paint yang sebenarnya ada di 4 ke 12, dan garis itu punya tanda setrip
+    # lane mark.
+    #
+    # Busurnya sudah diuji numerik, fit lingkaran bebas dari 18.431 piksel:
+    #     pusat (1,565, 7,600) lawan ring FIBA (1,575, 7,500)  selisih 0,101 m
+    #     jari jari 6,678 m    lawan FIBA 6,750 m              selisih 0,072 m
+    #
+    # Geometri FIBA yang dipakai di sini:
+    #     garis lurus 3 angka 0,90 m dari garis samping -> y = 0,90 dan 14,10
+    #     titik singgung lurus ke busur:
+    #         x = 1,575 + akar(6,75^2 - 6,60^2) = 2,990 m
+    #
+    # Dampak kesalahan lama, terukur: galat proyeksi homografi median 1,167 m
+    # dan maksimum 3,087 m, dengan selisih posisi pemain median 0,71 m dan
+    # maksimum 1,56 m. Cukup untuk membalik keputusan 2 lawan 3 angka di dekat
+    # busur. Dan RANSAC MENERIMA SEMUA 33 TITIK walau salah, karena galatnya
+    # sistematis dan simetris, jadi kesalahan ini tidak terlihat sama sekali.
+    2:  [0.0,    14.10], # garis 3 angka ketemu garis akhir, atas
+    4:  [0.0,     9.95], # garis akhir, paint FIBA atas
+    5:  [0.0,     5.05], # garis akhir, paint FIBA bawah
+    7:  [0.0,     0.90], # garis 3 angka ketemu garis akhir, bawah
+    10: [2.990,  14.10], # 3 angka, garis lurus jadi busur, atas
+    11: [2.990,   0.90], # 3 angka, garis lurus jadi busur, bawah
+    12: [5.8,     9.95], # sudut paint di garis lemparan bebas, atas
+    13: [5.8,     7.5],  # tengah garis lemparan bebas
+    14: [5.8,     5.05], # sudut paint di garis lemparan bebas, bawah
+    9:  [1.575,   7.5],  # ring kiri
+    16: [8.325,   7.5],  # puncak busur 3 angka = 1,575 + 6,75
+    # ── Sisi kanan: cermin persis dari sisi kiri, x menjadi 28 dikurang x ──
+    35: [28.0,   14.10], # garis 3 angka ketemu garis akhir, atas
+    37: [28.0,    9.95], # garis akhir, paint FIBA atas
+    38: [28.0,    5.05], # garis akhir, paint FIBA bawah
+    40: [28.0,    0.90], # garis 3 angka ketemu garis akhir, bawah
+    31: [25.010, 14.10], # 3 angka, garis lurus jadi busur, atas (28 - 2,990)
+    32: [25.010,  0.90], # 3 angka, garis lurus jadi busur, bawah
+    28: [22.2,    9.95], # sudut paint di garis lemparan bebas, atas
+    29: [22.2,    7.5],  # tengah garis lemparan bebas
+    30: [22.2,    5.05], # sudut paint di garis lemparan bebas, bawah
+    33: [26.425,  7.5],  # ring kanan
+    26: [19.675,  7.5],  # puncak busur 3 angka = 28,0 - 8,325
 }
 
+# Nama ikut dikoreksi bersama koordinatnya. Dua belas nama lama menyebut garis
+# TIGA ANGKA sebagai "paint" dan garis LEMPARAN KE DALAM sebagai "boundary
+# center", dan nama yang salah itulah yang membuat koordinatnya ikut salah
+# bertahun tahun tanpa ketahuan. Nama hanya dipakai untuk tampilan dan log,
+# tidak ada logika yang mencocokkannya, jadi aman diganti.
 LABEL_NAMES: dict[int, str] = {
-    1:  "corner_top_left",        2:  "baseline_left_top_paint",
-    4:  "baseline_left_top_paint_x", 5: "baseline_left_bot_paint_x",
-    7:  "baseline_left_bot_paint",8:  "corner_bottom_left",
-    9:  "hoop_left",              10: "paint_left_inner_top",
-    11: "paint_left_inner_bot",   12: "paint_left_top",
-    13: "free_throw_left",        14: "paint_left_bottom",
-    15: "boundary_top_left_ctr",  16: "arc_3pt_left",
-    17: "boundary_bot_left_ctr",  19: "center_top",
-    21: "center_court",           23: "center_bottom",
-    25: "boundary_top_right_ctr", 26: "arc_3pt_right",
-    27: "boundary_bot_right_ctr", 28: "paint_right_top",
-    29: "free_throw_right",       30: "paint_right_bottom",
-    31: "paint_right_inner_top",  32: "paint_right_inner_bot",
-    33: "hoop_right",             34: "corner_top_right",
-    35: "baseline_right_top_paint",37: "baseline_right_top_ctr",
-    38: "baseline_right_bot_ctr", 40: "baseline_right_bot_paint",
+    1:  "corner_top_left",          2:  "3pt_baseline_left_top",
+    4:  "paint_baseline_left_top",  5:  "paint_baseline_left_bot",
+    7:  "3pt_baseline_left_bot",    8:  "corner_bottom_left",
+    9:  "hoop_left",                10: "3pt_arc_start_left_top",
+    11: "3pt_arc_start_left_bot",   12: "paint_left_top",
+    13: "free_throw_left",          14: "paint_left_bottom",
+    15: "throwin_top_left",         16: "arc_3pt_left",
+    17: "throwin_bot_left",         19: "center_top",
+    21: "center_court",             23: "center_bottom",
+    25: "throwin_top_right",        26: "arc_3pt_right",
+    27: "throwin_bot_right",        28: "paint_right_top",
+    29: "free_throw_right",         30: "paint_right_bottom",
+    31: "3pt_arc_start_right_top",  32: "3pt_arc_start_right_bot",
+    33: "hoop_right",               34: "corner_top_right",
+    35: "3pt_baseline_right_top",   37: "paint_baseline_right_top",
+    38: "paint_baseline_right_bot", 40: "3pt_baseline_right_bot",
     41: "corner_bottom_right",
 }
 
@@ -133,15 +173,73 @@ HIGH_CONF_THRESHOLD = 0.55   # titik boundary atas (sering false detect ke tribu
 # Titik yang sering occluded oleh penonton/kamera sudut bawah
 LOW_CONF_LABELS  = {7, 8, 41}
 
-# Titik boundary atas yang sering false detect ke area tribun
-# Naikkan threshold agar hanya dipakai kalau model sangat yakin
+# Titik dekat garis samping atas yang sering salah deteksi ke area tribun.
+# Naikkan ambang agar hanya dipakai kalau model sangat yakin. Setelah koreksi
+# koordinat, 2, 10, 35 ada di y=14,10 yaitu 0,90 m dari garis samping atas,
+# jadi alasan "dekat tribun" tetap berlaku dan daftarnya tidak diubah.
 HIGH_CONF_LABELS = {1, 2, 10, 25, 34, 35}
 
-# Titik yang model prediksi-nya tidak presisi di viewpoint khas CL —
-# dideteksi dan ditampilkan, tapi TIDAK dimasukkan ke H computation.
-# Baseline kanan: 40 ([28.0,3.65]) sering muncul di tengah garis bukan di pojok;
-# sudah di-cover oleh 38 ([28.0,5.05]) dan 41 ([28.0,0.0]).
+# Titik yang prediksi modelnya tidak presisi di sudut pandang khas CL:
+# dideteksi dan ditampilkan, tapi TIDAK dimasukkan ke perhitungan H.
+# Alasan lama ditulis berdasarkan koordinat 40 yang ternyata salah ([28.0,3.65]).
+# Setelah dikoreksi, 40 ada di [28.0, 0.90] yaitu hanya 0,90 m dari titik 41 di
+# [28.0, 0.0]. Dua titik sedekat itu di garis yang sama memang membuat RANSAC
+# goyah, jadi alasan melewatinya justru LEBIH kuat sekarang. Diuji di
+# lable_court.jpg, membuang 40 praktis tidak mengubah apa apa: galat median
+# 0,099 m dengan dibuang lawan 0,101 m kalau dipakai.
 H_SKIP_LABELS = {40}
+
+# ── Pemeriksaan diri tabel keypoint ──────────────────────────────────────────
+# Dipasang setelah menemukan 12 dari 33 koordinat salah dan bertahan lama tanpa
+# ketahuan. Kesalahan itu TIDAK TERLIHAT oleh RANSAC karena galatnya sistematis
+# dan simetris, jadi semua titik tetap jadi inlier. Satu satunya cara
+# menangkapnya adalah memeriksa tabelnya sendiri terhadap geometri lapangan.
+#
+# Tiga hal yang diperiksa, semuanya murni dari tabel, tanpa perlu gambar:
+#   1. ketiga tabel panjangnya sama dan labelnya sama
+#   2. setiap pasangan kiri kanan benar benar cermin, x menjadi 28 dikurang x
+#   3. titik yang memang berada di busur 3 angka jaraknya tepat 6,75 m dari ring
+_RING_KIRI, _RING_KANAN = (1.575, 7.5), (26.425, 7.5)
+_PASANGAN_CERMIN = [(1,34),(2,35),(4,37),(5,38),(7,40),(8,41),(9,33),(10,31),
+                    (11,32),(12,28),(13,29),(14,30),(15,25),(16,26),(17,27)]
+_DI_BUSUR_3PT = {10: _RING_KIRI, 11: _RING_KIRI, 16: _RING_KIRI,
+                 31: _RING_KANAN, 32: _RING_KANAN, 26: _RING_KANAN}
+_RADIUS_3PT = 6.75
+
+
+def _periksa_tabel_keypoint() -> list:
+    """Kembalikan daftar keluhan. Kosong berarti tabelnya sehat."""
+    keluhan = []
+    if not (len(KP_INDEX_TO_LABEL) == len(LABEL_TO_COURT) == len(LABEL_NAMES)):
+        keluhan.append(
+            f"panjang tabel beda: KP_INDEX_TO_LABEL={len(KP_INDEX_TO_LABEL)}, "
+            f"LABEL_TO_COURT={len(LABEL_TO_COURT)}, LABEL_NAMES={len(LABEL_NAMES)}")
+    hilang = [l for l in KP_INDEX_TO_LABEL if l not in LABEL_TO_COURT]
+    if hilang:
+        keluhan.append(f"label tanpa koordinat lapangan: {hilang}")
+    for kiri, kanan in _PASANGAN_CERMIN:
+        if kiri not in LABEL_TO_COURT or kanan not in LABEL_TO_COURT:
+            continue
+        xk, yk = LABEL_TO_COURT[kiri]
+        xn, yn = LABEL_TO_COURT[kanan]
+        if abs((COURT_W - xk) - xn) > 0.01 or abs(yk - yn) > 0.01:
+            keluhan.append(
+                f"pasangan cermin {kiri} dan {kanan} tidak simetris: "
+                f"{LABEL_TO_COURT[kiri]} lawan {LABEL_TO_COURT[kanan]}")
+    for lab, (rx, ry) in _DI_BUSUR_3PT.items():
+        if lab not in LABEL_TO_COURT:
+            continue
+        x, y = LABEL_TO_COURT[lab]
+        r = math.hypot(x - rx, y - ry)
+        if abs(r - _RADIUS_3PT) > 0.02:
+            keluhan.append(
+                f"titik {lab} seharusnya di busur 3 angka tapi jaraknya ke ring "
+                f"{r:.3f} m, bukan {_RADIUS_3PT} m")
+    return keluhan
+
+
+for _k in _periksa_tabel_keypoint():
+    logger.error("Tabel keypoint lapangan BERMASALAH: %s", _k)
 
 MIN_KEYPOINTS    = 4      # minimum untuk cv2.findHomography (OpenCV wajib ≥4 titik)
 

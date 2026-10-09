@@ -94,30 +94,56 @@ VARIANT    = os.getenv("RFDETR_VARIANT", "medium").strip().lower()
 # hasil training sendiri di mesin ini. Kalau suatu saat memuat bobot dari pihak
 # lain, setel RFDETR_TRUST=0 dulu dan periksa berkasnya.
 TRUST      = os.getenv("RFDETR_TRUST", "1") == "1"
-WEIGHTS    = os.getenv("RFDETR_WEIGHTS", "rfdetr-basket.pth")
+WEIGHTS    = os.getenv("RFDETR_WEIGHTS", "best-object-basket-detect-v1-DETR.pt")
 # RF-DETR tidak memakai NMS IoU seperti YOLO; ambangnya hanya keyakinan.
 CONF       = float(os.getenv("RFDETR_CONF", "0.35"))
+
+# ── Ukuran masukan. WAJIB dikirim, bukan pilihan ────────────────────────────
+# Checkpoint ini dilatih pada resolution=560, tapi rfdetr 1.11.2 MENOLAK
+# menjalankannya tanpa shape eksplisit:
+#     ValueError: Model's default resolution (560) is not divisible by
+#     block_size=32 (patch_size=16 * num_windows=2).
+# Jadi kalau shape tidak dikirim, inferensi gagal di SETIAP frame. Sudah diuji:
+#     544x544 -> 44 deteksi di 4 frame
+#     576x576 -> 48 deteksi di 4 frame   <- dipakai, paling dekat ke 560 dari atas
+#     560x560 -> ditolak pustaka
+RFDETR_SHAPE = int(os.getenv("RFDETR_SHAPE", "576"))
+
+# Percepatan. rfdetr memperingatkan "Model is not optimized for inference"
+# kalau ini tidak dipanggil. model.inference() mengompilasi dan memakai fp16,
+# dan menurut pustakanya bisa sekitar 8x di GPU dengan Tensor Core.
+# Dimatikan otomatis saat di CPU karena fp16 di CPU justru lebih lambat.
+RFDETR_OPTIMIZE = os.getenv("RFDETR_OPTIMIZE", "1") == "1"
 # Pencocokan kotak nomor ke pemain. IoS = Intersection over Smaller, bukan IoU,
 # karena kotak nomor selalu jauh lebih kecil dari kotak pemain sehingga IoU-nya
 # selalu kecil walau nomor itu memang milik pemain tersebut.
 NUMBER_IOS = float(os.getenv("RFDETR_NUMBER_IOS", "0.60"))
 
 # ── Offset indeks kelas. BACA INI, salah satu di sini merusak semuanya ───────
-# DIUKUR LANGSUNG 8 Oktober 2026 dengan bobot starter COCO rf-detr-nano pada
-# satu frame q1 UBAYA UNESA: RF-DETR mengembalikan class_id [1, 37], yaitu
-# person=1 dan sports ball=37. Itu id kategori COCO yang MULAI DARI 1, bukan 0.
+# Kenapa berbahaya: kalau offset-nya meleset satu langkah, SEMUA kelas bergeser.
+# ball terbaca ball-in-basket, player terbaca player-in-possession, dan
+# seterusnya. Model tetap termuat, inferensi tetap jalan, tidak ada pesan
+# kesalahan, tapi seluruh statistik salah. Karena itu offset tidak ditebak di
+# dalam kode, melainkan disebut eksplisit DAN diperiksa sendiri saat jalan.
 #
-# Kenapa ini berbahaya: kalau offset-nya salah satu langkah, SEMUA kelas
-# bergeser satu. ball terbaca ball-in-basket, player terbaca
-# player-in-possession, dan seterusnya. Model termuat, inferensi jalan, tidak
-# ada pesan kesalahan, tapi seluruh statistik salah. Karena itu offset tidak
-# ditebak di dalam kode, tapi disebut eksplisit DAN diperiksa sendiri saat
-# jalan (lihat _periksa_indeks).
+# BAWAANNYA 0, DIUKUR PADA MODEL YANG SEBENARNYA 9 Oktober 2026.
+# best-object-basket-detect-v1-DETR.pt dijalankan pada 4 frame
+# test-Quarter-1_UNESA-UBAYA.mp4, id mentah yang keluar: 0, 2, 3, 4, 8, 9.
+#   - id 0 muncul, dan dengan offset 1 itu akan jatuh di luar jangkauan.
+#     Jadi offsetnya tidak mungkin 1.
+#   - Tafsiran offset 0 masuk akal untuk frame basket: 33 player, 6 number,
+#     5 referee, 1 ball, 1 rim, 2 player-in-possession.
+#   - Tafsiran offset 1 berbunyi 33 "number" dan 5 "player-shot-block",
+#     jelas keliru.
 #
-# Dataset COCO JSON yang diekspor Roboflow memberi category_id mulai 1, jadi
-# bawaan 1 benar untuk alur training yang ada di catatan. Kalau ternyata
-# model latihanmu 0-indeks, setel RFDETR_CLASS_OFFSET=0 dan periksa lognya.
-CLASS_OFFSET = int(os.getenv("RFDETR_CLASS_OFFSET", "1"))
+# CATATAN KOREKSI: sebelumnya bawaannya 1, disimpulkan dari bobot starter COCO
+# rf-detr-nano yang mengembalikan person=1 dan sports ball=37. Kesimpulan itu
+# TIDAK berlaku untuk checkpoint hasil latihan sendiri, dan sudah dicabut.
+#
+# Jalur paling aman tetap dipakai lebih dulu: kalau checkpoint membawa daftar
+# class_names sendiri (checkpoint ini membawanya), daftar itulah yang dipakai,
+# bukan RFDETR_CLASS_NAMES di atas. Lihat load_model().
+CLASS_OFFSET = int(os.getenv("RFDETR_CLASS_OFFSET", "0"))
 
 
 def _bbox_center(x1: float, y1: float, x2: float, y2: float) -> list:
@@ -196,11 +222,16 @@ class RFDetrDetector:
         # bisa termuat tapi hasilnya ngawur tanpa pesan kesalahan apa pun.
         if hasattr(rfdetr.RFDETR, "from_checkpoint"):
             try:
+                kwargs = {"trust_checkpoint": TRUST}
+                if self.device:
+                    kwargs["device"] = self.device
                 self.model = rfdetr.RFDETR.from_checkpoint(
-                    self.model_path, trust_checkpoint=TRUST)
+                    self.model_path, **kwargs)
                 logger.info(
-                    "RF-DETR dimuat lewat from_checkpoint dari %s (kelas %s)",
+                    "RF-DETR dimuat lewat from_checkpoint dari %s (varian %s)",
                     self.model_path, type(self.model).__name__)
+                self._ambil_nama_kelas_dari_model()
+                self._percepat()
                 return
             except Exception as e:
                 logger.warning(
@@ -233,6 +264,78 @@ class RFDetrDetector:
             num_classes=len(RFDETR_CLASS_NAMES),
         )
         logger.info("RF-DETR %s dimuat dari %s", self.variant, self.model_path)
+        self._ambil_nama_kelas_dari_model()
+        self._percepat()
+
+    def _ambil_nama_kelas_dari_model(self) -> None:
+        """Pakai daftar kelas yang DIBAWA checkpoint, bukan daftar di berkas ini.
+
+        Checkpoint RF-DETR menyimpan class_names hasil training. Memakainya
+        menghilangkan satu kelas kesalahan sepenuhnya: kalau urutan kelas di
+        dataset berubah suatu saat, daftar di modul ini akan basi dan semua
+        label bergeser tanpa pesan apa pun. Daftar bawaan RFDETR_CLASS_NAMES
+        hanya dipakai kalau checkpoint tidak membawanya.
+        """
+        nama = None
+        for sumber in (self.model, getattr(self.model, "model", None)):
+            kandidat = getattr(sumber, "class_names", None)
+            if kandidat:
+                nama = list(kandidat)
+                break
+        if not nama:
+            logger.warning(
+                "Checkpoint tidak membawa class_names; memakai daftar bawaan "
+                "RFDETR_CLASS_NAMES. Pastikan urutannya sama dengan saat latih.")
+            return
+
+        if nama != self._class_names:
+            logger.warning(
+                "Daftar kelas dari checkpoint BERBEDA dari RFDETR_CLASS_NAMES "
+                "di modul ini.\n  checkpoint: %s\n  modul     : %s\n"
+                "Yang dipakai adalah milik checkpoint.", nama, self._class_names)
+        self._class_names = nama
+        logger.info("RF-DETR memakai %d kelas dari checkpoint: %s",
+                    len(nama), nama)
+
+    def _percepat(self) -> None:
+        """Nyalakan jalur inferensi cepat rfdetr kalau sedang di GPU.
+
+        Tanpa ini rfdetr mencatat "Model is not optimized for inference".
+        Hanya di CUDA: fp16 di CPU justru lebih lambat, dan kompilasi memakan
+        waktu di awal tanpa imbalan.
+        """
+        if not RFDETR_OPTIMIZE or self.model is None:
+            return
+        try:
+            import torch
+            target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+            if not str(target).startswith("cuda"):
+                logger.info("RF-DETR di %s, percepatan fp16 dilewati "
+                            "(hanya berguna di CUDA)", target)
+                return
+
+            # inference() memakai model.resolution, dan nilainya 560 yang TIDAK
+            # habis dibagi 32, sehingga optimasi gagal dengan
+            #   "Backbone requires input shape to be divisible by 32"
+            # Disamakan dulu dengan RFDETR_SHAPE yang memang dipakai saat
+            # predict, supaya model yang dikompilasi dan model yang dipanggil
+            # memakai ukuran yang sama persis.
+            dalam = getattr(self.model, "model", None)
+            if dalam is not None and getattr(dalam, "resolution", None) != RFDETR_SHAPE:
+                logger.info("RF-DETR resolution %s -> %d supaya bisa "
+                            "dioptimalkan dan sama dengan RFDETR_SHAPE",
+                            getattr(dalam, "resolution", None), RFDETR_SHAPE)
+                dalam.resolution = RFDETR_SHAPE
+                self.model._optimized_resolution = None
+
+            self.model.inference(compile=True, batch_size=1, dtype=torch.float16)
+            # Terukur di RTX 3060 Ti, 10 frame test-Quarter-1_UNESA-UBAYA:
+            # 21,5 ms -> 9,6 ms per frame (2,23x), deteksi 151 -> 150.
+            logger.info("RF-DETR dioptimalkan untuk inferensi (fp16 + compile)")
+        except Exception as e:
+            # Gagal percepatan TIDAK boleh menggagalkan pemuatan. Model tetap
+            # bisa dipakai, hanya lebih lambat.
+            logger.warning("Percepatan RF-DETR gagal (%s); jalan tanpa itu", e)
 
     def warmup(self, height: int = 720, width: int = 1280) -> None:
         if self.model is None:
@@ -256,9 +359,20 @@ class RFDetrDetector:
         # dijadikan tensor torch.
         rgb = np.ascontiguousarray(frame[:, :, ::-1])
         try:
-            det = self.model.predict(rgb, threshold=self.conf_threshold)
+            # shape WAJIB: resolusi latih 560 tidak habis dibagi 32, dan rfdetr
+            # 1.11.2 menolak menjalankannya tanpa shape eksplisit. Tanpa baris
+            # ini setiap frame gagal. Lihat RFDETR_SHAPE di atas.
+            det = self.model.predict(
+                rgb, threshold=self.conf_threshold,
+                shape=(RFDETR_SHAPE, RFDETR_SHAPE),
+            )
         except Exception as e:
-            logger.warning("Inferensi RF-DETR gagal (%s)", e)
+            # Dicatat sekali di awal lalu jarang, supaya kegagalan menetap tidak
+            # membanjiri log 60 kali sedetik tapi tetap terlihat.
+            self._gagal_total = getattr(self, "_gagal_total", 0) + 1
+            if self._gagal_total <= 3 or self._gagal_total % 500 == 0:
+                logger.warning("Inferensi RF-DETR gagal (%s) [kejadian ke-%d]",
+                               e, self._gagal_total)
             return out
 
         kotak, keyakinan, kelas = self._bongkar(det)

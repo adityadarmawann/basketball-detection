@@ -54,6 +54,36 @@ MODEL_FILENAME         = "jersey_no.pt"
 # membuat model lama tetap terpakai tanpa pesan apa pun. Memakai nama berkas
 # yang berbeda menghindari jebakan itu sepenuhnya.
 DIGIT_MODEL_FILENAME   = os.getenv("DIGIT_MODEL", "best-detect-num-v2.pt")
+
+# ── Tahap kedua opsional: model CLASSIFY untuk menentukan angkanya ───────────
+# Model detect di atas mengerjakan dua hal sekaligus, mencari LETAK digit dan
+# menebak ANGKAnya. Tahap kedua ini memisahkan keduanya: kotaknya tetap dari
+# model detect, tapi tebakan angkanya diambil alih model classify.
+#
+# Diukur pada 479 kotak detektor yang cocok dengan label asli di
+# dataset_raw/test (lihat eksperimen/12_uji_tahap_classify.py):
+#     detect menebak sendiri                      93,74 %
+#     classify menimpa bila conf >= 0,70          97,29 %
+# Saat keduanya berbeda pendapat (23 kasus), classify benar 19, detect 4.
+#
+# MATI secara bawaan. Jalur lama tidak berubah sedikit pun kalau saklar ini
+# mati, dan setiap kegagalan pemuatan atau inferensi jatuh kembali ke tebakan
+# model detect, bukan membuang digitnya.
+DIGIT_CLS_ENABLE       = os.getenv("DIGIT_CLS_ENABLE", "0") == "1"
+DIGIT_CLS_FILENAME     = os.getenv("DIGIT_CLS_MODEL", "best-cls-digit-v1.pt")
+# Padding di sekeliling kotak digit sebelum diberikan ke model classify, sebagai
+# pecahan LEBAR dan TINGGI kotak. Ini bukan angka bebas: model itu dilatih pada
+# potongan yang dibuat `yolo_det_to_classify()` dengan padding 0,05 x ukuran
+# GAMBAR 640, yaitu sekitar 32 px di tiap sisi untuk digit selebar 56 px.
+# Kalau konteks di sekelilingnya tidak ditiru, ketepatannya runtuh. Terukur:
+#     pad 0,2 -> 65,7 %    pad 0,4 -> 87,7 %    pad 0,6 -> 95,6 %    pad 0,8 -> 97,0 %
+DIGIT_CLS_PAD          = float(os.getenv("DIGIT_CLS_PAD", "0.8"))
+# Di bawah ambang ini, tebakan model detect yang dipakai. Ambang 0,5 sampai 0,9
+# semuanya memberi sekitar 97 %, selisihnya cuma 2 kotak dari 479, jadi angka
+# ini TIDAK disetel halus dan tidak perlu dikejar.
+DIGIT_CLS_MIN_CONF     = float(os.getenv("DIGIT_CLS_MIN_CONF", "0.70"))
+DIGIT_CLS_IMGSZ        = int(os.getenv("DIGIT_CLS_IMGSZ", "128"))   # imgsz saat model dilatih
+
 DIGIT_CONF_THRESHOLD   = 0.12   # minimum per-digit detection confidence. LOW on purpose:
                                  # the digit model detects only ONE digit in ~60% of crops
                                  # at 0.20, so 2-digit jerseys (11,16,88) read as a single
@@ -514,6 +544,9 @@ class JerseyOCR:
 
         self.model        = None    # jersey_no.pt (YOLO localizer)
         self._digit_model = None    # best-detect-num-v2.pt (YOLO digit 0-9 detector)
+        self._digit_cls_model = None  # best-cls-digit-v1.pt (classify 0-9), opsional
+        self._cls_dipakai = 0       # berapa kali classify menimpa tebakan detect
+        self._cls_dilewat = 0       # berapa kali ditolak karena conf kurang / gagal
         self._ocr         = None    # PaddleOCR (kept; currently inactive — see _run_ocr)
         self._number_class_idx: Optional[int] = None   # None → use heuristic
 
@@ -724,6 +757,127 @@ class JerseyOCR:
             logger.warning("Digit model load failed: %s — YOLO digit OCR disabled", exc)
             self._digit_model = None
 
+    def load_digit_cls_model(self) -> None:
+        """
+        Muat model CLASSIFY digit 0-9 (tahap kedua opsional).
+
+        Tidak melakukan apa pun kalau DIGIT_CLS_ENABLE mati. Setiap kegagalan
+        hanya mematikan tahap kedua; jalur detect yang lama tetap utuh.
+        """
+        if not DIGIT_CLS_ENABLE:
+            logger.info("Tahap classify digit MATI (DIGIT_CLS_ENABLE != 1)")
+            return
+
+        path = Path(os.path.join(MODELS_DIR, DIGIT_CLS_FILENAME))
+        if not path.exists():
+            logger.warning(
+                "DIGIT_CLS_ENABLE=1 tapi model classify tidak ada: %s — "
+                "tahap kedua dilewati, tebakan model detect yang dipakai.",
+                path.resolve())
+            return
+        try:
+            import torch
+            from ultralytics import YOLO
+
+            target = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+            # Jebakan .engine yang sama seperti pada model detect: berkas .engine
+            # dengan nama dasar sama lebih dipilih, jadi .pt baru bisa terabaikan
+            # tanpa pesan apa pun. Peringatkan kalau mesinnya lebih tua.
+            engine_path = path.with_suffix(".engine")
+            if target.startswith("cuda") and engine_path.exists():
+                load_path = engine_path
+                try:
+                    if engine_path.stat().st_mtime < path.stat().st_mtime:
+                        logger.error(
+                            "%s LEBIH TUA dari %s. Mesin TensorRT lama yang akan "
+                            "dipakai, bukan bobot barumu.",
+                            engine_path.name, path.name)
+                except OSError:
+                    pass
+            else:
+                load_path = path
+
+            if load_path.suffix == ".engine":
+                model = YOLO(str(load_path), task="classify")
+            else:
+                model = YOLO(str(load_path))
+                model.to(target)
+
+            # Periksa model itu memang classify 10 kelas dengan indeks = nilai
+            # digitnya. Kalau tidak, JANGAN dipakai: menimpa tebakan detect
+            # dengan pemetaan yang salah jelas merusak, dan diam diam pula.
+            if model.task != "classify":
+                logger.error("Model %s task '%s', bukan 'classify' — tahap kedua "
+                             "dilewati.", path.name, model.task)
+                return
+            nama = model.names
+            if len(nama) != 10 or any(str(nama[i]) != str(i) for i in range(10)):
+                logger.error("Model %s kelasnya %s, bukan '0'..'9' urut — tahap "
+                             "kedua dilewati supaya tidak salah memetakan.",
+                             path.name, nama)
+                return
+
+            self._digit_cls_model = model
+            logger.info("Tahap classify digit HIDUP: %s di %s (pad=%.2f, "
+                        "ambang conf=%.2f)", load_path.name, target,
+                        DIGIT_CLS_PAD, DIGIT_CLS_MIN_CONF)
+        except Exception as exc:
+            logger.warning("Model classify digit gagal dimuat: %s — tahap kedua "
+                           "dilewati, jalur lama tetap jalan.", exc)
+            self._digit_cls_model = None
+
+    def _relabel_satu_digit(
+        self, gambar: np.ndarray, x1: float, y1: float, x2: float, y2: float,
+        char_detect: str,
+    ) -> str:
+        """
+        Tentukan ulang ANGKA satu kotak digit memakai model classify.
+
+        Mengembalikan karakter hasil classify bila yakin, kalau tidak
+        mengembalikan `char_detect` apa adanya. TIDAK PERNAH melempar
+        pengecualian dan tidak pernah mengembalikan string kosong, jadi
+        pemanggilnya tidak perlu menangani kasus gagal.
+        """
+        if self._digit_cls_model is None or gambar is None or gambar.size == 0:
+            return char_detect
+        try:
+            h, w = gambar.shape[:2]
+            bw, bh = x2 - x1, y2 - y1
+            if bw <= 0 or bh <= 0:
+                return char_detect
+            px, py = bw * DIGIT_CLS_PAD, bh * DIGIT_CLS_PAD
+            cx1 = max(0, int(x1 - px)); cy1 = max(0, int(y1 - py))
+            cx2 = min(w, int(x2 + px)); cy2 = min(h, int(y2 + py))
+            if cx2 - cx1 < 4 or cy2 - cy1 < 4:
+                self._cls_dilewat += 1
+                return char_detect
+            potongan = gambar[cy1:cy2, cx1:cx2]
+            if potongan.size == 0:
+                self._cls_dilewat += 1
+                return char_detect
+            probs = self._digit_cls_model.predict(
+                potongan, imgsz=DIGIT_CLS_IMGSZ, verbose=False)[0].probs
+            if probs is None:
+                self._cls_dilewat += 1
+                return char_detect
+            conf = float(probs.top1conf)
+            if conf < DIGIT_CLS_MIN_CONF:
+                self._cls_dilewat += 1
+                logger.debug("classify ragu (%.2f < %.2f), pakai tebakan detect '%s'",
+                             conf, DIGIT_CLS_MIN_CONF, char_detect)
+                return char_detect
+            char_cls = str(int(probs.top1))
+            if char_cls != char_detect:
+                self._cls_dipakai += 1
+                logger.debug("classify menimpa: detect '%s' -> classify '%s' (conf %.2f)",
+                             char_detect, char_cls, conf)
+            return char_cls
+        except Exception as exc:
+            self._cls_dilewat += 1
+            logger.debug("classify gagal pada satu digit (%s) — pakai tebakan detect", exc)
+            return char_detect
+
     def is_model_loaded(self) -> bool:
         return self.model is not None
 
@@ -774,6 +928,13 @@ class JerseyOCR:
                 logger.info("best-detect-num-v2.pt warmup done")
             except Exception as e:
                 logger.debug("digit model warmup error (non-fatal): %s", e)
+        if self._digit_cls_model is not None:
+            try:
+                self._digit_cls_model.predict(dummy_crop, imgsz=DIGIT_CLS_IMGSZ,
+                                              verbose=False)
+                logger.info("%s warmup done", DIGIT_CLS_FILENAME)
+            except Exception as e:
+                logger.debug("classify model warmup error (non-fatal): %s", e)
         # PaddleOCR warmup (inactive — re-enable if switching back to PaddleOCR)
         # if self._ocr is not None:
         #     try:
@@ -1258,7 +1419,10 @@ class JerseyOCR:
             logger.debug("YOLO digit model inference error: %s", exc)
             return None
 
-        digit_boxes: list[tuple[float, str, float]] = []  # (x1, digit_char, conf)
+        # Tuple: (x1, digit_char, conf, y1, x2, y2). Tiga yang pertama sengaja
+        # dibiarkan di posisi semula supaya pengurutan di bawah tidak berubah;
+        # tiga sisanya hanya dipakai tahap classify opsional.
+        digit_boxes: list[tuple[float, str, float, float, float, float]] = []
         for r in det:
             for box in r.boxes:
                 cls = int(box.cls[0])
@@ -1266,8 +1430,11 @@ class JerseyOCR:
                 raw_name   = self._digit_model.names.get(cls, str(cls))
                 digit_char = raw_name if (len(raw_name) == 1 and raw_name.isdigit()) else str(cls)
                 x1   = float(box.xyxy[0][0])
+                y1   = float(box.xyxy[0][1])
+                x2   = float(box.xyxy[0][2])
+                y2   = float(box.xyxy[0][3])
                 conf = float(box.conf[0])
-                digit_boxes.append((x1, digit_char, conf))
+                digit_boxes.append((x1, digit_char, conf, y1, x2, y2))
                 logger.debug("digit: '%s' x1=%.0f conf=%.2f", digit_char, x1, conf)
 
         if not digit_boxes:
@@ -1280,6 +1447,17 @@ class JerseyOCR:
             digit_boxes.sort(key=lambda b: -b[2])
             digit_boxes = digit_boxes[:2]
         digit_boxes.sort(key=lambda b: b[0])
+
+        # Tahap kedua opsional: tentukan ulang ANGKAnya dengan model classify.
+        # Dijalankan SETELAH pemangkasan ke 2 kotak, jadi paling banyak 2
+        # panggilan per potongan. Kotaknya tidak diubah, hanya labelnya.
+        if self._digit_cls_model is not None:
+            digit_boxes = [
+                (b[0], self._relabel_satu_digit(number_crop, b[0], b[3], b[4], b[5], b[1]),
+                 b[2], b[3], b[4], b[5])
+                for b in digit_boxes
+            ]
+
         number_str = "".join(b[1] for b in digit_boxes)
 
         try:
@@ -1384,7 +1562,10 @@ class JerseyOCR:
         if centred and w_img and h_img:
             lo, hi = 0.5 - DIGIT_CENTRE_FRAC / 2, 0.5 + DIGIT_CENTRE_FRAC / 2
 
-        digit_boxes: list[tuple[float, float, str, float]] = []
+        # Tuple: (x1, x2, digit_char, conf, y1, y2). Empat yang pertama tetap di
+        # posisi semula supaya NMS dan pengurutan di bawah tidak berubah; y1 dan
+        # y2 hanya dipakai tahap classify opsional.
+        digit_boxes: list[tuple[float, float, str, float, float, float]] = []
         for box in det_result.boxes:
             cls        = int(box.cls[0])
             raw_name   = self._digit_model.names.get(cls, str(cls))
@@ -1402,7 +1583,7 @@ class JerseyOCR:
                     logger.debug("digit '%s' dropped — off-centre (%.2f, %.2f)",
                                  digit_char, cx, cy)
                     continue
-            digit_boxes.append((x1, x2, digit_char, conf))
+            digit_boxes.append((x1, x2, digit_char, conf, y1, y2))
             logger.debug("digit: '%s' x=%.0f-%.0f conf=%.2f", digit_char, x1, x2, conf)
 
         if not digit_boxes:
@@ -1413,20 +1594,35 @@ class JerseyOCR:
         # unchecked they concatenate to e.g. "11" from a single "1". Greedy NMS on
         # the x-axis keeps the higher-confidence box when two overlap heavily.
         digit_boxes.sort(key=lambda b: -b[3])   # highest confidence first
-        kept: list[tuple[float, float, str, float]] = []
-        for x1b, x2b, ch, cf in digit_boxes:
+        kept: list[tuple[float, float, str, float, float, float]] = []
+        for x1b, x2b, ch, cf, y1b, y2b in digit_boxes:
             is_dup = False
-            for kx1, kx2, _kc, _kf in kept:
+            for kx1, kx2, _kc, _kf, _ky1, _ky2 in kept:
                 ox = max(0.0, min(x2b, kx2) - max(x1b, kx1))
                 narrower = max(1.0, min(x2b - x1b, kx2 - kx1))
                 if ox / narrower >= DIGIT_DEDUP_OVERLAP:
                     is_dup = True
                     break
             if not is_dup:
-                kept.append((x1b, x2b, ch, cf))
+                kept.append((x1b, x2b, ch, cf, y1b, y2b))
 
         kept = kept[:2]                         # jersey numbers are 0–99 (≤ 2 digits)
         kept.sort(key=lambda b: b[0])           # left-to-right reading order
+
+        # Tahap kedua opsional: tentukan ulang ANGKAnya dengan model classify.
+        # Dijalankan SETELAH NMS dan pemangkasan ke 2, jadi paling banyak 2
+        # panggilan per potongan. Kotak dan conf TIDAK diubah, hanya labelnya,
+        # supaya mean_conf di bawah tetap berarti sama seperti sebelumnya.
+        if self._digit_cls_model is not None:
+            gambar = getattr(det_result, "orig_img", None)
+            if gambar is not None:
+                kept = [
+                    (b[0], b[1],
+                     self._relabel_satu_digit(gambar, b[0], b[4], b[1], b[5], b[2]),
+                     b[3], b[4], b[5])
+                    for b in kept
+                ]
+
         number_str  = "".join(b[2] for b in kept)
         mean_conf   = sum(b[3] for b in kept) / len(kept)
 
@@ -2395,6 +2591,7 @@ def create_jersey_ocr(
     ocr = JerseyOCR(model_path=model_file, device=device)
     ocr.load_model()
     ocr.load_digit_model()
+    ocr.load_digit_cls_model()   # tahap kedua opsional, mati kalau saklarnya mati
     # ocr.load_ocr()   # PaddleOCR — inactive; uncomment to switch back
     return ocr
 

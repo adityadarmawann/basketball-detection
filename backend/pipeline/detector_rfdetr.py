@@ -119,6 +119,26 @@ RFDETR_OPTIMIZE = os.getenv("RFDETR_OPTIMIZE", "1") == "1"
 # selalu kecil walau nomor itu memang milik pemain tersebut.
 NUMBER_IOS = float(os.getenv("RFDETR_NUMBER_IOS", "0.60"))
 
+# ── Penyatuan kotak pemain yang bertumpuk ───────────────────────────────────
+# RF-DETR TIDAK memakai NMS. Itu memang rancangannya: prediksi himpunan
+# langsung lewat pencocokan bipartit, jadi tidak perlu penyaringan sesudahnya.
+# Tapi jaminan itu berlaku PER KELAS, bukan lintas kelas. Model ini punya LIMA
+# kelas pemain (player, player-in-possession, player-jump-shot,
+# player-layup-dunk, player-shot-block), dan satu orang yang sama bisa muncul
+# dua kali dengan dua label berbeda.
+#
+# DIUKUR pada 300 frame test-Quarter-1_UNESA-UBAYA: 71 kotak pemain bertumpuk
+# IoU >= 0,60 dengan kotak pemain lain, yaitu 2,5 persen dari seluruh kotak.
+# Dari 71 itu, 65 adalah pasangan player + player-in-possession, jadi 92 persen
+# berasal dari pemecahan kelas, bukan dari duplikat biasa.
+#
+# Kenapa berbahaya: pelacak menerima DUA kotak untuk SATU orang, lalu membuat
+# DUA track_id. Pecahnya track_id itu akar masalah celah jarak tempuh.
+# Penyatuan ini menyimpan kotak yang keyakinannya tertinggi dan, kalau ada,
+# MEMPERTAHANKAN aksi dari kotak yang dibuang supaya informasi aksi tidak
+# hilang hanya karena kotaknya kalah keyakinan.
+PLAYER_DEDUP_IOU = float(os.getenv("RFDETR_PLAYER_DEDUP_IOU", "0.60"))
+
 # ── Offset indeks kelas. BACA INI, salah satu di sini merusak semuanya ───────
 # Kenapa berbahaya: kalau offset-nya meleset satu langkah, SEMUA kelas bergeser.
 # ball terbaca ball-in-basket, player terbaca player-in-possession, dan
@@ -433,8 +453,50 @@ class RFDetrDetector:
                     tak_dikenal, len(self._class_names) - 1, self.class_offset,
                     self._tak_dikenal_total)
 
+        self._satukan_pemain(out)
         self._cocokkan_nomor(out)
         return out
+
+    def _satukan_pemain(self, out: dict) -> None:
+        """Satukan kotak pemain yang bertumpuk, lintas kelima kelas pemain.
+
+        Dijalankan SEBELUM pencocokan nomor, supaya nomor dicocokkan ke kotak
+        yang sudah bersih, bukan ke salah satu kembaran. Lihat PLAYER_DEDUP_IOU
+        di atas untuk angka pengukurannya.
+        """
+        if PLAYER_DEDUP_IOU <= 0:
+            return
+        ps = out.get("players") or []
+        if len(ps) < 2:
+            return
+
+        # Keyakinan tertinggi lebih dulu, jadi yang bertahan selalu yang terkuat.
+        ps = sorted(ps, key=lambda p: -p.get("confidence", 0.0))
+        simpan: list = []
+        dibuang = 0
+        for p in ps:
+            kembar = None
+            for q in simpan:
+                if _iou(p["bbox"], q["bbox"]) >= PLAYER_DEDUP_IOU:
+                    kembar = q
+                    break
+            if kembar is None:
+                simpan.append(p)
+                continue
+            dibuang += 1
+            # Aksi JANGAN ikut terbuang. Kalau kotak yang kalah keyakinan
+            # membawa aksi (player-in-possession dan kawan kawan) sedangkan
+            # yang menang cuma "player" polos, aksinya dipindahkan.
+            if p.get("action") and not kembar.get("action"):
+                kembar["action"]   = p["action"]
+                kembar["rf_class"] = p.get("rf_class", kembar.get("rf_class"))
+
+        if dibuang:
+            self._dedup_total = getattr(self, "_dedup_total", 0) + dibuang
+            if self._dedup_total <= 3 or self._dedup_total % 2000 == 0:
+                logger.debug("RF-DETR: %d kotak pemain kembar disatukan "
+                             "(total %d)", dibuang, self._dedup_total)
+        out["players"] = simpan
 
     def _periksa_indeks(self, kelas) -> None:
         """Periksa sendiri apakah offset-nya masuk akal, sekali saja di awal.
@@ -538,12 +600,36 @@ class RFDetrDetector:
 
 def create_rfdetr_detector(
     models_path: Optional[str] = None,
-    conf_threshold: float = CONF,
+    conf_threshold: Optional[float] = None,
 ) -> RFDetrDetector:
-    """Pabrik, sejajar dengan create_detector di detector.py."""
+    """Pabrik, sejajar dengan create_detector di detector.py.
+
+    RFDETR_CONF MENANG atas conf_threshold yang dikirim pemanggil.
+
+    Alasannya bug nyata yang sudah terukur: detector.create_detector()
+    memanggil fungsi ini dengan conf_threshold dari DETECTOR_CONF (bawaan
+    0,25), sehingga RFDETR_CONF DIABAIKAN sepenuhnya lewat jalur pabrik.
+    Gejalanya tidak kelihatan: menyetel RFDETR_CONF=0,35 lalu 0,55 memberi
+    hasil yang IDENTIK sampai ke angka terakhir, karena dua duanya sebenarnya
+    jalan di 0,25.
+
+    Ambang YOLO dan RF-DETR memang tidak sebanding. YOLO memakai NMS dengan
+    IoU, RF-DETR memakai prediksi himpunan tanpa NMS, jadi satu angka
+    DETECTOR_CONF tidak bisa mewakili keduanya. Karena itu RFDETR_CONF
+    disediakan terpisah, dan di sini dia yang menentukan.
+    """
+    if os.getenv("RFDETR_CONF") is not None:
+        conf = CONF                      # disetel pengguna, ini yang dipakai
+    elif conf_threshold is not None:
+        conf = conf_threshold            # ikut pemanggil kalau tidak disetel
+    else:
+        conf = CONF
+    logger.info("RF-DETR ambang keyakinan %.2f (RFDETR_CONF=%s, "
+                "dari pemanggil=%s)", conf, os.getenv("RFDETR_CONF"),
+                conf_threshold)
     det = RFDetrDetector(
         model_path=os.path.join(models_path or MODELS_DIR, WEIGHTS),
-        conf_threshold=conf_threshold,
+        conf_threshold=conf,
     )
     det.load_model()
     return det

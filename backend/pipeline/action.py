@@ -106,9 +106,18 @@ _T_VMAE          = 16    # VideoMAE temporal dim (matches training NUM_FRAMES)
 _VMAE_MEAN = (0.485, 0.456, 0.406)
 _VMAE_STD  = (0.229, 0.224, 0.225)
 
-# ── SlowFast constants (kept for reference / fallback) ───────────────────────
-# _T_FAST          = 32  # SlowFast fast-pathway temporal dim (head pool expects 32)
-# _T_SLOW          = 8   # SlowFast slow-pathway temporal dim: T_FAST / lateral_stride=4
+# ── SlowFast constants ───────────────────────────────────────────────────────
+# Diambil PERSIS dari skrip latihannya,
+# dataset/01-action/slowfast/action-v13/train_action-slowfast-v2.py:
+#     NUM_FRAMES_SLOW = 8     NUM_FRAMES_FAST = 32    (alpha = 4)
+#     RESIZE = 224   MEAN = [0.45]*3   STD = [0.225]*3
+_T_FAST          = 32
+_T_SLOW          = 8
+# PERHATIAN: normalisasi SlowFast BEDA dari VideoMAE. VideoMAE memakai statistik
+# ImageNet, SlowFast memakai statistik Kinetics. Menukarnya diam diam menggeser
+# seluruh masukan dan membuat akurasi anjlok tanpa pesan kesalahan apa pun.
+_SF_MEAN = (0.45, 0.45, 0.45)
+_SF_STD  = (0.225, 0.225, 0.225)
 # # Training: T.NormalizeVideo(mean=[0.45,0.45,0.45], std=[0.225,0.225,0.225])
 # _NORM_MEAN = (0.45,  0.45,  0.45)
 # _NORM_STD  = (0.225, 0.225, 0.225)
@@ -258,44 +267,49 @@ class ActionClassifier:
                     logger.warning("VideoMAE load failed (%s) — rule-based mode", exc)
                 return
 
-            # ── SlowFast branch (kept, inactive while vmae checkpoint is active) ─
-            # try:
-            #     import sys, types, torch.nn as _nn
-            #     import torchvision as _tv
-            #     if not hasattr(_tv, "ops") or not hasattr(_tv.ops, "RoIAlign"):
-            #         _ops = types.ModuleType("torchvision.ops")
-            #         class _RoIAlign(_nn.Module):
-            #             def forward(self, x, boxes): return x
-            #         _ops.RoIAlign = _RoIAlign
-            #         _tv.ops = _ops
-            #         sys.modules["torchvision.ops"] = _ops
-            #     from pytorchvideo.models.slowfast import create_slowfast
-            #     _T_SLOW, _T_FAST = 8, 32
-            #     model = create_slowfast(
-            #         model_depth=50, input_channels=(3, 3),
-            #         model_num_class=len(self._action_classes),
-            #         slowfast_channel_reduction_ratio=8,
-            #         slowfast_conv_channel_fusion_ratio=2,
-            #         slowfast_fusion_conv_kernel_size=(7, 1, 1),
-            #         slowfast_fusion_conv_stride=(4, 1, 1),
-            #     )
-            #     raw_sd   = ckpt["model"]
-            #     remapped = {k.replace("blocks.6.proj.1.", "blocks.6.proj."): v
-            #                 for k, v in raw_sd.items()}
-            #     model.load_state_dict(remapped)
-            #     self.model = model.to(target).eval()
-            #     if target.startswith("cuda"):
-            #         self.model.half()
-            #     self._model_backend = "slowfast"
-            #     self._model_mode    = True
-            #     logger.info("action_best_v1.pt loaded (SlowFast-R50, %d classes) on %s fp16=%s",
-            #                 len(self._action_classes), target, target.startswith("cuda"))
-            # except ImportError:
-            #     logger.warning("pytorchvideo not installed — rule-based mode.")
-            # except RuntimeError as exc:
-            #     logger.warning("SlowFast state-dict mismatch (%s) — rule-based mode", exc)
-            # except Exception as exc:
-            #     logger.warning("SlowFast model build failed (%s) — rule-based mode", exc)
+            # ── SlowFast branch ──────────────────────────────────────────────
+            # Dipilih otomatis kalau checkpoint TIDAK menyebut videomae.
+            # Checkpoint action-v13 membawa arch="slowfast_r50" dan val_acc_ma
+            # 0,7924, jauh di atas VideoMAE yang 0,5490.
+            try:
+                import torch.nn as _nn
+                from pytorchvideo.models.hub import slowfast_r50
+
+                n_cls = len(self._action_classes)
+                # Konstruktor WAJIB sama persis dengan skrip latihan:
+                #     model = slowfast_r50(pretrained=True)
+                #     model.blocks[-1].proj = Sequential(Dropout(0.5), Linear(in, n))
+                # JANGAN memakai create_slowfast(...) seperti kode lama. Itu untuk
+                # checkpoint action_best_v1.pt yang kepalanya Linear polos; dengan
+                # checkpoint ini bobotnya tidak akan cocok.
+                model = slowfast_r50(pretrained=False)
+                in_feat = model.blocks[-1].proj.in_features
+                model.blocks[-1].proj = _nn.Sequential(
+                    _nn.Dropout(p=0.5),
+                    _nn.Linear(in_feat, n_cls),
+                )
+                # strict=True disengaja: kalau ada kunci yang meleset, lebih baik
+                # jatuh ke aturan daripada diam diam memakai bobot separuh acak.
+                model.load_state_dict(ckpt["model"], strict=True)
+                self.model = model.to(target).eval()
+                if target.startswith("cuda"):
+                    self.model.half()
+                self._model_backend = "slowfast"
+                self._model_mode    = True
+                logger.info(
+                    "%s loaded (SlowFast-R50, %d classes) on %s fp16=%s "
+                    "val_acc_ma=%.4f",
+                    path.name, n_cls, target, target.startswith("cuda"),
+                    float(ckpt.get("val_acc_ma", 0.0)),
+                )
+            except ImportError:
+                logger.warning("pytorchvideo belum terpasang — mode aturan. "
+                               "pip install pytorchvideo")
+            except RuntimeError as exc:
+                logger.warning("SlowFast state-dict tidak cocok (%s) — mode aturan", exc)
+            except Exception as exc:
+                logger.warning("SlowFast gagal dibangun (%s) — mode aturan", exc)
+            return
 
         except Exception as exc:
             logger.warning("Failed to load action model: %s — rule-based mode", exc)
@@ -318,16 +332,15 @@ class ActionClassifier:
                 with torch.no_grad():
                     self.model(pixel_values=dummy)
                 logger.info("ActionClassifier warmup done (VideoMAE fp16=%s)", use_half)
-            # SlowFast warmup (inactive — kept for reference)
-            # else:
-            #     _T_SLOW, _T_FAST = 8, 32
-            #     slow_t = torch.zeros(1, 3, _T_SLOW, _INPUT_SIZE, _INPUT_SIZE,
-            #                          dtype=dtype, device=device)
-            #     fast_t = torch.zeros(1, 3, _T_FAST, _INPUT_SIZE, _INPUT_SIZE,
-            #                          dtype=dtype, device=device)
-            #     with torch.no_grad():
-            #         self.model([slow_t, fast_t])
-            #     logger.info("ActionClassifier warmup done (SlowFast fp16=%s)", use_half)
+            else:
+                # SlowFast: dua jalur, tata letak (N, C, T, H, W)
+                slow_t = torch.zeros(1, 3, _T_SLOW, _INPUT_SIZE, _INPUT_SIZE,
+                                     dtype=dtype, device=device)
+                fast_t = torch.zeros(1, 3, _T_FAST, _INPUT_SIZE, _INPUT_SIZE,
+                                     dtype=dtype, device=device)
+                with torch.no_grad():
+                    self.model([slow_t, fast_t])
+                logger.info("ActionClassifier warmup done (SlowFast fp16=%s)", use_half)
         except Exception as e:
             logger.debug("ActionClassifier warmup error (non-fatal): %s", e)
 
@@ -686,14 +699,19 @@ class ActionClassifier:
         # Flow: numpy pre-alloc → fill in-place → from_numpy (zero-copy) → .to(GPU)
         import numpy as _np
         N = len(tracked_players)
+        _SF = self._model_backend == "slowfast"
+        _T  = _T_FAST if _SF else _T_VMAE
         batch_np = _np.empty(
-            (N, _T_VMAE, 3, _INPUT_SIZE, _INPUT_SIZE), dtype=_np.float32
+            (N, _T, 3, _INPUT_SIZE, _INPUT_SIZE), dtype=_np.float32
         )
         valid_players: list = []
 
         for i, player in enumerate(tracked_players):
             x1, y1, x2, y2 = [int(v) for v in player.get("bbox", [0, 0, _INPUT_SIZE, _INPUT_SIZE])]
-            self._fill_input_slice(frames, x1, y1, x2, y2, batch_np[i])
+            if _SF:
+                self._fill_input_slice_sf(frames, x1, y1, x2, y2, batch_np[i])
+            else:
+                self._fill_input_slice(frames, x1, y1, x2, y2, batch_np[i])
             valid_players.append(player)
 
         if not valid_players:
@@ -707,7 +725,19 @@ class ActionClassifier:
 
         try:
             with torch.no_grad():
-                logits_batch = self.model(pixel_values=batch).logits  # [N, num_classes]
+                if _SF:
+                    # SlowFast menunggu [slow, fast], masing masing (N, C, T, H, W).
+                    # batch kita (N, T, C, H, W), jadi dimensi 1 dan 2 ditukar.
+                    fast = batch.permute(0, 2, 1, 3, 4).contiguous()
+                    # jalur lambat = subsampel dari jalur cepat, linspace sama
+                    # seperti latihan (alpha = T_FAST / T_SLOW = 4)
+                    slow_idx = torch.linspace(
+                        0, _T_FAST - 1, _T_SLOW, device=fast.device
+                    ).round().long()
+                    slow = fast.index_select(2, slow_idx).contiguous()
+                    logits_batch = self.model([slow, fast])       # [N, num_classes]
+                else:
+                    logits_batch = self.model(pixel_values=batch).logits  # [N, num_classes]
                 probs_batch  = torch.softmax(logits_batch, dim=-1)    # [N, num_classes]
         except Exception as exc:
             # The bare `%s` was printing an EMPTY message (str(exc) == "") so the
@@ -827,6 +857,53 @@ class ActionClassifier:
             })
 
         return {"actions": actions}
+
+    def _fill_input_slice_sf(
+        self,
+        frames: list,
+        x1: int, y1: int, x2: int, y2: int,
+        out,   # np.ndarray [T_FAST, C, H, W] — ditulis di tempat
+    ) -> None:
+        """Siapkan satu klip pemain untuk SlowFast.
+
+        SENGAJA BERBEDA dari _fill_input_slice yang untuk VideoMAE, dan
+        perbedaannya bukan selera melainkan mengikuti skrip latihan masing
+        masing. Menyamakannya akan membuka jurang domain yang tidak terlihat:
+
+          VideoMAE : letterbox dengan bantalan hitam, statistik ImageNet
+          SlowFast : F.interpolate bilinear ke 224x224 yang MEREGANGKAN,
+                     statistik Kinetics 0,45 / 0,225
+
+        Lihat train_action-slowfast-v2.py: frames di-interpolate ke
+        (RESIZE, RESIZE) tanpa menjaga rasio, lalu dibagi 255 dan dinormalkan.
+        """
+        import cv2
+        import numpy as np
+
+        mean = np.array(_SF_MEAN, dtype=np.float32)
+        std  = np.array(_SF_STD,  dtype=np.float32)
+        sz   = _INPUT_SIZE
+
+        n = len(frames)
+        if n <= 0:
+            out[:] = 0.0
+            return
+        # linspace, sama seperti latihan: torch.linspace(0, T-1, NUM_FRAMES)
+        idx = np.linspace(0, n - 1, _T_FAST).round().astype(int)
+
+        for j, fi in enumerate(idx):
+            frame = frames[fi]
+            fh, fw = frame.shape[:2]
+            crop = frame[max(0, y1):min(fh, y2), max(0, x1):min(fw, x2)]
+            if crop.size == 0:
+                out[j] = 0.0
+                continue
+            # REGANG, bukan letterbox — ini yang dilakukan latihannya.
+            if crop.shape[0] != sz or crop.shape[1] != sz:
+                crop = cv2.resize(crop, (sz, sz), interpolation=cv2.INTER_LINEAR)
+            rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            rgb = (rgb - mean) / std
+            out[j] = rgb.transpose(2, 0, 1)   # HWC -> CHW
 
     def _fill_input_slice(
         self,

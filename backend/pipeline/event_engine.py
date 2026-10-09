@@ -43,7 +43,37 @@ REFERENCE_FPS          = 15.0
 
 POSSESSION_CONFIRM_F   = 3      # consecutive frames to confirm new possession
 
-FG_HOOP_RADIUS_PX      = 70     # pixels  — ball inside hoop zone (wider → fewer missed baskets)
+# ── Gerbang bola masuk ring: SETELANNYA PER DETEKTOR, bukan satu untuk semua ─
+#
+# Gerbang ini menghitung berapa frame BERTURUT TURUT bola berada di zona ring.
+# Karena itu dia bergantung langsung pada SEBERAPA SERING bola terdeteksi, dan
+# dua detektor kita sangat berbeda di titik itu:
+#     YOLO    menemukan bola di 38,9 % frame
+#     RF-DETR menemukan bola di 67,4 % frame
+#
+# Akibatnya satu setelan tidak mungkin benar untuk keduanya. DIUKUR pada
+# potongan 90 detik yang kebenarannya 2 poin (papan skor 0-0 jadi 0-2):
+#
+#     radius  dwell   RF-DETR   YOLO
+#       70      2        8        3     <- bawaan lama, RF-DETR menggelembung 4x
+#       70      5        2        0     <- benar utk RF-DETR, YOLO kehilangan bolanya
+#       45      3        2        0     <- benar utk RF-DETR, YOLO kehilangan bolanya
+#
+# Jadi memakai angka RF-DETR untuk YOLO membuat bola masuk yang sah TIDAK
+# TERHITUNG SAMA SEKALI, dan memakai angka YOLO untuk RF-DETR membuat poin
+# terhitung BERKALI KALI. Dua duanya salah, ke arah yang berlawanan.
+#
+# Karena itu bawaannya dipilih menurut DETECTOR_METHOD, dan tetap bisa ditimpa
+# lewat env kalau mau menyetel sendiri. Bawaan YOLO sengaja dibiarkan PERSIS
+# seperti sebelumnya (70 dan 2), jadi perilaku lama tidak berubah sama sekali.
+_DETEKTOR = os.getenv("DETECTOR_METHOD", "yolo").strip().lower()
+_FG_BAWAAN = {
+    "rfdetr": {"radius_px": 45, "dwell": 3},
+    "yolo":   {"radius_px": 70, "dwell": 2},
+}.get(_DETEKTOR, {"radius_px": 70, "dwell": 2})
+
+FG_HOOP_RADIUS_PX      = int(os.getenv("FG_HOOP_RADIUS_PX",
+                                       _FG_BAWAAN["radius_px"]))
 FG_HOOP_RADIUS_M       = 0.45   # meters  — tighter in court space (no action gate)
 FG_COOLDOWN_F          = 45     # frames before another FG can fire
 FG_ABOVE_MARGIN_PX     = 10     # ball must be ≥ this many px above hoop_y to arm
@@ -51,7 +81,9 @@ FG_ABOVE_WINDOW_F      = 20     # frames to look back for "was above" check (~1.
 FG_ATTEMPT_WINDOW_F    = 150    # kept for MISSED_FG accounting only (not scoring gate)
 FG_MISS_TIMEOUT_F      = 100    # frames after SHOOT with no MADE → MISSED_FG
 FG_BALL_LOST_RESET_F   = 3      # consecutive ball-absent frames before resetting zone state
-FG_ZONE_DWELL_F        = 2      # ball must stay in zone N frames before MADE_FG fires
+FG_ZONE_DWELL_F        = int(os.getenv("FG_ZONE_DWELL_F",
+                                       _FG_BAWAAN["dwell"]))  # lihat catatan
+                                # di FG_HOOP_RADIUS_PX: bawaannya ikut detektor
 FG_HOOP_CACHE_TTL      = 90     # reject stale hoop cache after this many frames (~6 s)
 FG_SHOOTER_TTL_F       = 120    # frames after shot attempt before shooter attribution expires
 FG_MIN_DOWNWARD_DY     = 2      # ball must be moving downward by at least this many px at entry

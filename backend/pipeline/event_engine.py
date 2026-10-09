@@ -86,7 +86,61 @@ FG_ZONE_DWELL_F        = int(os.getenv("FG_ZONE_DWELL_F",
                                 # di FG_HOOP_RADIUS_PX: bawaannya ikut detektor
 FG_HOOP_CACHE_TTL      = 90     # reject stale hoop cache after this many frames (~6 s)
 FG_SHOOTER_TTL_F       = 120    # frames after shot attempt before shooter attribution expires
-FG_MIN_DOWNWARD_DY     = 2      # ball must be moving downward by at least this many px at entry
+FG_MIN_DOWNWARD_DY     = 2
+
+# ── Cara menentukan POSISI PENEMBAK ─────────────────────────────────────────
+# Ini menentukan 2 angka atau 3 angka, jadi salah di sini langsung mengubah skor.
+#
+# "furthest" (cara lama): ambil titik TERJAUH dari ring dalam 2 detik terakhir.
+#   Niatnya "pemain masih di tempat menembak". Tapi untuk layup justru terbalik:
+#   2 detik sebelum mencetak pemain memang masih 9 meter dari ring, lalu
+#   menerobos dan mencetak dari 1 meter. Cara ini mengembalikan yang 9 meter,
+#   dan tembakan itu salah dinilai 3 angka.
+#
+#   TERUKUR pada potongan 4 menit Q1 UNESA-UBAYA: semua tembakan yang dinilai
+#   3 angka berada di 9,4 sampai 11,7 meter dari ring, dua di antaranya bahkan
+#   DI LUAR lapangan. Semua yang dinilai 2 angka wajar, 0,9 sampai 5,3 meter.
+#
+# "lookback" (cara baru): ambil posisi pemain sekitar satu detik SEBELUM bola
+#   masuk, yaitu kira kira saat bola lepas dari tangan. Bola butuh 0,5 sampai
+#   1,5 detik melayang dari lepas sampai ring, jadi ini lebih dekat ke kejadian
+#   sebenarnya daripada memilih titik ekstrem.
+#
+# Catatan penting: jalur cadangan ini JAUH lebih sering terpakai sejak model
+# aksi diganti ke SlowFast. VideoMAE memicu Shoot pada 40,7 persen pemain
+# sehingga last_shot_pos hampir selalu terisi; SlowFast hanya 1,2 persen.
+# ── Gerbang keempat: bola harus TERLIHAT DI BAWAH ring ──────────────────────
+# Gerbang yang ada sekarang memeriksa tiga hal lalu LANGSUNG menyalakan poin:
+#   1. bola masuk zona ring   2. bertahan N frame   3. datang dari atas & turun
+# Bola yang MENGENAI RING LALU MEMANTUL memenuhi ketiganya. Dia juga datang
+# dari atas, juga bergerak turun, juga masuk zona. Bedanya cuma pada apa yang
+# terjadi SESUDAHNYA: yang masuk terus turun melewati ring, yang memantul
+# kembali ke atas atau terlempar ke samping.
+#
+# TERBUKTI pada potongan 4 menit Q1 UNESA-UBAYA di detik 3:51. Jam tembakan
+# berubah 12 lalu 14, yaitu reset khas rebound serangan setelah bola kena ring.
+# Skor di papan TIDAK berubah, tapi sistem mencatat bola masuk. Tiga dari lima
+# deteksi YOLO di potongan itu palsu dengan pola yang sama.
+#
+# Gerbang ini menunggu sampai bola benar benar terlihat DI BAWAH tinggi ring
+# sambil masih dekat secara mendatar. Bola yang memantul keluar zona ke atas
+# tidak akan pernah memenuhinya, dan poin tidak menyala.
+#
+# MATI secara bawaan supaya perilaku lama tidak berubah sebelum terbukti.
+# Ambangnya BEDA per detektor, dan ini bukan penyetelan sembarangan.
+# Diukur pada 191 frame: kotak ring YOLO 42,0 x 47,5 px karena memuat JARING
+# yang menjuntai, sedangkan kotak RF-DETR 36,5 x 16,6 px yaitu CINCINNYA saja.
+# Pusat kotak YOLO jatuh 13,1 piksel DI BAWAH cincin. Jadi "8 piksel di bawah
+# cincin" berarti +8 untuk RF-DETR tapi sekitar -5 untuk YOLO (13,1 dikurangi 8).
+# Memakai +8 untuk YOLO akan menuntut bola turun jauh di bawah jaring dan
+# membuat bola masuk yang sah ikut tertolak.
+FG_CONFIRM_BELOW       = os.getenv("FG_CONFIRM_BELOW", "0") == "1"
+FG_BELOW_MARGIN_PX     = int(os.getenv(
+    "FG_BELOW_MARGIN_PX",
+    {"rfdetr": 8, "yolo": -5}.get(_DETEKTOR, -5)))
+
+SHOT_POS_METHOD        = os.getenv("SHOT_POS_METHOD", "furthest").strip().lower()
+SHOT_POS_LOOKBACK_F    = int(os.getenv("SHOT_POS_LOOKBACK_F", "15"))  # ~1 detik @15fps      # ball must be moving downward by at least this many px at entry
 
 REBOUND_HOOP_RADIUS_PX = 90
 REBOUND_HOOP_RADIUS_M  = 1.5
@@ -274,6 +328,7 @@ class EventEngine:
         self._fg_zone_dwell_f      = _sc(FG_ZONE_DWELL_F)
         self._fg_hoop_cache_ttl    = _sc(FG_HOOP_CACHE_TTL)
         self._fg_shooter_ttl_f     = _sc(FG_SHOOTER_TTL_F)
+        self._shot_pos_lookback_f  = _sc(SHOT_POS_LOOKBACK_F)
         self._rebound_cooldown_f   = _sc(REBOUND_COOLDOWN_F)
         self._reb_min_f            = _sc(REBOUND_MIN_F)
         self._blk_cooldown_f       = _sc(BLK_COOLDOWN_F)
@@ -624,7 +679,14 @@ class EventEngine:
         # before scoring.  This eliminates single-frame false positives from
         # dribbles, deflections, and ball-near-rim but not-through-rim moments.
         # Fire exactly on the Nth frame (== not >=) so cooldown prevents re-fire.
-        if self._ball_in_hoop_frames != self._fg_zone_dwell_f:
+        if FG_CONFIRM_BELOW:
+            # Dengan gerbang keempat, bola diperiksa SETIAP frame selama masih
+            # di zona, sampai dia terlihat di bawah ring atau keluar zona.
+            # Aman dari penyalaan berulang karena _detect_field_goal hanya
+            # dipanggil saat _fg_cooldown == 0, dan jeda diset begitu menyala.
+            if self._ball_in_hoop_frames < self._fg_zone_dwell_f:
+                return events
+        elif self._ball_in_hoop_frames != self._fg_zone_dwell_f:
             return events
 
         # ── 2. "From above" check — pixel space ──────────────────────────
@@ -664,6 +726,20 @@ class EventEngine:
                     )
                     self._ball_in_hoop_frames = 0
                     return events
+
+        # ── 2b. Bola harus TERLIHAT DI BAWAH ring ────────────────────────
+        # Inilah pembeda bola MASUK dari bola yang MENGENAI RING lalu memantul.
+        # Tidak mereset _ball_in_hoop_frames: selama bola masih di zona,
+        # frame berikutnya diperiksa lagi. Kalau bola memantul keluar zona,
+        # penghitung ter-reset sendiri di bagian 1 dan poin tidak pernah menyala.
+        if FG_CONFIRM_BELOW:
+            hoop_y_ref = float(hoop_ref_px[1])
+            if float(ball_px[1]) <= hoop_y_ref + FG_BELOW_MARGIN_PX:
+                logger.debug(
+                    "FG ditahan — bola belum di bawah ring (ball_y=%.0f, "
+                    "butuh > %.0f)", float(ball_px[1]),
+                    hoop_y_ref + FG_BELOW_MARGIN_PX)
+                return events
 
         # ── 3. Identify shooter + the SCORING (offensive) team ────────────
         # Team-level correctness holds even when the exact player/number is
@@ -825,8 +901,15 @@ class EventEngine:
         hist = self._player_court_hist.get(track_id)
         if not hist:
             return None
-        # Use only the most recent ~2 seconds to avoid picking a position
-        # from many seconds before the actual shot.
+
+        if SHOT_POS_METHOD == "lookback":
+            # Posisi sekitar satu detik lalu, kira kira saat bola lepas.
+            # Tidak memilih titik ekstrem, jadi tidak bias ke arah 3 angka.
+            n = getattr(self, "_shot_pos_lookback_f", SHOT_POS_LOOKBACK_F)
+            riwayat = list(hist)
+            return riwayat[-min(max(1, n), len(riwayat))]
+
+        # Cara lama: titik TERJAUH dari ring dalam ~2 detik terakhir.
         recent = list(hist)[-30:]
         best_pos, best_d = None, -1.0
         for pos in recent:

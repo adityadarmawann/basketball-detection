@@ -183,6 +183,75 @@ PLAYER_DEDUP_IOU = float(os.getenv("RFDETR_PLAYER_DEDUP_IOU", "0.60"))
 # bukan RFDETR_CLASS_NAMES di atas. Lihat load_model().
 CLASS_OFFSET = int(os.getenv("RFDETR_CLASS_OFFSET", "0"))
 
+# ── DETEKSI ULANG PADA POTONGAN DI SEKITAR RING ─────────────────────────────
+#
+# MASALAH YANG DIATASI, terukur bukan dugaan. Frame utuh 1280x720 diperkecil ke
+# 576x576 sebelum masuk model, jadi skala x 0,45 dan skala y 0,80. Bola selebar
+# 21 px di frame asli menyusut jadi 9,5 px di penglihatan model. Objek sekecil
+# itu hilang atau salah tempat tepat saat menentukan.
+#
+# JALAN KEDUA: saat rim terdeteksi, ambil potongan persegi di sekitar rim dari
+# frame RESOLUSI ASLI lalu jalankan detektor pada potongan itu. Potongan 448
+# diperbesar ke 576, jadi skalanya 1,29 dan bola 21 px terlihat 27 px, hampir
+# tiga kali lebih besar daripada 9,5 px. Koordinat hasilnya digeser kembali ke
+# frame penuh.
+#
+# DIUKUR 10 Oktober 2026 pada 4 frame q1_4menit.mp4 yang punya bola dan rim
+# berdekatan, skrip periksa_potongan:
+#     penuh c=0,857 -> potongan 448 c=0,833   (sudah kuat, setara)
+#     penuh c=0,672 -> potongan 448 c=0,841
+#     penuh c=0,566 -> potongan 448 c=0,743   dan posisinya beda 15 px
+#     penuh c=0,333 -> potongan 448 c=0,583   dan posisinya beda 15 px
+# Pada dua frame terakhir frame penuh menaruh bola di x=464 padahal dua frame
+# sebelumnya 481 dan 479, sedangkan potongan tetap 479. Jadi yang MELOMPAT
+# adalah frame penuh, dan potongan yang benar menurut kesinambungan lintasan.
+#
+# PETA KOORDINAT SUDAH DIPERIKSA, bukan diasumsikan: kotak yang dikembalikan
+# rfdetr berada di ruang koordinat GAMBAR MASUKAN, jadi untuk potongan cukup
+# ditambah (x0, y0). Diuji pada potongan 320, 448, dan 576; rim hasil potongan
+# sepakat dengan rim frame penuh dalam 1,0 sampai 3,6 px.
+#
+# BIAYA: satu predict potongan 9 sampai 10 ms, sama dengan predict frame penuh.
+# Jadi menjalankannya di SETIAP frame menggandakan waktu detektor. Karena itu
+# ada gerbang jarak: potongan hanya dijalankan kalau bola yang terakhir
+# diketahui berada dalam HOOP_ROI_NEAR_PX dari rim. Di luar itu tidak ada yang
+# perlu dipertajam.
+#
+# MATI secara bawaan. Tidak diisi berarti perilaku lama persis seperti dulu.
+HOOP_ROI_ENABLE  = os.getenv("HOOP_ROI_ENABLE", "0") == "1"
+# Sisi potongan dalam piksel frame ASLI. 448 dipilih sebagai imbangan: cukup
+# besar supaya bola yang masih 200 px di atas rim tetap masuk potongan, cukup
+# kecil supaya pembesarannya nyata (576/448 = 1,29x).
+HOOP_ROI_SIZE    = int(os.getenv("HOOP_ROI_SIZE", "448"))
+# Gerbang jarak. Potongan dijalankan hanya kalau bola terakhir yang diketahui
+# ada dalam jarak ini dari pusat rim. 0 berarti SELALU jalan (untuk pengukuran,
+# bukan untuk produksi, karena biayanya dua kali).
+HOOP_ROI_NEAR_PX = float(os.getenv("HOOP_ROI_NEAR_PX", "300"))
+# Umur maksimum ingatan posisi bola yang masih boleh dipakai gerbang jarak.
+# Harus ada: justru saat menentukan bolanya sering HILANG beberapa frame, dan
+# kalau ingatannya langsung kedaluwarsa potongan tidak pernah jalan tepat pada
+# frame yang paling dibutuhkan. 15 frame kira kira 0,5 detik di 30 fps efektif.
+HOOP_ROI_HIST_F  = int(os.getenv("HOOP_ROI_HIST_F", "15"))
+# Ambang keyakinan khusus hasil potongan. 0 berarti ikut ambang bola biasa.
+HOOP_ROI_CONF    = float(os.getenv("HOOP_ROI_CONF", "0"))
+# ATURAN GABUNG, supaya satu bola TIDAK pernah jadi dua.
+# Keluaran "ball" memang satu slot, jadi tidak mungkin berganda secara bentuk.
+# Yang perlu aturan adalah SIAPA YANG MENANG:
+#   1. potongan tidak menemukan apa apa      -> frame penuh dipakai, tanpa ubah
+#   2. frame penuh tidak menemukan apa apa   -> hasil potongan MENGISI celah
+#   3. keduanya ada dan pusatnya berdekatan  -> hasil potongan MENGGANTI, karena
+#      itu bola yang SAMA dilihat pada resolusi lebih tinggi
+#   4. keduanya ada tapi JAUH                -> frame penuh DIPERTAHANKAN. Ini
+#      sengaja konservatif: kalau dua pandangan tidak sepakat objeknya, memilih
+#      yang baru berarti berani memindahkan bola melintasi layar atas dasar
+#      satu potongan. Pelajaran uji ambang bola persis soal itu, posisi salah
+#      lebih merusak daripada celah jujur.
+HOOP_ROI_OVERLAP_PX = float(os.getenv("HOOP_ROI_OVERLAP_PX", "60"))
+# Kotak yang MENYENTUH tepi potongan ditolak. Objek yang terpotong tepinya
+# memberi pusat yang digeser ke dalam, dan pusat itulah yang dipakai gerbang
+# bola masuk. Lebih baik tidak ada daripada bergeser.
+HOOP_ROI_EDGE_PX = float(os.getenv("HOOP_ROI_EDGE_PX", "2"))
+
 
 def _bbox_center(x1: float, y1: float, x2: float, y2: float) -> list:
     return [(x1 + x2) / 2, (y1 + y2) / 2]
@@ -235,6 +304,14 @@ class RFDetrDetector:
         self._idx_lo = None
         self._idx_hi = None
         self._tak_dikenal_total: int = 0
+        # ── Keadaan jalur potongan ring. Lihat HOOP_ROI_ENABLE di atas ──
+        self._nf: int = 0                       # nomor frame, untuk umur ingatan
+        self._bola_terakhir = None              # [x, y] bola NYATA terakhir
+        self._bola_terakhir_nf: int = -10 ** 9  # frame saat itu direkam
+        # Hitungan untuk laporan. Dibaca skrip pengukur, jangan dibuang.
+        self.roi_stat = {"jalan": 0, "lewat": 0, "isi": 0, "ganti": 0,
+                         "tolak_jauh": 0, "tolak_tepi": 0, "kosong": 0,
+                         "masuk_jaring": 0}
 
     # ── daur hidup ────────────────────────────────────────────────────────────
 
@@ -489,7 +566,148 @@ class RFDetrDetector:
 
         self._satukan_pemain(out)
         self._cocokkan_nomor(out)
+        # Jalur kedua: pertajam bola dengan potongan di sekitar rim. Dijalankan
+        # SETELAH jalur frame penuh selesai, jadi kalau saklarnya mati tidak ada
+        # satu baris pun yang berubah dari perilaku lama.
+        if HOOP_ROI_ENABLE:
+            self._deteksi_ulang_ring(frame, out)
+        self._ingat_bola(out)
         return out
+
+    # ── Jalur kedua: potongan di sekitar ring ────────────────────────────────
+
+    def _ingat_bola(self, out: dict) -> None:
+        """Simpan posisi bola NYATA terakhir, untuk gerbang jarak potongan.
+
+        Dipisah dari _deteksi_ulang_ring supaya ingatannya tetap terisi walau
+        saklar potongan mati, sehingga menyalakan saklar di tengah jalan tidak
+        pernah bertemu ingatan kosong.
+        """
+        self._nf += 1
+        b = out.get("ball")
+        if b and b.get("center"):
+            self._bola_terakhir    = list(b["center"])
+            self._bola_terakhir_nf = self._nf
+
+    def _pilih_rim(self, out: dict) -> Optional[dict]:
+        """Rim yang dipakai sebagai pusat potongan.
+
+        Daftar "rims" dipakai lebih dulu karena itu CINCIN yang sebenarnya;
+        "hoops" hanya cadangan supaya fungsi ini tidak pecah kalau suatu saat
+        dipanggil pada keluaran yang tidak memisah rim.
+        """
+        kandidat = out.get("rims") or out.get("hoops") or []
+        if not kandidat:
+            return None
+        if self._bola_terakhir is not None:
+            bx, by = self._bola_terakhir
+            return min(kandidat, key=lambda r: (r["center"][0] - bx) ** 2
+                                             + (r["center"][1] - by) ** 2)
+        return max(kandidat, key=lambda r: r.get("confidence", 0.0))
+
+    def _deteksi_ulang_ring(self, frame: np.ndarray, out: dict) -> None:
+        """Deteksi ulang bola pada potongan resolusi ASLI di sekitar rim.
+
+        Sasarannya KETEPATAN POSISI bola pada saat menentukan, bukan jumlah
+        deteksi. Karena itu hanya kelas "ball" yang diambil dari potongan, dan
+        aturan gabungnya menolak hasil yang tidak sepakat dengan frame penuh.
+        Kelas lain (pemain, nomor, hakim, rim) TIDAK diambil, supaya tidak ada
+        benda yang terhitung dua kali.
+        """
+        rim = self._pilih_rim(out)
+        if rim is None:
+            self.roi_stat["lewat"] += 1
+            return
+
+        # ── Gerbang jarak, supaya waktu prosesnya tidak meledak ──
+        if HOOP_ROI_NEAR_PX > 0:
+            umur = self._nf - self._bola_terakhir_nf
+            if self._bola_terakhir is None or umur > HOOP_ROI_HIST_F:
+                self.roi_stat["lewat"] += 1
+                return
+            bx, by = self._bola_terakhir
+            rx, ry = rim["center"]
+            if (bx - rx) ** 2 + (by - ry) ** 2 > HOOP_ROI_NEAR_PX ** 2:
+                self.roi_stat["lewat"] += 1
+                return
+
+        H, W = frame.shape[:2]
+        S = min(HOOP_ROI_SIZE, H, W)
+        x0 = int(max(0, min(W - S, rim["center"][0] - S / 2)))
+        y0 = int(max(0, min(H - S, rim["center"][1] - S / 2)))
+        potongan = frame[y0:y0 + S, x0:x0 + S]
+        if potongan.size == 0:
+            self.roi_stat["lewat"] += 1
+            return
+
+        ambang = HOOP_ROI_CONF if HOOP_ROI_CONF > 0 else self.conf_ball
+        try:
+            det = self.model.predict(
+                np.ascontiguousarray(potongan[:, :, ::-1]),
+                threshold=ambang, shape=(RFDETR_SHAPE, RFDETR_SHAPE),
+            )
+        except Exception as e:
+            self._roi_gagal = getattr(self, "_roi_gagal", 0) + 1
+            if self._roi_gagal <= 3 or self._roi_gagal % 500 == 0:
+                logger.warning("Potongan ring gagal (%s) [kejadian ke-%d]",
+                               e, self._roi_gagal)
+            return
+        self.roi_stat["jalan"] += 1
+
+        kotak, keyakinan, kelas = self._bongkar(det)
+        if kotak is None:
+            self.roi_stat["kosong"] += 1
+            return
+
+        terbaik = None
+        for (x1, y1, x2, y2), conf, ci in zip(kotak, keyakinan, kelas):
+            idx = int(ci) - self.class_offset
+            if not (0 <= idx < len(self._class_names)):
+                continue
+            nama = self._class_names[idx]
+            if nama == "ball-in-basket":
+                # TIDAK digabung ke keluaran, hanya dicatat. Kelas ini terukur
+                # 0 deteksi pada frame penuh; kalau di potongan dia menyala,
+                # itu petunjuk berharga untuk penghambat yang masih terbuka.
+                self.roi_stat["masuk_jaring"] += 1
+                continue
+            if nama != "ball":
+                continue
+            # Kotak yang menyentuh tepi potongan ditolak: objek terpotong
+            # memberi pusat yang digeser, dan pusat itulah yang menentukan.
+            if (x1 <= HOOP_ROI_EDGE_PX or y1 <= HOOP_ROI_EDGE_PX
+                    or x2 >= S - HOOP_ROI_EDGE_PX or y2 >= S - HOOP_ROI_EDGE_PX):
+                self.roi_stat["tolak_tepi"] += 1
+                continue
+            if terbaik is None or float(conf) > terbaik[1]:
+                terbaik = ([float(x1), float(y1), float(x2), float(y2)],
+                           float(conf))
+
+        if terbaik is None:
+            self.roi_stat["kosong"] += 1
+            return
+
+        bbox, conf = terbaik
+        bbox = [bbox[0] + x0, bbox[1] + y0, bbox[2] + x0, bbox[3] + y0]
+        baru = {"bbox": bbox, "confidence": conf,
+                "center": _bbox_center(*bbox), "roi": True}
+
+        lama = out.get("ball")
+        if lama is None:
+            # Kasus 2: celah frame penuh DIISI hasil potongan.
+            out["ball"] = baru
+            self.roi_stat["isi"] += 1
+            return
+
+        jarak = float(np.hypot(baru["center"][0] - lama["center"][0],
+                               baru["center"][1] - lama["center"][1]))
+        if jarak <= HOOP_ROI_OVERLAP_PX:
+            # Kasus 3: bola yang SAMA, dilihat lebih besar. Potongan menang.
+            out["ball"] = baru
+            self.roi_stat["ganti"] += 1
+        else:
+            # Kasus 4: tidak sepakat objeknya. Frame penuh dipertahankan.
+            self.roi_stat["tolak_jauh"] += 1
 
     def _satukan_pemain(self, out: dict) -> None:
         """Satukan kotak pemain yang bertumpuk, lintas kelima kelas pemain.

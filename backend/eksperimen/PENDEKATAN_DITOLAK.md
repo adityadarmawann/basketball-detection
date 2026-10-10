@@ -336,6 +336,7 @@ kosong. Hitung ulang pakai Python, jangan `wc -l`.
 | SlowFast ganti VideoMAE | 0,792 lawan 0,549, kelas identik, bobot sudah ada |
 | `PATH_CLEAN_METHOD=roboflow` | percepatan mustahil 53 jadi 4 persen |
 | `HOOP_ROI_ENABLE=1` potongan 448 near 300 | asli ditemukan 2/5 jadi 3/5, palsu 2 jadi 3, nilai 2/3 benar 2 jadi 3, waktu +5 persen |
+| `FG_RIM_GATE=1` gerbang tepi kotak rim | palsu 2 jadi 1 tanpa asli berkurang; yang dibuang detik 1:38 yang lewat 0,5 m DI SAMPING cincin, waktu +2 persen |
 
 ---
 

@@ -55,7 +55,7 @@ Status: `TERUKUR` = ada angka dari jalan nyata. `SEBAGIAN` = baru satu sisi
 | kelas | pemilik sekarang | status | dasar |
 |---|---|---|---|
 | `ball` | **RF-DETR** | **TERUKUR** | RF-DETR 1,8x lebih baik dari YOLO di tiap ambang; gabungan cuma +3,5 titik, ditolak. Potongan resolusi asli di sekitar rim menaikkan keyakinan 0,820 jadi 0,869 dan asli ditemukan 2/5 jadi 3/5 |
-| `hoop` + `rim` | RF-DETR | SEBAGIAN | kotak dan getaran terukur, cakupan lawan YOLO belum |
+| `hoop` + `rim` | RF-DETR | SEBAGIAN | kotak dan getaran terukur, cakupan lawan YOLO belum. Tepi kotak `rim` kini dipakai sebagai bidang skor (`FG_RIM_GATE`) dan memangkas palsu 2 jadi 1 |
 | `player` | RF-DETR | SEBAGIAN | cakupan jauh lebih tinggi, presisi belum |
 | `referee` | RF-DETR | BELUM | belum pernah dibandingkan langsung |
 | `backboard` | TIDAK ADA | TERUKUR | buta di dua duanya, lihat di bawah |
@@ -161,11 +161,24 @@ potongan dijalankan di SETIAP frame, waktu detektor +73 persen. Dengan gerbang
 Getaran 1,7 px itu kecil terhadap gerbang 45 px, jadi posisi ring TIDAK perlu
 dihaluskan (sudah dicatat di `PENDEKATAN_DITOLAK.md`).
 
-**Yang belum dipakai:** RF-DETR memisah `rim` dari `hoop`, tapi kode memasukkan
-rim ke daftar `hoops` dan daftar `rims` terpisah itu NOL kali dibaca mesin
-kejadian. Rim adalah bidang skor yang sebenarnya, dan kotaknya 38 px lebar, jadi
-tepi kiri dan kanannya bisa dipakai untuk uji lintasan yang lebih tajam daripada
-lingkaran radius 45 px di sekitar titik tengah.
+**SUDAH DIPAKAI sejak 10 Oktober 2026, dan terbukti.** Sebelumnya daftar `rims`
+NOL kali dibaca mesin kejadian: kotak rim ikut masuk ke `hoops`, tapi yang
+diambil dari situ hanya `center`, tepinya dibuang. Sekarang `FG_RIM_GATE=1`
+memakai rentang mendatar kotak rim sebagai bidang skor, dan tepi bawahnya
+sebagai garis "sudah lewat".
+
+    skrip 17, q1_4menit.mp4:   asli   palsu   poin   waktu
+      lingkaran 45 px (acuan)   2/5      2       9    16,1 menit
+      tepi kotak rim            2/5      1       7    16,4 menit
+
+Palsu turun tanpa yang asli berkurang. Yang dibuang deteksi detik 1:38 yang
+jaraknya 0,5 m dari ring, yaitu bola yang lewat DI SAMPING cincin: masuk
+lingkaran 45 px tapi di luar separuh lebar cincin yang 19 px.
+
+Mundur sendiri ke lingkaran kalau kotak rim tidak ada (YOLO memberi kotak yang
+memuat JARING bukan cincin, dan ring sintetis dari homografi cuma punya titik
+tengah) atau kalau kotak rim terakhir sudah basi. Jadi kelas `rim` ini pemilik
+bidang skor HANYA pada RF-DETR, dan itu memang satu satunya yang punya kelasnya.
 
 **YOLO lama**: README mencatat recall 64 persen, sering terlewat (56 frame,
 video berbeda).

@@ -337,14 +337,25 @@ kosong. Hitung ulang pakai Python, jangan `wc -l`.
 | `PATH_CLEAN_METHOD=roboflow` | percepatan mustahil 53 jadi 4 persen |
 | `HOOP_ROI_ENABLE=1` potongan 448 near 300 | asli ditemukan 2/5 jadi 3/5, palsu 2 jadi 3, nilai 2/3 benar 2 jadi 3, waktu +5 persen |
 | `FG_RIM_GATE=1` gerbang tepi kotak rim | palsu 2 jadi 1 tanpa asli berkurang; yang dibuang detik 1:38 yang lewat 0,5 m DI SAMPING cincin, waktu +2 persen |
+| KEDUANYA bersama | asli 2/5 jadi 3/5 dengan palsu TETAP 2; pengaruhnya menjumlah, tidak berinteraksi |
 
 ---
 
 ## 6. PENGHAMBAT YANG MASIH TERBUKA
 
-Skor masih 9 lawan kebenaran 11, dan per kejadian cuma 2 dari 5 bola masuk yang
-dikenali. **Ini bukan lagi soal pelacakan pemain.** Buktinya pelacakan diperbaiki
-3 kali lebih baik dan skornya justru bergerak 10 jadi 9.
+DIPERBARUI 10 Oktober 2026. Dengan `HOOP_ROI_ENABLE=1` dan `FG_RIM_GATE=1`
+bersama, per kejadian **3 dari 5** bola masuk dikenali dengan 2 palsu (acuan
+sebelumnya 2 dari 5 dengan 2 palsu). **Ini bukan soal pelacakan pemain.**
+Buktinya pelacakan diperbaiki 3 kali lebih baik dan skornya justru bergerak
+10 jadi 9; yang menggerakkannya justru bukti deteksi bola di dekat ring.
+
+Yang MASIH terbuka, dan sebabnya sudah terpisah pisah:
+- Dua bola masuk masih terlewat di SEMUA setelan: detik 1:30 dan 2:26.
+- Palsu detik 3:52 bertahan di SEMUA setelan. Jaraknya 10,2 m dan dinilai 3
+  angka, jadi sebabnya POSISI PENEMBAK, bukan geometri ring. Gerbang ring
+  sudah dikesampingkan sebagai tersangka, terukur.
+- Palsu detik 1:45 MUNCUL bersama potongan ring. Itu harga yang dibayar untuk
+  bola masuk detik 0:19 yang jadi ditemukan.
 
 Penghambatnya bukti deteksi bola di dekat ring: bola tertutup tangan dan jaring
 tepat pada saat yang menentukan. Jalan yang masih terbuka, berurut dari paling

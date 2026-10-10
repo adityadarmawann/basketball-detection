@@ -54,12 +54,21 @@ Pantau:  `cat /home/paul/antrean_uji_status.txt`
 Hasil :  `tail -25 /home/paul/hasil_<nama>.log`
 Video :  `/home/paul/q1_4menit.mp4` (240 detik, dipotong mulai detik 60)
 
-## KEADAAN SEKARANG
+## KEADAAN SEKARANG, diperbarui 10 Oktober 2026
 
-Skor sistem 9 lawan kebenaran 11 pada potongan 4 menit. Per kejadian, 2 dari 5
-bola masuk yang dikenali. Penghambatnya BUKAN pelacakan pemain (sudah dibuktikan:
-pelacakan diperbaiki 3 kali lebih baik, skor justru bergerak 10 jadi 9).
-Penghambatnya BUKTI DETEKSI BOLA di dekat ring.
+Pada ambang produksi apa adanya: per kejadian 2 dari 5 bola masuk dikenali,
+2 palsu, 9 poin. Dengan `HOOP_ROI_ENABLE=1` dan `FG_RIM_GATE=1` bersama:
+**3 dari 5 dikenali, 2 palsu**. Dua saklar itu masih MATI di `.env`.
+
+Penghambatnya BUKAN pelacakan pemain (sudah dibuktikan: pelacakan diperbaiki
+3 kali lebih baik, skor justru bergerak 10 jadi 9). Penghambatnya BUKTI
+DETEKSI BOLA di dekat ring, dan itulah yang digarap tugas nomor 2.
+
+Yang masih terbuka, sebabnya sudah terpisah pisah:
+- Bola masuk 1:30 dan 2:26 terlewat di SEMUA setelan yang pernah diuji.
+- Palsu 3:52 bertahan di SEMUA setelan. 10,2 m dan dinilai 3 angka, jadi
+  sebabnya POSISI PENEMBAK, bukan geometri ring. Gerbang ring sudah
+  dikesampingkan sebagai tersangka, terukur.
 
 Angka kuncinya: bola selebar 21 px di frame 1280 menyusut jadi **9,5 px** setelah
 frame diperkecil ke 576 untuk masuk detektor. Di jendela 16 detik yang memuat
@@ -84,15 +93,37 @@ Rinciannya di `PENDEKATAN_DITOLAK.md` dan `KEKUATAN_MODEL_PER_KELAS.md`.
 **SASARAN YANG BENAR, hasil pelajaran ini: POSISI BENAR pada saat menentukan,
 BUKAN cakupan tinggi.** Jangan lagi mengejar cakupan bola.
 
-### Nomor 2, BERJALAN
-Deteksi ulang pada potongan di sekitar ring, pada resolusi asli. Sekarang bola
-21 px menyusut jadi 9,5 px karena frame utuh diperkecil ke 576. Dengan potongan,
-bolanya kembali besar, jadi yang diharapkan naik adalah KEYAKINAN dan KETEPATAN
-POSISI, bukan sekadar jumlah deteksi.
+### Nomor 2, SELESAI 10 Oktober 2026, DUA DUANYA DITERIMA
+Potongan resolusi asli di sekitar ring (`HOOP_ROI_ENABLE`) dan gerbang tepi
+kotak rim (`FG_RIM_GATE`). Diuji TERPISAH lalu bersama, skrip 17:
 
-Digabung: kelas `rims` RF-DETR NOL kali dibaca mesin kejadian. Rim itu bidang
-skor sebenarnya, kotaknya 38 px lebar, jadi tepi kiri kanannya bisa dipakai
-untuk uji lintasan yang lebih tajam daripada lingkaran radius 45 px.
+    setelan                     asli   nilai   palsu   poin   waktu
+    acuan produksi              2/5      2       2       9    16,1 menit
+    potongan ring saja          3/5      3       3      13    16,9 menit
+    gerbang tepi rim saja       2/5      2       1       7    16,4 menit
+    KEDUANYA                    3/5      3       2      11    16,9 menit
+
+Gabungannya lebih baik dari acuan di satu sumbu tanpa memburuk di sumbu lain:
+asli 2/5 jadi 3/5, palsu TETAP 2. Pengaruhnya MENJUMLAH, tidak berinteraksi.
+JANGAN memakai "poin 11 lawan 11" sebagai bukti; palsu dan yang terlewat
+saling meniadakan, dan klaim semacam itu sudah pernah dicabut sekali.
+
+**DUA DUANYA MASIH MATI DI `.env`.** Menyalakannya keputusan user, bukan saya,
+karena presisi tidak membaik (3 dari 5 deteksi benar lawan 2 dari 4), yang
+membaik CAKUPAN kejadian. Untuk menyalakan:
+
+    HOOP_ROI_ENABLE=1
+    HOOP_ROI_SIZE=448
+    HOOP_ROI_NEAR_PX=300
+    FG_RIM_GATE=1
+
+Rincian lengkap beserta angka dan sebab teknisnya:
+`eksperimen/PROGRES_ROI_RING.md`.
+
+**Temuan cara ukur yang paling berharga dari tugas ini:** sasaran "ketepatan
+posisi bola" yang saya pakai sebagai penentu JUSTRU MERAMALKAN ARAH YANG SALAH
+untuk potongan ring. Lihat `PENDEKATAN_DITOLAK.md` bagian "Menilai POTONGAN
+RING dari laju lompatan posisi saja". Yang memutuskan tetap skrip 17.
 
 ### Nomor 3, DISETUJUI USER, BELUM DIMULAI
 Tabel pemilik kelas: dua detektor jalan bersama, tiap kelas dimiliki SATU model

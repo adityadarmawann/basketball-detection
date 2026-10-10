@@ -657,10 +657,21 @@ class RFDetrDetector:
                                e, self._roi_gagal)
             return
         self.roi_stat["jalan"] += 1
-        # Dicatat berkala supaya satu jalan pipeline MEMBUKTIKAN SENDIRI jalur
-        # ini terpakai. Tanpa ini, satu satunya petunjuk cuma waktu proses yang
-        # lebih lama, dan itu bukan bukti.
-        if self.roi_stat["jalan"] % 500 == 0:
+        # Satu jalan pipeline harus MEMBUKTIKAN SENDIRI jalur ini terpakai.
+        # Potongan PERTAMA dicatat di tingkat WARNING, sisanya INFO.
+        #
+        # Kenapa WARNING untuk yang pertama, dan ini bukan pilihan gaya:
+        # eksperimen/17_ukur_kejadian.py TIDAK memanggil logging.basicConfig,
+        # jadi logger akarnya tetap di bawaan WARNING dan logger.info TIDAK
+        # PERNAH muncul di lognya. Versi pertama baris ini memakai info dan
+        # karena itu tidak membuktikan apa pun; satu jalan pipeline penuh
+        # sudah terpakai sebelum ketahuan. Satu baris WARNING per proses tidak
+        # membanjiri log tapi menjawab "jalurnya jalan atau tidak" tanpa ragu.
+        if self.roi_stat["jalan"] == 1:
+            logger.warning(
+                "Potongan ring AKTIF: ukuran %d px, gerbang jarak %.0f px, "
+                "ambang %.2f", HOOP_ROI_SIZE, HOOP_ROI_NEAR_PX, ambang)
+        elif self.roi_stat["jalan"] % 500 == 0:
             logger.info("Potongan ring %s", self.roi_stat)
 
         kotak, keyakinan, kelas = self._bongkar(det)

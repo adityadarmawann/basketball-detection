@@ -6,6 +6,7 @@ Ball is a pass-through from detector — not tracked via BoxMOT.
 
 import logging
 import os
+import math
 from typing import Optional
 
 import cv2
@@ -52,6 +53,102 @@ _PARTIAL_INHERIT_IOU = 0.35
 # re-associates and the box snaps back to reality.
 # ~0.5 s of airtime: 15 frames at the 30 fps processed rate. 0 disables.
 _COAST_FRAMES = int(os.getenv("TRACK_COAST_FRAMES", "15"))
+
+# ── Pelacak BOLA ────────────────────────────────────────────────────────────
+# Sebelumnya bola TIDAK dilacak sama sekali: _passthrough_ball meneruskan
+# deteksi mentah apa adanya, tanpa Kalman, tanpa pengisian celah, tanpa
+# penolakan lompatan.
+#
+# Itu merugikan karena dua hal yang sudah terukur:
+#   1. Detektor meleset di 32,6 persen frame (RF-DETR menemukan bola di 67,4
+#      persen). Padahal gerbang bola masuk ring menuntut beberapa frame
+#      BERTURUT TURUT, jadi celah sekecil apa pun memutus hitungannya.
+#   2. Deteksi bola kadang MELOMPAT ke benda bulat lain, sampai 430 piksel per
+#      frame, padahal kecepatan yang sah maksimal 45 piksel per frame di 30 fps.
+#
+# Pelacak di bawah memakai model kecepatan tetap yang sederhana. Dia mengisi
+# celah pendek dengan perkiraan DAN MENANDAINYA lewat kunci "predicted", supaya
+# pemakai di hilir bisa menuntut bukti NYATA untuk keputusan yang menentukan.
+# Membiarkan perkiraan dipakai untuk memutuskan bola masuk akan mengarang poin.
+BALL_TRACK         = os.getenv("BALL_TRACK", "0") == "1"
+# Batas lompatan, piksel per frame pada 15 fps acuan. Diskalakan TERBALIK
+# terhadap fps di dalam kelas. 180 di 15 fps menjadi 90 di 30 fps, tepat di
+# tengah celah antara 45 (sah tercepat) dan 118 (palsu terpelan).
+BALL_MAX_JUMP_PX   = int(os.getenv("BALL_MAX_JUMP_PX", "180"))
+# Berapa frame boleh meluncur tanpa deteksi, pada 15 fps acuan. Sengaja pendek:
+# meluncur terlalu lama berarti mengarang lintasan.
+BALL_COAST_F       = int(os.getenv("BALL_COAST_F", "3"))
+
+
+class PelacakBola:
+    """Pelacak bola kecepatan tetap: isi celah pendek, tolak lompatan mustahil.
+
+    Keluarannya dict yang sama bentuknya dengan deteksi mentah, ditambah
+    kunci "predicted" (True kalau posisinya hasil perkiraan, bukan deteksi).
+    """
+
+    def __init__(self, frame_rate: float = 30.0):
+        self.frame_rate = float(frame_rate) or 30.0
+        skala = 15.0 / max(self.frame_rate, 1e-6)
+        self.batas_lompat = max(20.0, BALL_MAX_JUMP_PX * skala)
+        self.maks_luncur  = max(1, int(round(BALL_COAST_F / max(skala, 1e-6))))
+        self.pos = None          # [x, y]
+        self.vel = [0.0, 0.0]
+        self.ukuran = None       # (lebar, tinggi) kotak terakhir
+        self.conf = 0.0
+        self.sejak = 10 ** 9     # frame sejak deteksi nyata terakhir
+        self.n_tolak = 0
+
+    def update(self, mentah):
+        """Satu deteksi bola mentah (atau None) masuk, satu dict (atau None) keluar."""
+        if self.pos is not None:
+            self.sejak += 1
+            self.pos = [self.pos[0] + self.vel[0], self.pos[1] + self.vel[1]]
+
+        if mentah is not None:
+            x1, y1, x2, y2 = mentah["bbox"]
+            cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            terima = True
+            if self.pos is not None and self.sejak <= self.maks_luncur:
+                # Jatah jarak SEBANDING jeda frame: setelah bola hilang 3 frame
+                # dia memang sudah berpindah 3 kali lebih jauh secara sah.
+                jatah = self.batas_lompat * max(1, self.sejak)
+                if math.hypot(cx - self.pos[0], cy - self.pos[1]) > jatah:
+                    terima = False
+                    self.n_tolak += 1
+            if terima:
+                if self.pos is not None and self.sejak <= self.maks_luncur:
+                    n = max(1, self.sejak)
+                    vx = (cx - (self.pos[0] - self.vel[0] * n)) / n
+                    vy = (cy - (self.pos[1] - self.vel[1] * n)) / n
+                    # perataan ringan supaya satu deteksi meleset tidak
+                    # melempar kecepatan jauh jauh
+                    self.vel = [0.5 * self.vel[0] + 0.5 * vx,
+                                0.5 * self.vel[1] + 0.5 * vy]
+                else:
+                    self.vel = [0.0, 0.0]
+                self.pos = [cx, cy]
+                self.ukuran = (x2 - x1, y2 - y1)
+                self.conf = float(mentah.get("confidence", 0.0))
+                self.sejak = 0
+                return {"bbox": list(mentah["bbox"]), "center": [cx, cy],
+                        "confidence": self.conf, "predicted": False}
+
+        # Tidak ada deteksi yang diterima. Meluncur kalau masih dalam jatah.
+        if self.pos is None or self.sejak > self.maks_luncur or self.ukuran is None:
+            if self.sejak > self.maks_luncur:
+                self.pos = None
+                self.vel = [0.0, 0.0]
+            return None
+        w, h = self.ukuran
+        cx, cy = self.pos
+        return {"bbox": [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
+                "center": [cx, cy],
+                # keyakinan diturunkan tiap frame luncur, supaya pemakai di
+                # hilir bisa membedakan perkiraan dari deteksi nyata
+                "confidence": self.conf * (0.6 ** self.sejak),
+                "predicted": True}
+
 
 # ── Pilihan mesin pelacak (saklar) ───────────────────────────────────────────
 # Diukur di RTX 3060 Ti, 40 detik video 60 fps:
@@ -224,6 +321,8 @@ class PlayerTracker:
         self.reid_model = reid_model
         self.device = device
         self.frame_rate = frame_rate
+        # Pelacak bola. Dibuat ulang di initialize() setelah frame_rate pasti.
+        self._pelacak_bola = PelacakBola(frame_rate) if BALL_TRACK else None
 
         self._player_tracker = None
         self._referee_tracker = None
@@ -269,7 +368,31 @@ class PlayerTracker:
                 # Do NOT go below 0.5: the low-score 2nd-assoc (0.5) and unconfirmed
                 # gate (0.7) are hardcoded in byte_tracker; below 0.5 inverts strictness.
                 # Env-gated so 30/0.45 "strict" preset is A/B-testable without redeploy.
-                _mt = float(os.getenv("BYTETRACK_MATCH_THRESH", "0.5"))
+                # DIUKUR ULANG 10 Oktober 2026 pada 4 menit Q1 UNESA-UBAYA,
+                # RF-DETR, track_buffer 90, GMC mati:
+                #
+                #   mt   track  umur median  >=5s  >=10s  lompat posisi p95
+                #   0.5   1697     0,53 s     113    27        25 px
+                #   0.6    853     0,90 s     143    49        32 px
+                #   0.7    540     1,60 s     141    66        38 px
+                #   0.8    429     1,97 s     134    71        46 px
+                #
+                # KEMURNIAN TIDAK TURUN. Diuji dengan lompatan warna jersey
+                # mendadak antar frame berurutan, yang menandai pergantian
+                # orang di dalam satu track:
+                #   mt 0.5 : 1,6 persen dari 65.335 transisi
+                #   mt 0.8 : 1,6 persen dari 64.490 transisi
+                # Persis sama. Peringatan lama soal "2,38 jersey per track"
+                # berasal dari konfigurasi yang JUGA memakai track_buffer 450
+                # (ekor hidup 15 detik), jadi penyebabnya buffer itu, bukan
+                # ambang pencocokan. Keduanya dulu diubah bersamaan sehingga
+                # tertukar.
+                #
+                # Dipilih 0.7, bukan 0.8: jumlah track yang bertahan 5 detik
+                # paling banyak di situ (141), dan jendela 1 sampai 2 detik
+                # dari percobaan tembakan sampai bola masuk justru yang
+                # dibutuhkan untuk menentukan penembak.
+                _mt = float(os.getenv("BYTETRACK_MATCH_THRESH", "0.7"))
                 _tb = int(os.getenv("BYTETRACK_BUFFER", "90"))
                 logger.info("ByteTrack params: match_thresh=%.2f  track_buffer=%d", _mt, _tb)
                 return BYTETracker(track_buffer=_tb, frame_rate=self.frame_rate, match_thresh=_mt)
@@ -531,7 +654,14 @@ class PlayerTracker:
         )
 
         # Ball — pass-through, no tracker needed
-        tracked_ball = self._passthrough_ball(detections_dict.get("ball"))
+        _bola_mentah = detections_dict.get("ball")
+        if self._pelacak_bola is not None:
+            # Pelacak mengisi celah pendek dan menolak lompatan mustahil.
+            # Keluarannya membawa kunci "predicted" supaya pemakai di hilir
+            # bisa menuntut deteksi NYATA untuk keputusan yang menentukan.
+            tracked_ball = self._pelacak_bola.update(_bola_mentah)
+        else:
+            tracked_ball = self._passthrough_ball(_bola_mentah)
 
         return {
             "tracked_players":  tracked_players,

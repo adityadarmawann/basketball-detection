@@ -921,6 +921,15 @@ class EventEngine:
         # penghitung ter-reset sendiri di bagian 1 dan poin tidak pernah menyala.
         if FG_CONFIRM_BELOW and not self._fg_below_ok:
             hoop_y_ref = float(hoop_ref_px[1])
+            # Keputusan MENENTUKAN ini wajib memakai DETEKSI NYATA. Pelacak bola
+            # mengisi celah pendek dengan perkiraan dan menandainya "predicted";
+            # memakai posisi karangan untuk memutuskan bola masuk sama saja
+            # mengarang poin. Perkiraan tetap berguna menjaga kesinambungan
+            # penghitung zona, tapi tidak boleh menjadi bukti terakhir.
+            if ball.get("predicted"):
+                logger.debug("FG ditahan — posisi bola hasil PERKIRAAN, "
+                             "butuh deteksi nyata untuk memastikan masuk")
+                return events
             if float(ball_px[1]) <= hoop_y_ref + FG_BELOW_MARGIN_PX:
                 # Belum lewat. PASANG KANCING dan tunggu, jangan buang
                 # kesempatannya: penghitung dwell bisa teriset oleh deteksi

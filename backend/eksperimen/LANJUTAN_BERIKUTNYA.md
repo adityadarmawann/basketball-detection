@@ -66,42 +66,33 @@ frame diperkecil ke 576 untuk masuk detektor. Di jendela 16 detik yang memuat
 bola masuk nyata, cakupan bola cuma 52,1 persen di ambang bawaan 0.35, dan naik
 ke 71,5 persen di ambang 0.10.
 
-## TUGAS YANG SEDANG BERJALAN SAAT DIJEDA
+## TUGAS
 
-### Nomor 1, SEDANG DIKERJAKAN agent
-Sapu ambang keyakinan bola lewat `17_ukur_kejadian.py`, membandingkan ambang
-0.35 (acuan, sudah diketahui: 2 dari 5 asli, 1 palsu, 9 poin) dengan 0.20 dan
-0.10. Pertanyaannya: apakah ambang lebih rendah menambah bola masuk PALSU lebih
-cepat daripada yang asli.
+### Nomor 1, SELESAI 10 Oktober 2026, DITOLAK dengan angka
+Sapu ambang bola. Hasilnya membantah dugaan: cakupan naik, skor turun.
 
-Satu run ternyata lebih dari 1 jam, jauh di atas acuan 16 menit. Dua kemungkinan,
-dan ini BELUM terjawab:
-- wajar, karena ambang rendah menambah deteksi sehingga pose dan aksi ikut
-  bertambah banyak
-- atau ada bagian yang jatuh ke CPU, atau penafsirnya salah sehingga diam diam
-  memakai YOLO
+    ambang bola   cakupan   asli   palsu   poin
+    0,25 produksi  69,4 %    2/5     2       9
+    0,20           72,8 %    2/5     2       9
+    0,10           83,6 %    1/5     2       7
 
-Saat dijeda, GPU terbaca 0 persen berulang kali padahal memorinya dipegang 4 GB.
-PERIKSA INI DULU sebelum mempercayai angka apa pun dari run itu.
+Sebabnya terukur: sepertiga deteksi tambahan menaruh bola di posisi SALAH
+(melompat dari lintasan 33,3 persen lawan 3,0 persen pada deteksi kuat).
+Gabungan dua detektor juga ditolak, YOLO cuma menambah 3,5 titik persen.
+Rinciannya di `PENDEKATAN_DITOLAK.md` dan `KEKUATAN_MODEL_PER_KELAS.md`.
 
-Agent juga diminta memeriksa apakah `RFDETR_CONF` berlaku untuk SEMUA kelas.
-Kalau ya, menurunkannya juga menambah pemain dan hakim palsu, jadi perlu saklar
-khusus bola, misal `RFDETR_CONF_BALL`, dengan bawaan sama dengan `RFDETR_CONF`
-supaya perilaku lama tidak berubah.
+**SASARAN YANG BENAR, hasil pelajaran ini: POSISI BENAR pada saat menentukan,
+BUKAN cakupan tinggi.** Jangan lagi mengejar cakupan bola.
 
-### Nomor 2, BELUM DIMULAI
-Deteksi ulang pada potongan di sekitar ring. Sekarang TIDAK ADA jalur ROI sama
-sekali, detektor selalu melihat frame utuh yang diperkecil. Kalau potongan
-sekitar 320x320 di sekitar ring dijalankan pada resolusi asli, bola kembali
-sekitar 21 px bukan 9,5 px. Tidak butuh model baru.
+### Nomor 2, BERJALAN
+Deteksi ulang pada potongan di sekitar ring, pada resolusi asli. Sekarang bola
+21 px menyusut jadi 9,5 px karena frame utuh diperkecil ke 576. Dengan potongan,
+bolanya kembali besar, jadi yang diharapkan naik adalah KEYAKINAN dan KETEPATAN
+POSISI, bukan sekadar jumlah deteksi.
 
-Digabung ke tugas ini, dua sinyal yang sudah terdeteksi tapi dibuang:
-- **Kelas `rims` RF-DETR NOL kali dibaca mesin kejadian.** Rim itu bidang skor
-  sebenarnya, kotaknya 38 px lebar. Tepi kiri dan kanannya bisa dipakai untuk
-  uji lintasan yang lebih tajam daripada lingkaran radius 45 px di sekitar titik
-  tengah ring.
-- Uji "datang dari atas" sekarang memakai jendela mendatar `radius x 1,5`.
-  Dengan rim, jendelanya bisa dari kotak rim yang sebenarnya.
+Digabung: kelas `rims` RF-DETR NOL kali dibaca mesin kejadian. Rim itu bidang
+skor sebenarnya, kotaknya 38 px lebar, jadi tepi kiri kanannya bisa dipakai
+untuk uji lintasan yang lebih tajam daripada lingkaran radius 45 px.
 
 ### Nomor 3, DISETUJUI USER, BELUM DIMULAI
 Tabel pemilik kelas: dua detektor jalan bersama, tiap kelas dimiliki SATU model

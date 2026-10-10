@@ -148,6 +148,29 @@ keyakinan yang berbeda, jadi satu `FG_HOOP_RADIUS_PX` mustahil benar untuk
 keduanya. Sekarang bawaannya per `DETECTOR_METHOD`: RF-DETR 45 px dengan diam 3
 frame, YOLO 70 px dengan diam 2 frame.
 
+### Kelas `ball-in-basket` sebagai penentu bola masuk
+**BUTUH LATIH ULANG, tidak bisa dipakai sekarang.** Diukur 10 Oktober 2026,
+skrip 18, jendela 16 detik yang MEMUAT satu bola masuk nyata (detik 79):
+
+    ambang RFDETR_CONF 0.35 : 0 deteksi ball-in-basket dari 480 frame
+    ambang RFDETR_CONF 0.10 : 0 deteksi ball-in-basket dari 480 frame
+
+NOL, bahkan di ambang 0.10. Kelas ini ada di model tapi praktis tidak pernah
+menyala, jadi menjadikannya penentu atau pemecah seri MUSTAHIL tanpa menambah
+contoh latihnya. Jangan coba menurunkan ambang lagi, sudah dicoba.
+
+### Menghaluskan posisi ring antar waktu
+**TIDAK LAYAK, getarannya terlalu kecil untuk jadi masalah.** Diukur 10 Oktober
+2026, skrip 18:
+
+    geseran titik tengah ring antar frame: median 1,7 px   p90 10,8 px
+    lebar kotak ring                     : median 38,0 px
+
+Gerbangnya 45 px, jadi getaran median 1,7 px tidak mengubah keputusan. Lonjakan
+maksimum 318 px itu perpindahan sudut kamera atau ring yang satunya, dan sudah
+ditangani jalur lain. Saya sempat menduga ini salah satu penyebab; pengukuran
+menunjukkan BUKAN. Jangan dikerjakan.
+
 ---
 
 ## 3. SAKLAR BERLABEL ROBOFLOW

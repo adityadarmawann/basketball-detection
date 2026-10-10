@@ -138,12 +138,19 @@ ke 28,6 persen frame DAN deteksi berjalan di utas terpisah bersamaan dengan
 ByteTrack di CPU.
 
 ### Bukti jalur ini benar benar terpakai
-Jalan ini memakai kode SEBELUM catatan berkala `roi_stat` ditambahkan, jadi
-buktinya dari perilaku, bukan dari log: tiga hal berubah yang mustahil berubah
-tanpa jalur potongan, karena tidak ada lain yang berbeda antara dua jalan itu.
+Buktinya dari PERILAKU, bukan dari log: tiga hal berubah yang mustahil berubah
+tanpa jalur potongan, karena tidak ada lain yang berbeda antar jalan itu.
 0:18 muncul, 1:45 muncul, dan jarak tembakan 1:57 bergeser 4,4 jadi 3,9 m
-karena posisi bolanya dipertajam. Jalan berikutnya akan mencatat `roi_stat`
-sendiri setiap 500 potongan.
+karena posisi bolanya dipertajam. Angka 3,9 m itu muncul di KEDUA jalan yang
+potongannya hidup dan 4,4 m di kedua jalan yang mati, jadi sebabnya pasti.
+
+Catatan jujur soal usaha membuktikannya lewat log: versi pertama baris bukti
+dipasang di tingkat `logger.info`, dan itu TIDAK PERNAH muncul karena skrip 17
+tidak memanggil `logging.basicConfig` sehingga logger akarnya tetap di bawaan
+WARNING. Dua jalan pipeline penuh sudah terpakai sebelum itu ketahuan.
+Sekarang potongan PERTAMA dicatat di tingkat WARNING dan sudah diuji muncul:
+
+    Potongan ring AKTIF: ukuran 448 px, gerbang jarak 300 px, ambang 0.25
 
 ### Yang MEMBANTAH dugaan: angka proksi tidak meramalkan hasil pipeline
 Ukuran proksi di atas (laju lompatan gabungan 3,8 jadi 4,7 persen, pengisian
@@ -189,16 +196,32 @@ Tanpa GPU, bola disimulasikan turun melewati kotak rim 38,0 x 16,6 px:
 35 px itu lolos lingkaran 45 px tapi di luar separuh lebar cincin 19 px.
 Jadi perbedaannya nyata dan terarah, bukan kebetulan setelan.
 
-## GABUNGAN A DAN B
+## GABUNGAN A DAN B, DITERIMA, DAN PENGARUHNYA MENJUMLAH
 
-Karena KEDUANYA diterima SENDIRI SENDIRI, gabungannya baru boleh diuji
-sebagai jalan ketiga: A menambah yang asli, B membuang yang palsu, dan
-keduanya bekerja di tempat yang berbeda (A di deteksi bola, B di geometri
-gerbang). Log `/home/paul/hasil_uji_roi_dan_rim.log`.
+Diuji sebagai jalan KETIGA, setelah masing masing terbukti sendiri sendiri.
+Log `/home/paul/hasil_uji_roi_dan_rim.log`.
 
-Harapan dari dua hasil terpisah: asli 3/5, palsu 2. Kalau yang keluar bukan
-itu, berarti keduanya BERINTERAKSI dan tidak boleh dijumlahkan begitu saja.
-Jangan menebak, tulis hasil sebenarnya.
+    setelan                     asli   nilai   palsu   poin   waktu
+    acuan produksi              2/5      2       2       9    16,1 menit
+    potongan ring saja          3/5      3       3      13    16,9 menit
+    gerbang tepi rim saja       2/5      2       1       7    16,4 menit
+    KEDUANYA                    3/5      3       2      11    16,9 menit
+
+    keduanya: ditemukan 0:18, 0:58, 1:57; terlewat 1:30, 2:26
+              palsu 1:45 (3,2 m) dan 3:52 (10,2 m)
+
+Harapannya asli 3/5 dan palsu 2, dan itu PERSIS yang keluar. Jadi keduanya
+TIDAK berinteraksi: potongan ring menambah bukti deteksi bola, gerbang tepi
+rim menyaring geometri, dan keduanya bekerja di tempat yang berbeda.
+
+Dibanding acuan: asli 2/5 jadi 3/5, palsu TETAP 2. Jadi lebih baik di satu
+sumbu tanpa memburuk di sumbu lain. Nilai 2/3 juga 2 jadi 3 benar.
+
+**JANGAN memakai "poin 11 lawan kebenaran 11" sebagai bukti.** Total poin
+sudah pernah menipu persis begini dan klaimnya sudah dicabut sekali: palsu
+dan yang terlewat SALING MENIADAKAN. Di sini pun begitu, dua palsu bernilai
+2 dan 3 angka menutupi dua bola masuk yang terlewat. Yang sahih angka per
+kejadian: 3 dari 5 ditemukan, 2 palsu.
 
 ## YANG MASIH TERBUKA
 

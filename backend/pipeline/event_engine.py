@@ -855,11 +855,21 @@ class EventEngine:
         # before scoring.  This eliminates single-frame false positives from
         # dribbles, deflections, and ball-near-rim but not-through-rim moments.
         # Fire exactly on the Nth frame (== not >=) so cooldown prevents re-fire.
-        if FG_CONFIRM_BELOW and FG_RECALL_BOOST:
-            # Dengan gerbang keempat, bola diperiksa SETIAP frame selama masih
-            # di zona, sampai dia terlihat di bawah ring atau keluar zona.
-            # Aman dari penyalaan berulang karena _detect_field_goal hanya
-            # dipanggil saat _fg_cooldown == 0, dan jeda diset begitu menyala.
+        # PENTING, ini sumber satu regresi yang halus. Kode lama menyala HANYA
+        # di frame saat penghitung TEPAT SAMA dengan dwell. Itu bekerja sebagian
+        # karena KEBETULAN: ketika pemeriksaan "di atas ring" atau "bergerak
+        # turun" gagal, penghitung DIRESET ke nol, lalu naik lagi dari awal dan
+        # memberi kesempatan kedua beberapa frame kemudian, saat bola sudah di
+        # bawah ring. Begitu ambang kedua pemeriksaan itu diperbaiki sehingga
+        # tidak lagi gagal, resetnya hilang, penghitung naik terus 7, 8, 9, dan
+        # "tepat sama dengan" memblokir semuanya. Terukur: RF-DETR jatuh dari
+        # 10 poin menjadi 2 poin hanya karena itu.
+        #
+        # Dengan gerbang bawah ring aktif, menyala pada ">= dwell" aman: yang
+        # menentukan bukan lagi frame ke berapa, melainkan apakah bola sudah
+        # benar benar lewat di bawah cincin. Penyalaan berulang dicegah jeda,
+        # karena _detect_field_goal hanya dipanggil saat _fg_cooldown == 0.
+        if FG_CONFIRM_BELOW:
             if self._ball_in_hoop_frames < self._fg_zone_dwell_f:
                 return events
         elif self._ball_in_hoop_frames != self._fg_zone_dwell_f:

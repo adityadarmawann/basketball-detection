@@ -70,7 +70,18 @@ _COAST_FRAMES = int(os.getenv("TRACK_COAST_FRAMES", "15"))
 # celah pendek dengan perkiraan DAN MENANDAINYA lewat kunci "predicted", supaya
 # pemakai di hilir bisa menuntut bukti NYATA untuk keputusan yang menentukan.
 # Membiarkan perkiraan dipakai untuk memutuskan bola masuk akan mengarang poin.
-BALL_TRACK         = os.getenv("BALL_TRACK", "0") == "1"
+# TERUKUR pada 4 menit Q1 UNESA-UBAYA, RF-DETR, 7.201 frame:
+#   tanpa pelacak : bola ada di 72,8 persen frame
+#   dengan pelacak: bola ada di 90,9 persen frame (1.704 frame diisi perkiraan)
+#                   dan 400 deteksi bola PALSU yang melompat ditolak
+# Celah deteksi: median 2 frame, p75 4, p90 10, maks 45. Jendela luncur 6 frame
+# di 30 fps menutup sebagian besar celah tanpa mengarang lintasan panjang.
+#
+# Skor tidak banyak berubah (RF-DETR 9 tetap 9, YOLO 8 jadi 9) karena gerbang
+# bola masuk SENGAJA menuntut deteksi NYATA untuk keputusan terakhirnya.
+# Nilainya ada di tempat lain: lintasan bola, penguasaan, dan jarak tempuh
+# sekarang memakai sinyal yang jauh lebih bersih.
+BALL_TRACK         = os.getenv("BALL_TRACK", "1") == "1"
 # Batas lompatan, piksel per frame pada 15 fps acuan. Diskalakan TERBALIK
 # terhadap fps di dalam kelas. 180 di 15 fps menjadi 90 di 30 fps, tepat di
 # tengah celah antara 45 (sah tercepat) dan 118 (palsu terpelan).

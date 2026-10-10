@@ -169,6 +169,41 @@ bukan cakupan tinggi.** Jangan lagi mengejar cakupan bola sebagai sasaran.
 Saklar `RFDETR_CONF_BALL` TETAP ADA karena bawaannya 0 yang berarti ikut ambang
 biasa, jadi tidak mengubah apa pun kalau tidak diisi. JANGAN diisi di `.env`.
 
+### Menilai POTONGAN RING dari laju lompatan posisi saja
+**CARA UKUR YANG MENYESATKAN, dan ini membantah sasaran yang saya sendiri
+pakai.** Diukur 10 Oktober 2026, skrip 21 dan 17, `/home/paul/q1_4menit.mp4`.
+
+Setelah uji ambang bola membuktikan cakupan salah sasaran, sasaran diganti jadi
+KETEPATAN POSISI dan diukur dengan laju lompatan dari lintasan (pola skrip 20).
+Untuk potongan ring, proksi itu memberi angka yang jelek:
+
+    laju lompatan (> 60 px dari lintasan kuat frame penuh):
+      frame penuh, kuat                3,8 %   n=3197
+      potongan, kuat                   9,2 %   n=954
+      potongan, MENGISI celah penuh   24,7 %   n=146
+      GABUNGAN (isi + ganti 60 px)     4,7 %
+
+Kalau diputuskan dari situ, potongan ring DITOLAK. Pipeline membuktikan
+sebaliknya: asli ditemukan 2/5 jadi **3/5**. Jadi proksinya meramalkan arah
+yang SALAH.
+
+Dua sebab, dua duanya terukur:
+1. **Bias kepadatan pada uji cermin.** Kalau lintasan acuan dibalik, dibangun
+   dari deteksi kuat POTONGAN, angkanya terbalik: potongan 1,2 persen, frame
+   penuh 18,3 persen. Sumber yang jarang hanya menemukan tetangga di petak
+   waktu saat dia memang beruntun, yaitu bagian yang mulus. Jadi baris
+   "kekonsistenan diri sendiri" tidak sahih untuk KEDUA sumber.
+2. **Jumlah mutlak kalah penting dari mutu rantai.** Dari 179 pengisian celah,
+   114 posisinya benar, 23 ditolak `PelacakBola` (jatah 90 px per frame jeda),
+   dan hanya 30 yang lolos dengan posisi salah. Tiga puluh posisi salah
+   tersebar di 4 menit tidak cukup mengarang kejadian, sementara 114 posisi
+   benar cukup menyambung satu rantai bukti yang tadinya putus.
+
+**Yang boleh dipakai memutuskan tetap skrip 17.** Laju lompatan tetap berguna
+untuk MEMAHAMI sebab, dan baris "mengisi celah" adalah satu satunya baris yang
+bebas bias kepadatan (titik yang dinilai bukan bagian dari acuan). Tapi jangan
+menerima atau menolak apa pun hanya dari angka itu.
+
 ### Menggabungkan deteksi bola dari dua detektor
 **DITOLAK, tidak sepadan.** Diukur 10 Oktober 2026, skrip 19, jendela 143 detik
 yang memuat kelima bola masuk, 4.290 frame.
@@ -331,7 +366,22 @@ menjanjikan:
     DETECTOR_METHOD=rfdetr VIDEO=/path/klip.mp4 RENDER_OUTPUT_VIDEO=0 \
       python eksperimen/17_ukur_kejadian.py
 
-Tiga jebakan pengukuran yang pernah menyesatkan:
+Empat jebakan pengukuran yang pernah menyesatkan:
+-1. **Ukuran "lompatan dari lintasan" BERAT SEBELAH kalau tiap sumber dinilai
+   terhadap tetangganya SENDIRI.** Sumber yang deteksinya jarang hanya menemukan
+   tetangga di dalam rentetannya sendiri yang mulus, jadi lajunya terlihat
+   rendah secara palsu. Terbukti 10 Oktober 2026: membandingkan potongan ring
+   lawan frame penuh memberi satu urutan, lalu uji CERMIN (menukar mana yang
+   jadi acuan) MEMBALIK hasilnya jadi 1,2 persen lawan 18,3 persen. Jadi tidak
+   satu pun dari dua baris itu bisa dipakai memutuskan.
+   **Cara yang benar: satu himpunan acuan yang SAMA untuk semua kelompok yang
+   dibandingkan.** Itu yang dipakai `20_analisis_tambahan_bola.py`: acuannya
+   selalu deteksi KUAT, dan hanya entri dirinya sendiri yang dibuang. Karena
+   kerapatan pembandingnya identik untuk kedua kelompok, hasil skrip 20 TIDAK
+   kena berat sebelah ini, dan kesimpulan ambang bola tetap berlaku. Kesimpulan
+   itu juga dikuatkan bukti terpisah: skor di pipeline turun 9 jadi 7.
+   Kalau cuma punya ukuran yang berat sebelah, pakai angka yang tidak
+   bergantung kerapatan, misalnya khusus frame YANG DIISI sumber baru.
 0. **Menjalankan skrip 17 pada VIDEO PENUH.** `Q1-UNESA-UBAYA-CUT-2-17.mp4`
    panjangnya **601 detik**, sedangkan `TRUTH` di skrip 17 cuma sampai detik
    146 dan disusun untuk POTONGAN yang dimulai detik 60. Memberi video penuh

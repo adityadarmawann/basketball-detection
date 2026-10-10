@@ -211,13 +211,28 @@ def _box_iou(a: list, b: list) -> float:
     return inter / union if union > 0 else 0.0
 
 
-# ── Global Motion Compensation (workflow fix B) ──────────────────────────────
-# The camera pans continuously, so ByteTrack's camera-uncompensated Kalman
-# prediction drifts a track's box onto a different nearby player (the root cause).
-# GMC estimates the frame-to-frame global affine from STATIC background (moving
-# players masked out) and warps every track's Kalman state so predictions follow
-# the pan. Env-gated DEFAULT-OFF (needs validation) and every call is guarded so
-# it can NEVER break the default path.
+# ── Kompensasi gerak kamera (GMC) ───────────────────────────────────────────
+# SUDAH DIUJI DAN DITOLAK, JANGAN DINYALAKAN. eksperimen/PENDEKATAN_DITOLAK.md
+#
+# Gagasan awalnya: kamera menggeser terus, jadi prediksi Kalman ByteTrack yang
+# tidak sadar gerak kamera menggeser kotak track ke pemain lain di dekatnya.
+# GMC memperkirakan affine global antar frame dari LATAR STATIS lalu memutar
+# ulang state Kalman tiap track supaya prediksinya ikut bergeser.
+#
+# Diukur 10 Oktober 2026, RF-DETR, 4 menit Q1 UNESA-UBAYA, skrip 16:
+#     konfigurasi      track   umur median   >=5s   >=10s
+#     gmc=0 mt=0.5      1697      0,53 s      113     27
+#     gmc=1 mt=0.5      8985      0,10 s       15      0
+#     gmc=0 mt=0.7       540      1,60 s      141     66
+#     gmc=1 mt=0.7      4261      0,17 s       62      4
+# LIMA KALI LEBIH BURUK, dan semua track yang bertahan 10 detik HILANG.
+# Pengaman di kelas _GMC (minimal 20 inlier, skala 0,9-1,1, geseran maks 30
+# persen lebar) TIDAK cukup menahan kerusakan.
+#
+# Sebabnya mendasar: satu matriks affine antar frame hanya sahih untuk geseran
+# dan zoom HALUS. Di rekaman ini kamera BERPINDAH SUDUT keras 1 per 7,1 detik,
+# jadi landasan asumsinya tidak ada. Tetap di balik saklar dan tiap pemanggilan
+# dijaga, supaya jalur bawaan tidak mungkin rusak.
 _GMC_ENABLED = os.getenv("GMC_ENABLED", "0") == "1"
 _GMC_SCALE   = float(os.getenv("GMC_SCALE", "0.2"))     # downscale for cheap optical flow
 

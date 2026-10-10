@@ -257,6 +257,10 @@ EKSTRAP_GALAT_PER_M = float(os.getenv("EKSTRAP_GALAT_PER_M", "0.12"))
 #                asal), baru RANSAC. Penghalusan EMA pada H tetap jalan, jadi
 #                dua lapis. Cocok saat kamera statis; kalau kamera sering
 #                berpindah cepat, naikkan ambang atau matikan.
+# DIUKUR: "roboflow" membuat frame terkalibrasi TURUN 240 jadi 235, tidak ada
+# metrik lain membaik. Sebabnya model keypoint cuma memberi 13 dari 33 titik.
+# Tetap "none" sampai model keypoint dilatih ulang.
+# Rincian uji dan alasannya: eksperimen/PENDEKATAN_DITOLAK.md
 KEYPOINT_SMOOTH_METHOD = os.getenv("KEYPOINT_SMOOTH_METHOD", "none").strip().lower()
 KEYPOINT_SMOOTH_LEN    = int(os.getenv("KEYPOINT_SMOOTH_LEN", "3"))
 CAMERA_MOVE_PX   = 20.0  # threshold deteksi kamera bergerak

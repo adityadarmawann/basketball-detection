@@ -311,6 +311,10 @@ MIN_CONFIRM_WEIGHT = 0.6   # leading candidate's summed weight required to confi
 #                  pulih sendiri kalau kuncian pertamanya salah.
 # Dua duanya diisi serentak, jadi perbandingannya bisa dilihat tanpa memproses
 # ulang video (lihat validator_debug()).
+# DIUKUR dengan roster aktif: weighted 681 bacaan / 14 nomor / 0 palsu,
+# consecutive 455 / 11 / 0. Presisi sama sama sempurna karena roster SUDAH
+# memblokir nomor palsu, jadi consecutive cuma kehilangan 3 nomor pemain.
+# Rincian uji dan alasannya: eksperimen/PENDEKATAN_DITOLAK.md
 NUMBER_VALIDATOR   = os.getenv("NUMBER_VALIDATOR", "weighted").strip().lower()
 NUMBER_CONSECUTIVE_N = int(os.getenv("NUMBER_CONSECUTIVE_N", "3"))
 # Lepas kuncian nomor saat sudut kamera berganti drastis.
@@ -335,6 +339,8 @@ NUMBER_UNLOCK_ON_CUT = os.getenv("NUMBER_UNLOCK_ON_CUT", "1") == "1"
 #            masuk ke kotak suara yang sama, jadi hasilnya tidak berkelahi.
 #   Label A/B TIDAK ditentukan KMeans, tapi diwarisi dari suara LAB saat
 #   pembibitan, supaya A dan B tidak pernah tertukar di tengah pertandingan.
+# DIUKUR: "siglip" menambah 24 persen waktu TANPA perbaikan terukur.
+# Rincian uji dan alasannya: eksperimen/PENDEKATAN_DITOLAK.md
 TEAM_METHOD        = os.getenv("TEAM_METHOD", "lab").strip().lower()
 TEAM_SIGLIP_EVERY  = int(os.getenv("TEAM_SIGLIP_EVERY", "5"))
 TEAM_SIGLIP_SEED   = int(os.getenv("TEAM_SIGLIP_SEED", "40"))   # potongan pembibitan

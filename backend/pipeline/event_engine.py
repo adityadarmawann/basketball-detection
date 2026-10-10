@@ -203,6 +203,7 @@ FG_CONFIRM_FRAMES      = int(os.getenv("FG_CONFIRM_FRAMES", "10"))
 # Jadi satu bola masuk asli ditemukan, tapi EMPAT deteksi palsu ikut masuk.
 # Untuk skor itu merugikan, maka MATI secara bawaan. Nyalakan hanya kalau yang
 # kamu kejar adalah kelengkapan kejadian, bukan ketepatan skor.
+# Rincian uji dan alasannya: eksperimen/PENDEKATAN_DITOLAK.md
 FG_RECALL_BOOST        = os.getenv("FG_RECALL_BOOST", "0") == "1"
 FG_BELOW_MARGIN_PX     = int(os.getenv(
     "FG_BELOW_MARGIN_PX",
@@ -210,6 +211,10 @@ FG_BELOW_MARGIN_PX     = int(os.getenv(
 
 #   "possession" = posisi pemain saat bola TERAKHIR DIPEGANG. Ini titik lepas
 #                   sebenarnya, tidak bergantung model aksi sama sekali.
+# DIUKUR DUA KALI, hasilnya IDENTIK: mengganti ke "lookback" tidak mengubah
+# apa pun pada klip uji, karena jalur perkiraan ini TIDAK PERNAH terpakai di
+# sana. Saya sempat menuduhnya penyebab 2 dari 3 galat; itu salah.
+# Rincian uji dan alasannya: eksperimen/PENDEKATAN_DITOLAK.md
 SHOT_POS_METHOD        = os.getenv("SHOT_POS_METHOD", "furthest").strip().lower()
 # Umur maksimum rekaman "terakhir dipegang" yang masih boleh dipakai, dalam
 # frame di 15 fps. Bola melayang 0,5 sampai 1,5 detik dari lepas sampai ring,

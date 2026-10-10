@@ -96,6 +96,57 @@ FG_HOOP_RADIUS_PX      = int(os.getenv("FG_HOOP_RADIUS_PX",
                                        _FG_BAWAAN["radius_px"]))
 FG_HOOP_RADIUS_M       = 0.45   # meters  — tighter in court space (no action gate)
 FG_COOLDOWN_F          = 45     # frames before another FG can fire
+
+# ── Gerbang TEPI KOTAK RIM, pengganti lingkaran radius ──────────────────────
+#
+# Yang dipakai sekarang: LINGKARAN radius FG_HOOP_RADIUS_PX (45 px untuk
+# RF-DETR) di sekitar PUSAT ring, ditambah jendela mendatar radius x 1,5 untuk
+# syarat "datang dari atas". Dua duanya angka setelan, bukan geometri.
+#
+# Yang sebenarnya tersedia: RF-DETR memisah kelas "rim" dari "hoop", dan kotak
+# rim itu CINCINNYA saja, terukur 38,0 px lebar (p90 40,2) dan 16,6 px tinggi
+# (skrip 18). Jadi tepi kiri dan kanan kotak rim memberi BIDANG SKOR yang
+# sebenarnya: bola yang betul betul lewat cincin pusatnya ada di dalam rentang
+# itu. Lingkaran 45 px menerima bola yang pusatnya 45 px ke samping, yaitu
+# lebih dari dua kali separuh lebar cincin.
+#
+# Daftar "rims" itu NOL kali dibaca mesin kejadian sebelum ini. Kotak rim
+# memang masuk juga ke "hoops" (lihat detector_rfdetr), tapi yang dipakai dari
+# situ hanya "center", bukan tepinya.
+#
+# Perbedaannya, per gerbang:
+#   zona      : lingkaran jarak < 45 px  ->  rentang x kotak rim (+ margin) DAN
+#               jalur y sebatas FG_RIM_Y_BAND_PX di atas/bawah pusat rim
+#   dari atas : |x - pusat| < 67,5 px    ->  rentang x kotak rim dilebarkan
+#               SELEBAR KOTAK RIM ke kiri dan ke kanan, karena bola masih
+#               melengkung saat di atas cincin
+#   di bawah  : y > pusat + 8 px         ->  y > TEPI BAWAH kotak rim. Untuk
+#               RF-DETR itu pusat + 8,3 px, jadi angka setelan 8 yang sekarang
+#               ternyata memang tepi bawah cincin. Bedanya sekarang dihitung
+#               dari kotak, bukan dari konstanta yang harus disetel ulang
+#               setiap kali bentuk kotak model berubah.
+#
+# Syarat "WAJIB deteksi NYATA untuk konfirmasi di bawah rim" TIDAK disentuh.
+# Itu yang mencegah poin dikarang dari posisi perkiraan, dan tetap berlaku
+# sama persis di jalur ini.
+#
+# Cadangan: kalau tidak ada kotak rim (detektor YOLO, atau ring sintetis yang
+# dibuat video_processor dari homografi dan hanya punya "center"), gerbang ini
+# MUNDUR SENDIRI ke lingkaran. Jadi menyalakannya tidak pernah mematikan
+# deteksi, paling buruk tidak berpengaruh.
+#
+# MATI secara bawaan.
+FG_RIM_GATE            = os.getenv("FG_RIM_GATE", "0") == "1"
+# Margin mendatar yang ditambahkan ke tepi kotak rim untuk uji ZONA. Bawaannya
+# 0, yaitu persis rentang kotak rim seperti yang diminta. Dinaikkan kalau
+# ternyata terlalu ketat.
+FG_RIM_X_MARGIN_PX     = float(os.getenv("FG_RIM_X_MARGIN_PX", "0"))
+# Jalur tegak uji ZONA, di atas dan di bawah pusat rim. Bawaannya sama dengan
+# FG_HOOP_RADIUS_PX supaya jangkauan TEGAK tidak berubah dari lingkaran dan
+# satu satunya yang berubah adalah ketajaman MENDATAR. Dengan begitu kalau
+# hasilnya berbeda, sebabnya jelas tepi rim, bukan dua perubahan sekaligus.
+FG_RIM_Y_BAND_PX       = float(os.getenv("FG_RIM_Y_BAND_PX",
+                                         str(FG_HOOP_RADIUS_PX)))
 # Ambang "bola pernah di atas ring", PER DETEKTOR, mengikuti bentuk kotaknya.
 # Kotak rim RF-DETR tingginya 16,6 px jadi separuhnya 8,3; menuntut 10 px di
 # atas PUSAT berarti menuntut bola di atas tepi atas cincin, terlalu ketat
@@ -397,6 +448,10 @@ class EventEngine:
 
         # ── Hoop pixel-position cache (for pixel-space scoring fallback) ───
         self._last_hoops_px: list = []    # last detected hoop dicts in pixel space
+        # Kotak RIM terakhir, HANYA yang punya bbox. Dipisah dari _last_hoops_px
+        # karena ring sintetis dari homografi hanya punya "center", dan gerbang
+        # tepi rim butuh tepinya. Lihat FG_RIM_GATE.
+        self._last_rims_px: list = []
 
         # ── Trajectory-based scoring — pixel-space ball history ───────────
         # Stores recent (ball_x, ball_y) in pixel coords regardless of court calib.
@@ -599,6 +654,14 @@ class EventEngine:
             self._hoop_cache_age = 0
         else:
             self._hoop_cache_age += 1
+
+        # Kotak RIM. Daftar "rims" dipakai lebih dulu karena itu cincinnya saja;
+        # "hoops" hanya cadangan, dan HANYA entri yang punya bbox dipakai,
+        # karena ring sintetis dari homografi tidak punya tepi. Umurnya ikut
+        # _hoop_cache_age, jadi cache basi ditolak oleh gerbang yang sudah ada.
+        _rims = [r for r in (dets.get("rims") or hoops) if r.get("bbox")]
+        if _rims:
+            self._last_rims_px = _rims
 
         # Maintain pixel-space ball history for from-above scoring check.
         # ball.center is always pixel coords regardless of court calibration.
@@ -814,7 +877,25 @@ class EventEngine:
             self._ball_in_hoop_frames = 0
             return events
 
-        in_zone = _dist(ball_px, hoop_ref_px) < FG_HOOP_RADIUS_PX
+        # ── Acuan tepi rim, kalau gerbang tepi dinyalakan DAN kotaknya ada ──
+        # rim_px = None berarti seluruh jalur di bawah memakai lingkaran seperti
+        # sebelumnya. Jadi menyalakan FG_RIM_GATE pada detektor yang tidak
+        # memberi kotak rim tidak mengubah apa pun.
+        rim_px = self._nearest_rim_bbox_px(ball_px) if FG_RIM_GATE else None
+
+        if rim_px is not None:
+            # ZONA menurut TEPI KOTAK RIM: x di dalam rentang mendatar cincin,
+            # y di dalam jalur tegak sekitar pusat cincin. Jangkauan tegaknya
+            # sengaja dibuat sama dengan lingkaran (FG_RIM_Y_BAND_PX bawaannya
+            # FG_HOOP_RADIUS_PX), supaya yang berubah HANYA ketajaman mendatar.
+            rim_cy = (rim_px[1] + rim_px[3]) / 2.0
+            in_zone = (
+                rim_px[0] - FG_RIM_X_MARGIN_PX <= float(ball_px[0])
+                <= rim_px[2] + FG_RIM_X_MARGIN_PX
+                and abs(float(ball_px[1]) - rim_cy) <= FG_RIM_Y_BAND_PX
+            )
+        else:
+            in_zone = _dist(ball_px, hoop_ref_px) < FG_HOOP_RADIUS_PX
 
         # Hitung frame bola di zona ring.
         #
@@ -888,12 +969,27 @@ class EventEngine:
             hoop_x = float(hoop_ref_px[0])
             # Ball must have been above hoop AND within a tighter horizontal window —
             # prevents cross-court or dribble history from satisfying this check.
-            horiz_window = FG_HOOP_RADIUS_PX * 1.5
-            ball_was_above = any(
-                float(pos[1]) < hoop_y - FG_ABOVE_MARGIN_PX
-                and abs(float(pos[0]) - hoop_x) < horiz_window
-                for pos in self._ball_px_hist
-            )
+            if rim_px is not None:
+                # Dilebarkan SELEBAR KOTAK RIM ke kiri dan ke kanan. Bola masih
+                # melengkung saat berada di atas cincin, jadi rentang cincin
+                # saja terlalu ketat untuk riwayat. Untuk kotak 38 px ini
+                # memberi kira kira +-57 px dari pusat, sebanding dengan 67,5 px
+                # dari lingkaran, jadi yang dibandingkan nanti benar benar
+                # bentuk gerbangnya, bukan jangkauannya.
+                rim_w = rim_px[2] - rim_px[0]
+                ab_lo, ab_hi = rim_px[0] - rim_w, rim_px[2] + rim_w
+                ball_was_above = any(
+                    float(pos[1]) < hoop_y - FG_ABOVE_MARGIN_PX
+                    and ab_lo <= float(pos[0]) <= ab_hi
+                    for pos in self._ball_px_hist
+                )
+            else:
+                horiz_window = FG_HOOP_RADIUS_PX * 1.5
+                ball_was_above = any(
+                    float(pos[1]) < hoop_y - FG_ABOVE_MARGIN_PX
+                    and abs(float(pos[0]) - hoop_x) < horiz_window
+                    for pos in self._ball_px_hist
+                )
             if not ball_was_above:
                 logger.debug(
                     "FG zone entry rejected — ball did not come from above hoop "
@@ -925,6 +1021,15 @@ class EventEngine:
         # frame berikutnya diperiksa lagi. Kalau bola memantul keluar zona,
         # penghitung ter-reset sendiri di bagian 1 dan poin tidak pernah menyala.
         if FG_CONFIRM_BELOW and not self._fg_below_ok:
+            if rim_px is not None:
+                # Garis "sudah di bawah" diambil dari TEPI BAWAH kotak rim,
+                # bukan dari konstanta setelan. Untuk RF-DETR kotak rim tingginya
+                # 16,6 px dan berpusat di cincin, jadi tepi bawahnya pusat + 8,3
+                # px, hampir sama dengan FG_BELOW_MARGIN_PX=8 yang disetel
+                # manual. Bedanya ini ikut sendiri kalau bentuk kotak berubah.
+                batas_bawah = rim_px[3]
+            else:
+                batas_bawah = float(hoop_ref_px[1]) + FG_BELOW_MARGIN_PX
             hoop_y_ref = float(hoop_ref_px[1])
             # Keputusan MENENTUKAN ini wajib memakai DETEKSI NYATA. Pelacak bola
             # mengisi celah pendek dengan perkiraan dan menandainya "predicted";
@@ -935,7 +1040,7 @@ class EventEngine:
                 logger.debug("FG ditahan — posisi bola hasil PERKIRAAN, "
                              "butuh deteksi nyata untuk memastikan masuk")
                 return events
-            if float(ball_px[1]) <= hoop_y_ref + FG_BELOW_MARGIN_PX:
+            if float(ball_px[1]) <= batas_bawah:
                 # Belum lewat. PASANG KANCING dan tunggu, jangan buang
                 # kesempatannya: penghitung dwell bisa teriset oleh deteksi
                 # bola palsu sebelum bola sempat terlihat di bawah.
@@ -945,8 +1050,7 @@ class EventEngine:
                 logger.debug(
                     "FG ditahan, kancing dipasang sampai frame %d — bola belum "
                     "di bawah ring (ball_y=%.0f, butuh > %.0f)",
-                    self._fg_armed_until, float(ball_px[1]),
-                    hoop_y_ref + FG_BELOW_MARGIN_PX)
+                    self._fg_armed_until, float(ball_px[1]), batas_bawah)
                 return events
 
         # ── 3. Identify shooter + the SCORING (offensive) team ────────────
@@ -1097,6 +1201,25 @@ class EventEngine:
                     if d < best_d:
                         best_d, best_c = d, c
         return best_c
+
+    def _nearest_rim_bbox_px(self, ball_px) -> Optional[list]:
+        """Kotak rim terdekat ke bola, atau None kalau tidak ada kotak rim.
+
+        None berarti gerbang tepi rim harus MUNDUR ke lingkaran: itu terjadi
+        pada detektor YOLO (kotaknya memuat jaring, bukan cincin) dan pada ring
+        sintetis dari homografi yang hanya punya titik tengah.
+        """
+        if not ball_px or not self._last_rims_px:
+            return None
+        best_d, best_b = float("inf"), None
+        for r in self._last_rims_px:
+            b = r.get("bbox")
+            if not b:
+                continue
+            d = _dist(ball_px, _bbox_center(b))
+            if d < best_d:
+                best_d, best_b = d, [float(v) for v in b]
+        return best_b
 
     def _is_free_throw(
         self, shooter_tid: int, shot_pos: Optional[list], is_court: bool,
@@ -1701,6 +1824,7 @@ class EventEngine:
         self._prev_poss_team     = None
         self._contact_frames     = {}
         self._last_hoops_px      = []
+        self._last_rims_px       = []
         self._ball_px_hist       = deque(maxlen=self._fg_above_window_f)
         self._player_court_hist  = {}
 

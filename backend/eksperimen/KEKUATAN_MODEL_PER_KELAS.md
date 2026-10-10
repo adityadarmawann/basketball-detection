@@ -70,8 +70,16 @@ Status: `TERUKUR` = ada angka dari jalan nyata. `SEBAGIAN` = baru satu sisi
 **RF-DETR, terukur 10 Oktober 2026, skrip 18**, `Q1-UNESA-UBAYA-CUT-2-17.mp4`
 detik 72 sampai 88 (480 frame, memuat satu bola masuk nyata):
 
-    ambang 0.35 (bawaan) : terdeteksi 52,1 persen, lebar kotak median 21,0 px
-    ambang 0.10          : terdeteksi 71,5 persen, lebar kotak median 20,0 px
+    ambang 0,25 (BAWAAN PRODUKSI) : terdeteksi 52,1 persen, kotak median 21,0 px
+    ambang 0,10                   : terdeteksi 71,5 persen, kotak median 20,0 px
+
+KOREKSI 10 Oktober 2026: dua baris di atas sempat saya labeli "ambang 0.35".
+Itu SALAH. `RFDETR_CONF` hanya menang kalau diisi tegas (lihat
+`create_rfdetr_detector`, baris `if os.getenv("RFDETR_CONF") is not None`).
+Kalau tidak diisi, yang berlaku `DETECTOR_CONF` dengan bawaan **0,25**. Jadi
+pengukuran tanpa mengisi RFDETR_CONF itu berjalan di 0,25, bukan 0,35.
+Kesimpulannya tidak berubah (ambang lebih rendah menambah cakupan bola), tapi
+angka ambangnya harus ditulis benar supaya run berikutnya sebanding.
 
 Sepanjang 4 menit penuh, cakupan mentahnya 72,8 persen (skrip 16). Jadi di
 jendela dekat bola masuk cakupannya JUSTRU LEBIH BURUK daripada rata rata.
@@ -139,8 +147,8 @@ Perlu dipastikan ulang dengan ukuran langsung di video uji sekarang.
 ### `ball-in-basket`
 **TIDAK BISA DIPAKAI tanpa latih ulang. Terukur, skrip 18:**
 
-    ambang 0.35 : 0 deteksi dari 480 frame
-    ambang 0.10 : 0 deteksi dari 480 frame
+    ambang 0,25 (bawaan produksi) : 0 deteksi dari 480 frame
+    ambang 0,10                   : 0 deteksi dari 480 frame
 
 Nol, padahal jendelanya memuat bola masuk nyata. Dugaan sebabnya masuk akal:
 begitu bola berada di dalam jaring, rupanya samar dan tertutup, jadi contoh

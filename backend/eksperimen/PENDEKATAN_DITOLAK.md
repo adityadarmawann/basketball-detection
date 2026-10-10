@@ -270,7 +270,15 @@ menjanjikan:
     DETECTOR_METHOD=rfdetr VIDEO=/path/klip.mp4 RENDER_OUTPUT_VIDEO=0 \
       python eksperimen/17_ukur_kejadian.py
 
-Dua jebakan pengukuran yang pernah menyesatkan:
+Tiga jebakan pengukuran yang pernah menyesatkan:
+0. **Menjalankan skrip 17 pada VIDEO PENUH.** `Q1-UNESA-UBAYA-CUT-2-17.mp4`
+   panjangnya **601 detik**, sedangkan `TRUTH` di skrip 17 cuma sampai detik
+   146 dan disusun untuk POTONGAN yang dimulai detik 60. Memberi video penuh
+   membuat 7,5 menit sisanya dinilai PALSU tanpa pembanding, dan bola masuk
+   yang asli tidak pernah cocok karena waktunya bergeser 60 detik. Pernah
+   terjadi dan menghasilkan "1 dari 5 asli, 5 palsu" yang sama sekali tidak
+   berarti. SELALU pakai potongan 240 detik:
+       ffmpeg -ss 60 -i <video penuh> -t 240 -c copy -y /home/paul/q1_4menit.mp4
 1. **Kemurnian harus PER TRANSISI, bukan persen track yang memuat lompatan.**
    Setelan yang menghasilkan track lebih panjang otomatis punya lebih banyak
    transisi per track, jadi persentasenya naik tanpa kemurniannya benar benar

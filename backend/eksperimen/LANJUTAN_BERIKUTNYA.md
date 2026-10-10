@@ -37,6 +37,23 @@ DIAM ke YOLO tanpa pesan kesalahan, lalu gagal memuat `.engine`. Pastikan selalu
 `create_detector()` harus mengembalikan `RFDetrDetector`, bukan
 `BasketballDetector`. Ini sudah dua kali hampir menyesatkan.
 
+## ANTREAN YANG BERJALAN TERLEPAS SAAT SESI DIJEDA
+
+`/home/paul/antrean_uji.sh` dilepas dengan `setsid nohup`, induknya 1, jadi
+TIDAK butuh sesi Claude maupun internet. Enam pekerjaan berurutan, satu
+pekerjaan GPU pada satu waktu:
+
+    1. rekam_rfdetr        deteksi bola RF-DETR, ambang bola 0,10
+    2. rekam_yolo          deteksi bola YOLO lama, jendela sama persis
+    3. gabung_bola         silangkan keduanya, tidak pakai GPU
+    4. uji_acuan_produksi  pipeline penuh, ambang produksi apa adanya
+    5. uji_ball_010        pipeline penuh, hanya ambang BOLA jadi 0,10
+    6. uji_ball_020        pipeline penuh, hanya ambang BOLA jadi 0,20
+
+Pantau:  `cat /home/paul/antrean_uji_status.txt`
+Hasil :  `tail -25 /home/paul/hasil_<nama>.log`
+Video :  `/home/paul/q1_4menit.mp4` (240 detik, dipotong mulai detik 60)
+
 ## KEADAAN SEKARANG
 
 Skor sistem 9 lawan kebenaran 11 pada potongan 4 menit. Per kejadian, 2 dari 5

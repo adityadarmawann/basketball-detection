@@ -171,6 +171,28 @@ class PelacakBola:
 # menempel ke 2,38 nomor punggung berbeda. Setelan ketat sekarang memberi track
 # murni tapi pendek. ByteTrack tidak bisa memberi keduanya; SAM2 bisa, karena
 # melacak bentuk masker dan bukan tumpang tindih kotak.
+# SAM2 SUDAH DIUJI DAN TERBUKTI JAUH LEBIH BURUK, jangan dipakai.
+# Diukur 11 Oktober 2026 pada 4 menit Q1 UNESA-UBAYA, RF-DETR, lewat
+# eksperimen/16_ukur_pelacakan.py:
+#
+#                        ByteTrack 0,7    SAM2
+#   track                     540          170
+#   umur median              1,60 s       1,92 s
+#   bertahan >=5 detik         141           36
+#   lompatan posisi p95       38 px       634 px
+#   kemurnian (lompat warna)   1,6 %       28,8 %
+#   waktu                   5,3 menit   32,0 menit
+#   memori GPU                wajar     7,7 dari 8 GB, KEHABISAN
+#
+# Angka "track lebih sedikit, umur lebih panjang" MENIPU: lompatan 634 piksel
+# dan kemurnian 28,8 persen berarti beberapa pemain DILEBUR jadi satu
+# identitas. Itu lebih merusak statistik daripada track yang pecah.
+# SAM2 juga berulang kali gagal mendaftarkan objek karena kehabisan memori,
+# menyisakan 76 MB sehingga tidak ada ruang untuk pose, aksi, dan homografi.
+#
+# Sebabnya mendasar: propagasi masker unggul pada gerakan HALUS, sedangkan
+# kamera di sini berpindah sudut tiap 7 detik. Sama seperti GMC yang juga
+# terbukti merusak.
 TRACKER_METHOD = os.getenv("TRACKER_METHOD", "bytetrack").strip().lower()
 
 

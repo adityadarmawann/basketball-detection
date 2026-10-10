@@ -1,0 +1,257 @@
+# PENDEKATAN YANG SUDAH DIUJI DAN DITOLAK
+
+Berkas ini ada supaya pendekatan yang SUDAH TERBUKTI merugikan tidak diuji ulang.
+Semua angka di bawah hasil ukur nyata, bukan perkiraan. Setiap baris menyebut
+skrip pengukurnya supaya bisa diulang kalau memang ada yang berubah.
+
+**Aturan pakai berkas ini:** sebelum menyalakan saklar apa pun atau mengusulkan
+metode baru, cari dulu di sini. Kalau sudah tercatat DITOLAK, jangan diuji ulang
+kecuali syarat "boleh dicoba lagi kalau" di barisnya sudah terpenuhi.
+
+Video acuan sepanjang catatan ini:
+`test-video/Q1-UNESA-UBAYA-CUT-2-17.mp4` detik 60 sampai 300 (4 menit, 1280x720,
+60 fps sumber, diproses 30 fps efektif). Kebenaran dari papan skor: 5 bola masuk,
+11 poin.
+
+---
+
+## 1. PELACAKAN
+
+### GMC (kompensasi gerak kamera), `GMC_ENABLED=1`
+**DITOLAK.** `pipeline/tracker.py`. Diukur 10 Oktober 2026, RF-DETR, skrip 16.
+
+    konfigurasi        track   umur median   >=5s   >=10s
+    gmc=0 mt=0.5        1697      0,53 s      113     27
+    gmc=1 mt=0.5        8985      0,10 s       15      0
+    gmc=0 mt=0.7         540      1,60 s      141     66
+    gmc=1 mt=0.7        4261      0,17 s       62      4
+
+Lima kali lebih buruk, dan SEMUA track yang bertahan 10 detik hilang. Pengaman di
+kelas `_GMC` (minimal 20 inlier, skala 0,9 sampai 1,1, geseran maks 30 persen
+lebar) tidak cukup menahan kerusakan.
+
+Sebabnya: GMC memperkirakan satu matriks affine antar frame berurutan. Itu sahih
+untuk geseran dan zoom halus, tidak sahih saat gambar berganti sudut. Di rekaman
+ini perpindahan keras terjadi 1 per 7,1 detik.
+
+Boleh dicoba lagi kalau: sumber videonya kamera statis atau satu sudut tetap.
+
+### SAM2, `TRACKER_METHOD=sam2`
+**DITOLAK.** `pipeline/tracker.py`. Diukur 10 Oktober 2026, RF-DETR, skrip 16.
+
+                            ByteTrack 0.7    SAM2
+    track                       540           170
+    umur median                1,60 s        1,92 s
+    bertahan >=5 detik          141            36
+    bertahan >=10 detik          66            26
+    lompatan posisi p95        38 px        634 px
+    KEMURNIAN, lompat warna>40  1,6 %        28,8 %
+    waktu proses              5,3 menit    32,0 menit
+    memori GPU                 wajar    7,7 dari 8 GB, KEHABISAN
+
+JANGAN tertipu "track 170 lawan 540" dan "umur median 1,92 lawan 1,60 detik".
+Dua angka itu terlihat lebih baik tapi menyesatkan:
+- Lompatan posisi p95 634 piksel berarti track berpindah melintasi layar.
+- Kemurnian 28,8 persen lawan 1,6 persen berarti satu track berpindah orang
+  18 KALI LEBIH SERING.
+Jadi tracknya sedikit dan panjang justru karena beberapa pemain DILEBUR jadi satu
+identitas. Itu lebih merusak statistik per pemain daripada track yang pecah.
+Ditambah `CUDA out of memory` berulang sehingga banyak pemain gagal didaftarkan,
+jadi sebagian dari "sedikit" itu memang gagal daftar.
+
+Catatan: notebook Roboflow memakai SAM2 dan berhasil, tapi klip demo mereka
+pendek dan menerus tanpa ganti sudut, dan mereka memberi prompt hanya di frame
+pertama tanpa pendaftaran ulang. Konteksnya berbeda.
+
+Boleh dicoba lagi kalau: ada kartu grafis dengan memori jauh lebih besar DAN
+masalah perpindahan sudut sudah diatasi lebih dulu.
+
+### POLA UMUM, PALING PENTING
+GMC dan SAM2 sama sama bersandar pada KESINAMBUNGAN PEMANDANGAN antar frame.
+Rekaman ini berpindah sudut keras 1 per 7,1 detik dan bergerak menonjol tiap
+1,0 detik, jadi landasan keduanya tidak ada. **Jangan mengusulkan pendekatan
+berbasis kesinambungan pemandangan lagi sebelum perpindahan sudutnya ditangani.**
+User sudah memperingatkan hal ini dua kali, dan dua kali pengukuran membuktikan
+user benar.
+
+### Jarak Jaccard himpunan keypoint untuk mendeteksi ganti sudut
+**DITOLAK.** `pipeline/court.py`. Diukur 8 Oktober 2026, skrip 06.
+Saat sisi lapangan TETAP, persentil 90 Jaccard tetap mencapai 1,000 karena
+deteksi keypoint berkedip. Ambang 0,4 menangkap 15 dari 20 pindah sisi tapi
+memicu 85 kali palsu. Yang dipakai sekarang: `COURT_CUT_PX=120` ditambah
+`COURT_LOST_REFRESH_S=3.0`, dua sinyal bersama.
+Boleh dicoba lagi kalau: model keypoint sudah dilatih ulang dan berhenti berkedip.
+
+### Ambang pencocokan ByteTrack, bukan ditolak tapi SUDAH DISAPU
+Jangan sapu ulang. Diukur 10 Oktober 2026, GMC mati, `track_buffer` 90, skrip 16.
+
+    mt   track  umur median  >=5s  >=10s  lompat posisi p95
+    0.5   1697     0,53 s     113    27        25 px
+    0.6    853     0,90 s     143    49        32 px
+    0.7    540     1,60 s     141    66        38 px
+    0.8    429     1,97 s     134    71        46 px
+
+Kemurnian TIDAK turun: lompatan warna>40 tetap 1,6 persen di 0.5 maupun 0.8.
+Dipilih **0.7** karena jumlah track yang bertahan 5 detik paling banyak di situ,
+dan jendela 1 sampai 2 detik dari percobaan tembakan sampai bola masuk itulah
+yang dibutuhkan untuk menentukan penembak.
+
+Peringatan lama di kode ("2,38 jersey per track pada mt 0.8") berasal dari
+konfigurasi yang JUGA memakai `track_buffer` 450. Penyebabnya buffer 15 detik
+itu, bukan ambang pencocokannya. Dulu keduanya diubah bersamaan sehingga tertukar.
+
+---
+
+## 2. SKOR DAN KEJADIAN
+
+### `SHOT_POS_METHOD=lookback`
+**TIDAK BERPENGARUH, jangan diuji lagi.** `pipeline/event_engine.py`.
+Diukur 10 Oktober 2026, skrip 17, DUA KALI, hasilnya IDENTIK kedua kali.
+Saya sempat menyimpulkan `_estimate_shot_pos` ("titik terjauh") menyebabkan 2 dari
+3 galat. Pengujian membuktikan jalur itu TIDAK PERNAH terpakai pada klip ini, jadi
+mengganti metodenya tidak mengubah apa pun. Perbaiki yang lain dulu.
+
+### Melonggarkan gerbang bola masuk supaya menerima posisi PERKIRAAN
+**DITOLAK atas dasar prinsip, bukan cuma angka.** `pipeline/event_engine.py`.
+Setelah `PelacakBola` dipasang, cakupan bola naik 72,8 ke 90,9 persen, tapi skor
+HAMPIR TIDAK BERGERAK (RF-DETR 9 tetap 9, YOLO 8 jadi 9) dan daftar kejadiannya
+identik. Sebabnya gerbang SENGAJA menuntut deteksi NYATA untuk keputusan
+terakhir; posisi perkiraan hanya menjaga kesinambungan penghitung.
+Aturan itu DIPERTAHANKAN. Melonggarkannya berarti mengarang poin dari posisi yang
+ditebak model kecepatan tetap. Nilai `PelacakBola` ada di lintasan, penguasaan,
+dan jarak tempuh, bukan di skor.
+
+### `FG_RECALL_BOOST=1`
+**DITOLAK untuk skor.** `pipeline/event_engine.py`. Diukur 10 Oktober 2026, skrip 17.
+
+    detektor   boost   asli ditemukan   palsu   poin
+    RF-DETR    mati         2/5           1       9
+    RF-DETR    hidup        2/5           2      10
+    YOLO       mati         2/5           1       8
+    YOLO       hidup        2/5           2       9
+
+Satu bola masuk asli TIDAK bertambah, tapi deteksi palsunya bertambah. Untuk
+ketepatan skor itu merugikan, maka MATI secara bawaan. Nyalakan hanya kalau yang
+dikejar kelengkapan daftar kejadian, bukan ketepatan skor.
+
+### Menilai akurasi skor dari TOTAL POIN
+**CARA UKUR YANG SALAH, jangan diulang.** Pernah terjadi: dua konfigurasi sama
+sama memberi 12 poin lawan kebenaran 11, dan saya menyimpulkan "5 dari 5 bola
+masuk benar". Setelah dicocokkan PER WAKTU, ternyata cuma 2 dari 5, dan deteksi
+palsu dengan yang terlewat SALING MENIADAKAN sehingga totalnya kebetulan mirip.
+Klaim 5/5 itu sudah DICABUT. Selalu pakai skrip 17 yang mencocokkan tiap kejadian
+`MADE_FG` ke papan skor menurut waktunya.
+
+### Satu setelan gerbang untuk semua detektor
+**DITOLAK.** YOLO dan RF-DETR memberi kotak ring dan bola dengan ukuran serta
+keyakinan yang berbeda, jadi satu `FG_HOOP_RADIUS_PX` mustahil benar untuk
+keduanya. Sekarang bawaannya per `DETECTOR_METHOD`: RF-DETR 45 px dengan diam 3
+frame, YOLO 70 px dengan diam 2 frame.
+
+---
+
+## 3. SAKLAR BERLABEL ROBOFLOW
+
+Diukur 8 Oktober 2026, `q1-UBAYA-UNESA` 300 frame, pipeline PENUH, skrip 04,
+tiap saklar diuji TERPISAH dari acuan yang sama, roster AKTIF.
+
+Keempatnya awalnya dinyalakan karena permintaan "pakai mode roboflow". Tiga di
+antaranya terbukti merugikan. **Jangan menyalakan sesuatu hanya karena berlabel
+roboflow.**
+
+| Saklar | Putusan | Bukti |
+|---|---|---|
+| `PATH_CLEAN_METHOD=roboflow` | **NYALA** | pengaruh ke deteksi, nomor, tim, aksi, kejadian NOL; percepatan median 45,3 jadi 19,4 m/s2; biaya +10 persen waktu |
+| `KEYPOINT_SMOOTH_METHOD` selain `none` | **DITOLAK** | frame terkalibrasi TURUN 240 jadi 235, tidak ada metrik lain membaik. Model keypoint cuma memberi 13 dari 33 titik, jadi merata ratakan titik yang sedikit justru mengurangi yang lolos RANSAC |
+| `NUMBER_VALIDATOR=consecutive` | **DITOLAK** | weighted 681 bacaan / 14 nomor unik / 0 palsu, consecutive 455 / 11 / 0. Presisi sama sama sempurna karena penyaring roster SUDAH memblokir nomor palsu, jadi keunggulan consecutive mubazir sementara 3 nomor pemain hilang |
+| `TEAM_METHOD=siglip` | **DITOLAK** | +24 persen waktu tanpa perbaikan terukur |
+
+Boleh dicoba lagi kalau: `KEYPOINT_SMOOTH_METHOD` setelah model keypoint dilatih
+ulang; `NUMBER_VALIDATOR=consecutive` kalau suatu saat berjalan TANPA roster.
+
+---
+
+## 4. MODEL NOMOR PUNGGUNG
+
+### Melatih deteksi digit dengan augmentasi bawaan Ultralytics
+**DITOLAK, ini sebab model v3 kalah.** v3 Kaggle 47,8 persen lawan model lama
+64,2 persen pada potongan sistem. Sebabnya CARA LATIH, bukan jurang domain.
+Kesimpulan "jurang domain" yang sempat saya catat SALAH dan sudah dicabut.
+Berurut dari paling merusak:
+
+1. `fliplr` bawaan 0.5. **Digit itu kiral**, cerminan 2 bukan 2. Cara lama
+   menyetelnya 0.0 dengan komentar "digit mirror tidak valid". WAJIB 0.0.
+2. `mosaic` bawaan 1.0. Empat gambar dijahit jadi kanvas 640, digit menyusut
+   sekitar 2 kali padahal sudah objek terkecil. Cara lama 0.0.
+3. `optimizer=auto` dengan lebih dari 10.000 iterasi memilih MuSGD `lr0=0.01`.
+   Cara lama AdamW `lr0=0.001` `cos_lr=True`, sepuluh kali lebih kecil.
+
+Resep cara lama yang utuh ada di `dataset/number/output/digit_det/args.yaml`
+(`md5sum` memastikan bobotnya identik dengan `best-detect-num-v2.pt`).
+
+### `DIGIT_CLS_PAD` kecil
+**DITOLAK.** `pipeline/jersey_ocr.py`. Diukur 9 Oktober 2026, skrip 12.
+Ketepatan tahap classify pada kotak dari detektor: pad 0,2 memberi 65,7 persen,
+pad 0,8 memberi 97,0 persen. Model classify dilatih pada potongan longgar, jadi
+potongan ketat tidak cocok dengan latihannya. **`DIGIT_CLS_PAD=0.8` wajib.**
+Catatan metode: pernah tercatat 96,7 persen seolah itu kemampuan sistem.
+Itu angka top-1 di data validasi classify, BUKAN pada kotak dari detektor.
+Jangan mencampur keduanya.
+
+### Menghitung kotak label pakai `wc -l`
+**CARA UKUR YANG SALAH.** Berkas tanpa baris baru di akhir terhitung kurang satu.
+Sebaran sebenarnya 49,8 persen satu digit dan 45,3 persen dua digit, tanpa gambar
+kosong. Hitung ulang pakai Python, jangan `wc -l`.
+
+---
+
+## 5. YANG SUDAH TERBUKTI MEMBANTU, JANGAN DIBONGKAR
+
+| Perubahan | Hasil terukur |
+|---|---|
+| `BYTETRACK_MATCH_THRESH=0.7` | track 1697 jadi 540, umur 0,53 jadi 1,60 detik, 31 persen lebih cepat, kemurnian tetap |
+| `PelacakBola` (`BALL_TRACK=1`) | cakupan bola 72,8 jadi 90,9 persen, 400 lompatan palsu ditolak |
+| 7 perbaikan gerbang `MADE_FG` | termasuk `>= dwell` yang dulu `== dwell` dan benar cuma karena kebetulan |
+| Gerbang per `DETECTOR_METHOD` | 45/3 untuk RF-DETR, 70/2 untuk YOLO |
+| Tahap kedua classify digit | bacaan satu frame 22 jadi 37,5 persen |
+| SlowFast ganti VideoMAE | 0,792 lawan 0,549, kelas identik, bobot sudah ada |
+| `PATH_CLEAN_METHOD=roboflow` | percepatan mustahil 53 jadi 4 persen |
+
+---
+
+## 6. PENGHAMBAT YANG MASIH TERBUKA
+
+Skor masih 9 lawan kebenaran 11, dan per kejadian cuma 2 dari 5 bola masuk yang
+dikenali. **Ini bukan lagi soal pelacakan pemain.** Buktinya pelacakan diperbaiki
+3 kali lebih baik dan skornya justru bergerak 10 jadi 9.
+
+Penghambatnya bukti deteksi bola di dekat ring: bola tertutup tangan dan jaring
+tepat pada saat yang menentukan. Jalan yang masih terbuka, berurut dari paling
+menjanjikan:
+
+1. Latih ulang deteksi objek dengan lebih banyak contoh kelas `ball-in-basket`.
+   Kelas itu SUDAH ADA di RF-DETR tapi keyakinan tertingginya cuma 0,146 di
+   seluruh klip 4 menit, jadi praktis tidak terpakai. Kalau dikuatkan, ia bisa
+   jadi penentu langsung saat gerbang geometri ragu.
+2. Lanjutkan latihan deteksi digit cara lama. Run lama BERHENTI di epoch 52 dari
+   400 dan mAP50 masih naik, jadi masih ada perbaikan tanpa mengubah resep.
+
+---
+
+## CARA MENGUKUR ULANG
+
+    # mutu pelacakan saja, sekitar 5 menit untuk video 4 menit
+    DETECTOR_METHOD=rfdetr VIDEO=/path/klip.mp4 python eksperimen/16_ukur_pelacakan.py
+
+    # pipeline penuh lalu cocokkan tiap MADE_FG ke papan skor per waktu
+    DETECTOR_METHOD=rfdetr VIDEO=/path/klip.mp4 RENDER_OUTPUT_VIDEO=0 \
+      python eksperimen/17_ukur_kejadian.py
+
+Dua jebakan pengukuran yang pernah menyesatkan:
+1. **Kemurnian harus PER TRANSISI, bukan persen track yang memuat lompatan.**
+   Setelan yang menghasilkan track lebih panjang otomatis punya lebih banyak
+   transisi per track, jadi persentasenya naik tanpa kemurniannya benar benar
+   turun. Kesalahan ini pernah hampir membuat kesimpulan terbalik.
+2. **`env VAR=... python ...` TIDAK memuat `.env`.** Akibatnya `ACTION_EVERY_N`
+   dan `COURT_EVERY_N` ikut berbeda, dan angka antar percobaan jadi tak
+   sebanding. Skrip 16 dan 17 sudah memuat `.env` lebih dulu.

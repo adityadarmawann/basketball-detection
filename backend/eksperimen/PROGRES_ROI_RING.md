@@ -158,15 +158,58 @@ bola masuk yang tadinya putus.
 **Pelajarannya: laju lompatan bagus untuk MEMAHAMI, tapi tidak boleh jadi
 satu satunya penentu terima atau tolak. Yang memutuskan tetap skrip 17.**
 
-## YANG MASIH HARUS DIJALANKAN
+## HASIL PIPELINE TUGAS B, DITERIMA
 
-1. `17_ukur_kejadian.py` dengan `FG_RIM_GATE=1`.
-   Log `/home/paul/hasil_uji_rim_gate.log`.
-2. Kalau ada waktu: `HOOP_ROI_OVERLAP_PX=0` (potongan HANYA mengisi celah,
-   tidak pernah mengganti) untuk memisah sumbangan mengisi dari mengganti.
+`17_ukur_kejadian.py`, `FG_RIM_GATE=1` SENDIRI (potongan ring MATI), log
+`/home/paul/hasil_uji_rim_saja.log`:
 
-Uji SATU perubahan pada satu waktu. Menjalankan A dan B sekaligus
-menyembunyikan sebab akibat.
+    setelan              asli   nilai   palsu   poin   waktu
+    acuan produksi       2/5      2       2       9    16,1 menit
+    gerbang tepi rim     2/5      2       1       7    16,4 menit
+
+Palsu TURUN 2 jadi 1 dan yang asli TIDAK berkurang, jadi syarat penerimaan
+terpenuhi lewat jalan kedua (palsu turun tanpa asli berkurang).
+
+Yang dibuang tepat yang dirancang dibuang: deteksi palsu detik 1:38 yang
+jaraknya 0,5 m dari ring. Itu bola yang lewat DI SAMPING cincin, memenuhi
+lingkaran radius 45 px tapi di luar rentang mendatar kotak rim yang 38 px.
+Palsu detik 3:52 (10,2 m, dihitung 3 angka) TETAP ADA, jadi sebab palsu itu
+bukan geometri ring melainkan penentuan posisi penembak.
+
+Dua bola masuk asli yang sudah ditemukan TIDAK hilang, padahal gerbangnya
+lebih ketat. Itu yang paling penting: menajamkan bidang skor tidak memakan
+yang sah. Biaya waktu +2 persen.
+
+### Uji sintetis yang mendahului, membuktikan jalurnya memang membedakan
+Tanpa GPU, bola disimulasikan turun melewati kotak rim 38,0 x 16,6 px:
+
+    bola lurus di tengah cincin      : lingkaran MENYALA, tepi rim MENYALA
+    bola 35 px DI SAMPING cincin     : lingkaran MENYALA, tepi rim MENOLAK
+
+35 px itu lolos lingkaran 45 px tapi di luar separuh lebar cincin 19 px.
+Jadi perbedaannya nyata dan terarah, bukan kebetulan setelan.
+
+## GABUNGAN A DAN B
+
+Karena KEDUANYA diterima SENDIRI SENDIRI, gabungannya baru boleh diuji
+sebagai jalan ketiga: A menambah yang asli, B membuang yang palsu, dan
+keduanya bekerja di tempat yang berbeda (A di deteksi bola, B di geometri
+gerbang). Log `/home/paul/hasil_uji_roi_dan_rim.log`.
+
+Harapan dari dua hasil terpisah: asli 3/5, palsu 2. Kalau yang keluar bukan
+itu, berarti keduanya BERINTERAKSI dan tidak boleh dijumlahkan begitu saja.
+Jangan menebak, tulis hasil sebenarnya.
+
+## YANG MASIH TERBUKA
+
+1. `HOOP_ROI_OVERLAP_PX=0` (potongan HANYA mengisi celah, tidak pernah
+   mengganti) untuk memisah sumbangan mengisi dari sumbangan mengganti.
+2. Palsu 3:52 bertahan di SEMUA setelan. Jaraknya 10,2 m dan dinilai 3 angka,
+   jadi sebabnya POSISI PENEMBAK, bukan gerbang ring. Itu jalur terpisah.
+3. Dua bola masuk yang masih terlewat di semua setelan: 1:30 dan 2:26.
+
+Uji SATU perubahan pada satu waktu. Gabungan hanya sah sebagai jalan KETIGA,
+setelah masing masing terpisah.
 
 ## CARA MENGULANG
 

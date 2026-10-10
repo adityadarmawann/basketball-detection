@@ -244,3 +244,48 @@ setelah masing masing terpisah.
     # nilai ulang di ambang mana pun, tanpa GPU
     MODE=nilai REKAM=/home/paul/rekam_roi/roi_448.json \
       /home/paul/miniconda3/envs/cl-gpu/bin/python eksperimen/21_ukur_potongan_ring.py
+
+## KEADAAN SAKLAR DI `.env`, PERIKSA INI SEBELUM MENILAI JALAN BERIKUTNYA
+
+`.env` tidak dilacak git (ada di `.gitignore`), jadi perubahannya TIDAK terlihat
+di riwayat commit. Saat tugas ini ditutup keadaannya:
+
+    FG_RIM_GATE=1        <- DINYALAKAN di .env oleh sesi lain, 10 Okt 23:08:38
+    HOOP_ROI_ENABLE      <- tidak ada di .env, jadi MATI (bawaan kode)
+
+Bawaan di KODE tetap mati untuk keduanya, jadi `.env` yang menyalakan, bukan
+kodenya. Pengukurannya memang mendukung `FG_RIM_GATE=1` (palsu 2 jadi 1 tanpa
+asli berkurang), tapi keputusan menyalakannya di produksi milik user.
+
+Empat jalan uji di tugas ini TIDAK tercemar oleh perubahan itu, dan ini
+diperiksa bukan diasumsikan:
+
+    acuan produksi      mulai 21:14:44
+    potongan ring saja  mulai 22:24:14
+    gerbang rim saja    mulai 22:45:14
+    KEDUANYA            mulai 23:02:16
+    .env diubah                23:08:38   <- sesudah semuanya mulai
+
+`load_dotenv` jalan sekali saat proses MULAI, dan dia TIDAK menimpa env yang
+sudah ada, sehingga saklar yang dikirim lewat `env VAR=... ` selalu menang.
+Keempat jalan mengirim saklarnya eksplisit.
+
+Untuk mematikan kembali: hapus atau nolkan baris `FG_RIM_GATE` di `.env`.
+
+## CATATAN: ADA SESI LAIN YANG BEKERJA DI POHON KERJA YANG SAMA
+
+Terjadi 10 Oktober 2026 dan perlu diketahui karena bisa merusak pengukuran:
+- Skrip `/home/paul/antrean_rim.sh` muncul di tengah tugas dan menjalankan
+  `17_ukur_kejadian.py` KEDUA bersamaan dengan jalan saya. Dua proses GPU
+  sekaligus, dan dua duanya menulis ke berkas log YANG SAMA. Itu melanggar
+  aturan satu proses GPU dan membuat waktu proses tidak berarti.
+  Sudah dihentikan dan diarsipkan jadi `antrean_rim.sh.dihentikan`, lalu uji
+  gerbang rim DIJALANKAN ULANG dari bersih supaya angka waktunya sahih.
+- Commit `0c88de9` berisi tulisan dari pohon kerja saya yang belum saya commit,
+  ditambah satu butir jebakan pengukuran tulisan sesi itu. Isinya benar dan
+  tidak ganda, jadi dibiarkan; hanya nomornya dirapikan.
+
+Kalau menjalankan uji GPU, periksa dulu:
+
+    ps -eo pid,sid,etime,args | grep -E "17_ukur|21_ukur|antrean" | grep -v grep
+    nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader

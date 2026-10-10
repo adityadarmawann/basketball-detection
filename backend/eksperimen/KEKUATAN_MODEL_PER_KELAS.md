@@ -54,7 +54,7 @@ Status: `TERUKUR` = ada angka dari jalan nyata. `SEBAGIAN` = baru satu sisi
 
 | kelas | pemilik sekarang | status | dasar |
 |---|---|---|---|
-| `ball` | RF-DETR | SEBAGIAN | cakupan terukur, presisi belum, perbandingan ke YOLO sedang diukur |
+| `ball` | **RF-DETR** | **TERUKUR** | RF-DETR 1,8x lebih baik dari YOLO di tiap ambang; gabungan cuma +3,5 titik, ditolak |
 | `hoop` + `rim` | RF-DETR | SEBAGIAN | kotak dan getaran terukur, cakupan lawan YOLO belum |
 | `player` | RF-DETR | SEBAGIAN | cakupan jauh lebih tinggi, presisi belum |
 | `referee` | RF-DETR | BELUM | belum pernah dibandingkan langsung |
@@ -94,6 +94,32 @@ VIDEO BERBEDA, jadi tidak sebanding langsung).
 
 Perbandingan langsung RF-DETR lawan YOLO di video dan jendela yang sama, termasuk
 berapa frame yang hanya ketemu salah satu, SEDANG DIUKUR.
+
+
+### KOREKSI 10 Oktober 2026: `ball` SUDAH TERUKUR, pemiliknya RF-DETR
+
+Diukur pada potongan 240 detik, jendela 143 detik yang memuat kelima bola masuk,
+4.290 frame, skrip 19:
+
+    ambang    RF-DETR    YOLO lama
+      0,10     83,6 %      46,0 %
+      0,20     72,8 %      41,5 %
+      0,25     69,4 %      39,3 %
+      0,35     64,0 %      36,3 %
+      0,50     58,1 %      32,0 %
+
+RF-DETR menang di SETIAP ambang dengan selisih sekitar 1,8 kali. Keyakinan
+mediannya juga lebih tinggi, 0,841 lawan 0,752. Kotak YOLO sedikit lebih besar
+(25,0 px lawan 21,5 px), tapi itu bukan keunggulan, cuma gaya kotaknya.
+
+Gabungan dua detektor DITOLAK: YOLO hanya menambah 3,5 titik persen (149 frame
+dari 4.290) dengan harga menjalankan model kedua di setiap frame. Rinciannya di
+`PENDEKATAN_DITOLAK.md`.
+
+**Yang lebih penting dari semua angka cakupan di atas:** mengejar cakupan bola
+TERBUKTI SALAH SASARAN. Menaikkan cakupan 69,4 jadi 83,6 persen justru
+MENURUNKAN skor dari 9 jadi 7 poin, karena sepertiga deteksi tambahan menaruh
+bola di posisi salah. Yang dibutuhkan POSISI BENAR pada saat menentukan.
 
 ### `hoop` dan `rim`
 **RF-DETR, terukur 10 Oktober 2026, skrip 18**, jendela sama:

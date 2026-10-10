@@ -134,6 +134,67 @@ Satu bola masuk asli TIDAK bertambah, tapi deteksi palsunya bertambah. Untuk
 ketepatan skor itu merugikan, maka MATI secara bawaan. Nyalakan hanya kalau yang
 dikejar kelengkapan daftar kejadian, bukan ketepatan skor.
 
+### Menurunkan ambang keyakinan BOLA demi cakupan
+**DITOLAK, dan ini membantah dugaan saya sendiri.** Diukur 10 Oktober 2026,
+potongan 240 detik (`/home/paul/q1_4menit.mp4`), skrip 17 dan 19 dan 20.
+
+Saklar `RFDETR_CONF_BALL` sengaja dibuat supaya ambang bola bisa diturunkan
+TANPA melonggarkan pemain, hakim, nomor, dan ring. Cakupan bolanya memang naik:
+
+    ambang bola   cakupan bola   asli ditemukan   palsu   poin
+    0,25 produksi     69,4 %          2/5            2      9
+    0,20              72,8 %          2/5            2      9
+    0,10              83,6 %          1/5            2      7
+
+Cakupan naik 14 titik persen, skor justru TURUN. Dugaan saya bahwa cakupan
+bolalah penghambatnya TERBANTAH.
+
+**Sebabnya, terukur dengan skrip 20 dari rekaman skrip 19:**
+
+                              melompat dari lintasan   p90 jarak
+    deteksi kuat (c >= 0,25)          3,0 %              17,0 px
+    deteksi tambahan (0,10-0,25)     33,3 %             379,8 px
+
+Sepertiga deteksi tambahan itu bola yang ditaruh di tempat SALAH, 11 kali lebih
+sering melompat daripada deteksi kuat. Mekanismenya: detektor memilih SATU bola
+per frame, yang keyakinannya tertinggi. Di ambang 0,25 frame yang cuma punya
+kandidat lemah menghasilkan TIDAK ADA bola, dan itu celah yang jujur. Di ambang
+0,10 frame yang sama menghasilkan bola palsu di posisi salah. Gerbang bola masuk
+menuntut rantai "datang dari ATAS rim lalu dikonfirmasi di BAWAH rim", dan satu
+posisi salah di tengah rantai itu memutusnya.
+
+**Pelajarannya: untuk bola, yang dibutuhkan POSISI BENAR pada saat menentukan,
+bukan cakupan tinggi.** Jangan lagi mengejar cakupan bola sebagai sasaran.
+
+Saklar `RFDETR_CONF_BALL` TETAP ADA karena bawaannya 0 yang berarti ikut ambang
+biasa, jadi tidak mengubah apa pun kalau tidak diisi. JANGAN diisi di `.env`.
+
+### Menggabungkan deteksi bola dari dua detektor
+**DITOLAK, tidak sepadan.** Diukur 10 Oktober 2026, skrip 19, jendela 143 detik
+yang memuat kelima bola masuk, 4.290 frame.
+
+    cakupan bola per ambang:
+      ambang    RF-DETR    YOLO lama
+        0,10     83,6 %      46,0 %
+        0,25     69,4 %      39,3 %
+        0,35     64,0 %      36,3 %
+
+    silang RF-DETR 0,35 lawan YOLO 0,25:
+      dua duanya menemukan   1539   35,9 %
+      HANYA RF-DETR          1206   28,1 %
+      HANYA YOLO              149    3,5 %
+      tidak satu pun         1396   32,5 %
+      gabungan               2894   67,5 %  (+3,5 titik atas RF-DETR saja)
+
+YOLO cuma menambah 3,5 titik persen, dan harganya menjalankan model kedua di
+setiap frame. Sebagai pembanding, menurunkan ambang bola RF-DETR menambah 14
+titik persen tanpa model kedua, DAN ITU PUN DITOLAK karena tambahannya posisi
+salah. Jadi menambah model untuk 3,5 titik jelas tidak sepadan.
+
+Catatan yang berguna: saat keduanya menemukan bola, titik tengahnya sepakat
+95,0 persen dalam 25 piksel (median beda 1,7 px). Jadi dua model ini TIDAK
+saling bertentangan, cuma YOLO lebih sering tidak menemukan apa apa.
+
 ### Menilai akurasi skor dari TOTAL POIN
 **CARA UKUR YANG SALAH, jangan diulang.** Pernah terjadi: dua konfigurasi sama
 sama memberi 12 poin lawan kebenaran 11, dan saya menyimpulkan "5 dari 5 bola

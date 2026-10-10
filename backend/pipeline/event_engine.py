@@ -452,6 +452,7 @@ class EventEngine:
         # karena ring sintetis dari homografi hanya punya "center", dan gerbang
         # tepi rim butuh tepinya. Lihat FG_RIM_GATE.
         self._last_rims_px: list = []
+        self._rim_cache_age: int = 10 ** 9   # frame sejak kotak rim terakhir
 
         # ── Trajectory-based scoring — pixel-space ball history ───────────
         # Stores recent (ball_x, ball_y) in pixel coords regardless of court calib.
@@ -659,9 +660,18 @@ class EventEngine:
         # "hoops" hanya cadangan, dan HANYA entri yang punya bbox dipakai,
         # karena ring sintetis dari homografi tidak punya tepi. Umurnya ikut
         # _hoop_cache_age, jadi cache basi ditolak oleh gerbang yang sudah ada.
+        # Umurnya DIHITUNG SENDIRI, tidak boleh ikut _hoop_cache_age. Alasannya
+        # nyata: video_processor bisa membuat ring SINTETIS dari homografi yang
+        # hanya punya "center" tanpa bbox. Ring sintetis itu menyegarkan
+        # _hoop_cache_age tapi TIDAK memberi kotak rim, jadi kalau umurnya
+        # dititipkan ke sana, kotak rim dari sudut kamera belasan detik lalu
+        # akan tetap dianggap segar dan dipakai sebagai bidang skor.
         _rims = [r for r in (dets.get("rims") or hoops) if r.get("bbox")]
         if _rims:
             self._last_rims_px = _rims
+            self._rim_cache_age = 0
+        else:
+            self._rim_cache_age += 1
 
         # Maintain pixel-space ball history for from-above scoring check.
         # ball.center is always pixel coords regardless of court calibration.
@@ -1030,7 +1040,6 @@ class EventEngine:
                 batas_bawah = rim_px[3]
             else:
                 batas_bawah = float(hoop_ref_px[1]) + FG_BELOW_MARGIN_PX
-            hoop_y_ref = float(hoop_ref_px[1])
             # Keputusan MENENTUKAN ini wajib memakai DETEKSI NYATA. Pelacak bola
             # mengisi celah pendek dengan perkiraan dan menandainya "predicted";
             # memakai posisi karangan untuk memutuskan bola masuk sama saja
@@ -1210,6 +1219,12 @@ class EventEngine:
         sintetis dari homografi yang hanya punya titik tengah.
         """
         if not ball_px or not self._last_rims_px:
+            return None
+        # Kotak rim basi DITOLAK, dan None di sini berarti mundur ke lingkaran.
+        # Setelah kamera berpindah sudut, kotak rim lama letaknya sudah salah,
+        # dan memakainya sebagai bidang skor jauh lebih berbahaya daripada
+        # memakai lingkaran di sekitar titik tengah ring yang masih disegarkan.
+        if self._rim_cache_age > self._fg_hoop_cache_ttl:
             return None
         best_d, best_b = float("inf"), None
         for r in self._last_rims_px:
@@ -1825,6 +1840,7 @@ class EventEngine:
         self._contact_frames     = {}
         self._last_hoops_px      = []
         self._last_rims_px       = []
+        self._rim_cache_age      = 10 ** 9
         self._ball_px_hist       = deque(maxlen=self._fg_above_window_f)
         self._player_court_hist  = {}
 

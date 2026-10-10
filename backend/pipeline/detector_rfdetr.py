@@ -653,6 +653,11 @@ class RFDetrDetector:
                                e, self._roi_gagal)
             return
         self.roi_stat["jalan"] += 1
+        # Dicatat berkala supaya satu jalan pipeline MEMBUKTIKAN SENDIRI jalur
+        # ini terpakai. Tanpa ini, satu satunya petunjuk cuma waktu proses yang
+        # lebih lama, dan itu bukan bukti.
+        if self.roi_stat["jalan"] % 500 == 0:
+            logger.info("Potongan ring %s", self.roi_stat)
 
         kotak, keyakinan, kelas = self._bongkar(det)
         if kotak is None:

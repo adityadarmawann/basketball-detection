@@ -368,7 +368,7 @@ menjanjikan:
       python eksperimen/17_ukur_kejadian.py
 
 Empat jebakan pengukuran yang pernah menyesatkan:
--1. **Ukuran "lompatan dari lintasan" BERAT SEBELAH kalau tiap sumber dinilai
+1. **Ukuran "lompatan dari lintasan" BERAT SEBELAH kalau tiap sumber dinilai
    terhadap tetangganya SENDIRI.** Sumber yang deteksinya jarang hanya menemukan
    tetangga di dalam rentetannya sendiri yang mulus, jadi lajunya terlihat
    rendah secara palsu. Terbukti 10 Oktober 2026: membandingkan potongan ring
@@ -383,7 +383,7 @@ Empat jebakan pengukuran yang pernah menyesatkan:
    itu juga dikuatkan bukti terpisah: skor di pipeline turun 9 jadi 7.
    Kalau cuma punya ukuran yang berat sebelah, pakai angka yang tidak
    bergantung kerapatan, misalnya khusus frame YANG DIISI sumber baru.
-0. **Menjalankan skrip 17 pada VIDEO PENUH.** `Q1-UNESA-UBAYA-CUT-2-17.mp4`
+2. **Menjalankan skrip 17 pada VIDEO PENUH.** `Q1-UNESA-UBAYA-CUT-2-17.mp4`
    panjangnya **601 detik**, sedangkan `TRUTH` di skrip 17 cuma sampai detik
    146 dan disusun untuk POTONGAN yang dimulai detik 60. Memberi video penuh
    membuat 7,5 menit sisanya dinilai PALSU tanpa pembanding, dan bola masuk
@@ -391,10 +391,10 @@ Empat jebakan pengukuran yang pernah menyesatkan:
    terjadi dan menghasilkan "1 dari 5 asli, 5 palsu" yang sama sekali tidak
    berarti. SELALU pakai potongan 240 detik:
        ffmpeg -ss 60 -i <video penuh> -t 240 -c copy -y /home/paul/q1_4menit.mp4
-1. **Kemurnian harus PER TRANSISI, bukan persen track yang memuat lompatan.**
+3. **Kemurnian harus PER TRANSISI, bukan persen track yang memuat lompatan.**
    Setelan yang menghasilkan track lebih panjang otomatis punya lebih banyak
    transisi per track, jadi persentasenya naik tanpa kemurniannya benar benar
    turun. Kesalahan ini pernah hampir membuat kesimpulan terbalik.
-2. **`env VAR=... python ...` TIDAK memuat `.env`.** Akibatnya `ACTION_EVERY_N`
+4. **`env VAR=... python ...` TIDAK memuat `.env`.** Akibatnya `ACTION_EVERY_N`
    dan `COURT_EVERY_N` ikut berbeda, dan angka antar percobaan jadi tak
    sebanding. Skrip 16 dan 17 sudah memuat `.env` lebih dulu.

@@ -110,12 +110,60 @@ Pada frame penuh kelas ini terukur NOL (skrip 18). Pada potongan 448 dia
 menyala 2 kali dari 2.623 potongan. Masih praktis tidak terpakai, tapi bukan
 nol lagi. Tidak digabung ke keluaran, hanya dicatat di `roi_stat`.
 
+## HASIL PIPELINE TUGAS A, DITERIMA
+
+`17_ukur_kejadian.py`, `HOOP_ROI_ENABLE=1 HOOP_ROI_SIZE=448
+HOOP_ROI_NEAR_PX=300`, log `/home/paul/hasil_uji_roi_448_near300.log`:
+
+    setelan                    asli   nilai   palsu   poin   waktu
+    acuan produksi             2/5      2       2       9    16,1 menit
+    potongan 448, near 300     3/5      3       3      13    16,9 menit
+
+    acuan  : ditemukan 0:58 dan 1:57; terlewat 0:19, 1:30, 2:26
+    dengan : ditemukan 0:18, 0:58, 1:57; terlewat 1:30, 2:26
+             palsu 1:38 (0,5 m), 1:45 (3,2 m, BARU), 3:52 (10,2 m)
+
+Satu bola masuk ASLI yang tadinya terlewat (0:19) sekarang ditemukan, dan
+satu deteksi palsu baru ikut masuk (1:45). Jadi asli +1 dan palsu +1: palsu
+TIDAK naik lebih banyak daripada asli, sehingga syarat penerimaan terpenuhi.
+
+Ketepatan nilai 2/3 juga ikut: 3 dari 3 yang ditemukan dinilai BENAR.
+Presisi TIDAK berubah, 2 dari 4 jadi 3 dari 6, dua duanya 50 persen.
+Yang naik CAKUPAN KEJADIAN, 40 jadi 60 persen.
+
+Biaya waktu +5 persen (16,1 jadi 16,9 menit), jauh di bawah dua kali lipat.
+Jauh lebih murah daripada +73 persen waktu detektor yang terukur kalau
+potongan dijalankan di setiap frame, karena gerbang NEAR_PX=300 memangkasnya
+ke 28,6 persen frame DAN deteksi berjalan di utas terpisah bersamaan dengan
+ByteTrack di CPU.
+
+### Bukti jalur ini benar benar terpakai
+Jalan ini memakai kode SEBELUM catatan berkala `roi_stat` ditambahkan, jadi
+buktinya dari perilaku, bukan dari log: tiga hal berubah yang mustahil berubah
+tanpa jalur potongan, karena tidak ada lain yang berbeda antara dua jalan itu.
+0:18 muncul, 1:45 muncul, dan jarak tembakan 1:57 bergeser 4,4 jadi 3,9 m
+karena posisi bolanya dipertajam. Jalan berikutnya akan mencatat `roi_stat`
+sendiri setiap 500 potongan.
+
+### Yang MEMBANTAH dugaan: angka proksi tidak meramalkan hasil pipeline
+Ukuran proksi di atas (laju lompatan gabungan 3,8 jadi 4,7 persen, pengisian
+celah 24,7 persen salah posisi) mengarah ke KESIMPULAN SALAH kalau dipakai
+sendiri. Pipeline justru membaik. Sebabnya: dari 179 pengisian celah, 114
+posisinya benar dan cuma 30 yang melewati `PelacakBola` dengan posisi salah
+lebih dari 60 px (23 lagi ditolak pelacak, jatah 90 px per frame jeda).
+Tiga puluh posisi salah tersebar di seluruh 4 menit tidak cukup mengarang
+kejadian baru, sementara 114 posisi benar cukup menyambung satu rantai bukti
+bola masuk yang tadinya putus.
+
+**Pelajarannya: laju lompatan bagus untuk MEMAHAMI, tapi tidak boleh jadi
+satu satunya penentu terima atau tolak. Yang memutuskan tetap skrip 17.**
+
 ## YANG MASIH HARUS DIJALANKAN
 
-1. `17_ukur_kejadian.py` dengan `HOOP_ROI_ENABLE=1 HOOP_ROI_SIZE=448
-   HOOP_ROI_NEAR_PX=300`. Log `/home/paul/hasil_uji_roi_448_near300.log`.
-2. `17_ukur_kejadian.py` dengan `FG_RIM_GATE=1`.
+1. `17_ukur_kejadian.py` dengan `FG_RIM_GATE=1`.
    Log `/home/paul/hasil_uji_rim_gate.log`.
+2. Kalau ada waktu: `HOOP_ROI_OVERLAP_PX=0` (potongan HANYA mengisi celah,
+   tidak pernah mengganti) untuk memisah sumbangan mengisi dari mengganti.
 
 Uji SATU perubahan pada satu waktu. Menjalankan A dan B sekaligus
 menyembunyikan sebab akibat.

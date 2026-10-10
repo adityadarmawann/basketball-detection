@@ -54,7 +54,7 @@ Status: `TERUKUR` = ada angka dari jalan nyata. `SEBAGIAN` = baru satu sisi
 
 | kelas | pemilik sekarang | status | dasar |
 |---|---|---|---|
-| `ball` | **RF-DETR** | **TERUKUR** | RF-DETR 1,8x lebih baik dari YOLO di tiap ambang; gabungan cuma +3,5 titik, ditolak |
+| `ball` | **RF-DETR** | **TERUKUR** | RF-DETR 1,8x lebih baik dari YOLO di tiap ambang; gabungan cuma +3,5 titik, ditolak. Potongan resolusi asli di sekitar rim menaikkan keyakinan 0,820 jadi 0,869 dan asli ditemukan 2/5 jadi 3/5 |
 | `hoop` + `rim` | RF-DETR | SEBAGIAN | kotak dan getaran terukur, cakupan lawan YOLO belum |
 | `player` | RF-DETR | SEBAGIAN | cakupan jauh lebih tinggi, presisi belum |
 | `referee` | RF-DETR | BELUM | belum pernah dibandingkan langsung |
@@ -121,6 +121,37 @@ TERBUKTI SALAH SASARAN. Menaikkan cakupan 69,4 jadi 83,6 persen justru
 MENURUNKAN skor dari 9 jadi 7 poin, karena sepertiga deteksi tambahan menaruh
 bola di posisi salah. Yang dibutuhkan POSISI BENAR pada saat menentukan.
 
+### `ball` pada POTONGAN RESOLUSI ASLI, bukan frame utuh
+**Terukur 10 Oktober 2026, skrip 21**, `q1_4menit.mp4` detik 72 sampai 215,
+4.290 frame, potongan 448 px di sekitar rim, ambang bola 0,25.
+
+Ini BUKAN model lain, ini model yang SAMA diberi gambar yang lebih besar.
+Frame utuh 1280x720 diperkecil ke 576x576 (skala x 0,45, y 0,80) sehingga bola
+21 px terlihat 9,5 px. Potongan 448 diperbesar ke 576 sehingga bola yang sama
+terlihat 27 px.
+
+    saat KEDUANYA menemukan bola (n=813):
+      keyakinan median   frame penuh 0,820   potongan 0,869
+      potongan lebih yakin pada 77,9 persen frame
+      jarak pusat        median 1,5 px   p90 10,1 px
+      sepakat dalam 10 px   89,9 persen
+
+    cakupan:
+      frame penuh menemukan bola   75,0 %
+      potongan menemukan bola      23,1 %   (hanya 61,1 % frame punya rim)
+      HANYA potongan                4,2 %   = 179 frame, satu satunya tambahan
+
+Jadi memperbesar bola MEMANG menaikkan keyakinan, terukur. Tapi di frame yang
+frame penuh sudah berhasil, posisinya praktis sama (1,5 px lawan gerbang 45
+px), jadi sumbangannya ada di 179 frame yang frame penuh KOSONG.
+
+Akibatnya ke skor, skrip 17: asli ditemukan 2/5 jadi 3/5, palsu 2 jadi 3,
+waktu +5 persen. DITERIMA, lihat `PENDEKATAN_DITOLAK.md` bagian cara ukur.
+
+Biaya: satu predict potongan 12,0 ms, satu detect frame penuh 16,4 ms. Kalau
+potongan dijalankan di SETIAP frame, waktu detektor +73 persen. Dengan gerbang
+`HOOP_ROI_NEAR_PX=300` potongan jalan di 28,6 persen frame saja.
+
 ### `hoop` dan `rim`
 **RF-DETR, terukur 10 Oktober 2026, skrip 18**, jendela sama:
 
@@ -175,6 +206,14 @@ Perlu dipastikan ulang dengan ukuran langsung di video uji sekarang.
 
     ambang 0,25 (bawaan produksi) : 0 deteksi dari 480 frame
     ambang 0,10                   : 0 deteksi dari 480 frame
+
+KOREKSI KECIL 10 Oktober 2026, skrip 21: pada POTONGAN 448 px resolusi asli
+kelas ini menyala **2 kali** dari 2.623 potongan, jadi bukan nol mutlak,
+melainkan nol karena objeknya terlalu kecil di frame yang diperkecil. Dua
+deteksi masih jauh dari cukup untuk jadi penentu, jadi kesimpulan "butuh latih
+ulang" TIDAK berubah. Tapi arah perbaikannya sekarang punya dua kemungkinan,
+bukan satu: menambah contoh latih, ATAU melatihnya pada potongan dekat ring.
+Hitungannya ada di `roi_stat["masuk_jaring"]`; tidak digabung ke keluaran.
 
 Nol, padahal jendelanya memuat bola masuk nyata. Dugaan sebabnya masuk akal:
 begitu bola berada di dalam jaring, rupanya samar dan tertutup, jadi contoh

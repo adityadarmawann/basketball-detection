@@ -335,6 +335,7 @@ kosong. Hitung ulang pakai Python, jangan `wc -l`.
 | Tahap kedua classify digit | bacaan satu frame 22 jadi 37,5 persen |
 | SlowFast ganti VideoMAE | 0,792 lawan 0,549, kelas identik, bobot sudah ada |
 | `PATH_CLEAN_METHOD=roboflow` | percepatan mustahil 53 jadi 4 persen |
+| `HOOP_ROI_ENABLE=1` potongan 448 near 300 | asli ditemukan 2/5 jadi 3/5, palsu 2 jadi 3, nilai 2/3 benar 2 jadi 3, waktu +5 persen |
 
 ---
 

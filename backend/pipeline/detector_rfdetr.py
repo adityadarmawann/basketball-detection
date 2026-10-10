@@ -98,6 +98,24 @@ WEIGHTS    = os.getenv("RFDETR_WEIGHTS", "best-object-basket-detect-v1-DETR.pt")
 # RF-DETR tidak memakai NMS IoU seperti YOLO; ambangnya hanya keyakinan.
 CONF       = float(os.getenv("RFDETR_CONF", "0.35"))
 
+# ── Ambang KHUSUS KELAS BOLA ────────────────────────────────────────────────
+# Kenapa dipisah: model.predict() hanya menerima SATU ambang untuk SEMUA kelas,
+# jadi menurunkan RFDETR_CONF demi bola ikut menurunkan ambang pemain, hakim,
+# nomor, dan ring sekaligus. Diukur 9 Oktober 2026 dengan skrip 18 pada jendela
+# detik 72 sampai 88 yang memuat satu bola masuk nyata:
+#     ambang 0.35 : bola terdeteksi 52,1 persen, lebar kotak bola median 21 px
+#     ambang 0.10 : bola terdeteksi 71,5 persen, lebar kotak bola median 20 px
+# Jadi cakupan bola memang naik 19 titik, tapi harganya tidak boleh dibayar
+# oleh kelas lain. Dengan saklar ini, predict dijalankan pada ambang TERENDAH
+# di antara keduanya lalu hasilnya disaring kembali per kelas. Itu sahih persis,
+# bukan perkiraan: RF-DETR tidak memakai NMS, ia memprediksi himpunan lewat
+# pencocokan bipartit, sehingga kotak yang keluar TIDAK berubah karena ambang.
+# Ambang hanya memotong daftar di akhir.
+#
+# Bawaannya 0 yang berarti "ikut RFDETR_CONF", supaya tidak mengisinya berarti
+# perilaku lama persis seperti sebelumnya.
+CONF_BALL  = float(os.getenv("RFDETR_CONF_BALL", "0"))
+
 # ── Ukuran masukan. WAJIB dikirim, bukan pilihan ────────────────────────────
 # Checkpoint ini dilatih pada resolution=560, tapi rfdetr 1.11.2 MENOLAK
 # menjalankannya tanpa shape eksplisit:
@@ -198,9 +216,15 @@ class RFDetrDetector:
         conf_threshold: float = CONF,
         variant: str = VARIANT,
         device: Optional[str] = None,
+        conf_ball: Optional[float] = None,
     ) -> None:
         self.model_path = model_path or os.path.join(MODELS_DIR, WEIGHTS)
         self.conf_threshold = conf_threshold
+        # Ambang bola. Kalau tidak disebut dan RFDETR_CONF_BALL tidak diisi,
+        # nilainya SAMA dengan ambang umum, jadi perilakunya tidak berubah.
+        if conf_ball is None:
+            conf_ball = CONF_BALL if CONF_BALL > 0 else conf_threshold
+        self.conf_ball = float(conf_ball)
         self.variant = variant
         self.device = device
         self.model = None
@@ -382,8 +406,10 @@ class RFDetrDetector:
             # shape WAJIB: resolusi latih 560 tidak habis dibagi 32, dan rfdetr
             # 1.11.2 menolak menjalankannya tanpa shape eksplisit. Tanpa baris
             # ini setiap frame gagal. Lihat RFDETR_SHAPE di atas.
+            # Ambang TERENDAH di antara umum dan bola. Penyaringan per kelas
+            # dilakukan di bawah. Lihat CONF_BALL soal kenapa ini sahih.
             det = self.model.predict(
-                rgb, threshold=self.conf_threshold,
+                rgb, threshold=min(self.conf_threshold, self.conf_ball),
                 shape=(RFDETR_SHAPE, RFDETR_SHAPE),
             )
         except Exception as e:
@@ -411,6 +437,14 @@ class RFDetrDetector:
                     else f"class_{ci}")
             if not (0 <= idx < len(self._class_names)):
                 tak_dikenal += 1
+
+            # Penyaringan per kelas. Kelas bola memakai self.conf_ball, semua
+            # kelas lain tetap memakai self.conf_threshold. Kalau keduanya sama
+            # (bawaan), cabang ini tidak pernah membuang apa pun karena predict
+            # sudah memotong di ambang yang sama.
+            ambang = self.conf_ball if nama == "ball" else self.conf_threshold
+            if conf < ambang:
+                continue
 
             if nama in PLAYER_CLASS_TO_ACTION:
                 out["players"].append({

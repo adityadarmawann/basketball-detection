@@ -76,16 +76,41 @@ FG_HOOP_RADIUS_PX      = int(os.getenv("FG_HOOP_RADIUS_PX",
                                        _FG_BAWAAN["radius_px"]))
 FG_HOOP_RADIUS_M       = 0.45   # meters  — tighter in court space (no action gate)
 FG_COOLDOWN_F          = 45     # frames before another FG can fire
-FG_ABOVE_MARGIN_PX     = 10     # ball must be ≥ this many px above hoop_y to arm
+# Ambang "bola pernah di atas ring", PER DETEKTOR, mengikuti bentuk kotaknya.
+# Kotak rim RF-DETR tingginya 16,6 px jadi separuhnya 8,3; menuntut 10 px di
+# atas PUSAT berarti menuntut bola di atas tepi atas cincin, terlalu ketat
+# untuk layup yang cuma menjulur sedikit. Kotak hoop YOLO pusatnya 13,1 px DI
+# BAWAH cincin, jadi 10 px di atas pusat justru masih 3 px DI BAWAH cincin,
+# terlalu longgar. Ambang lama 10 salah di DUA arah sekaligus.
+# TERUKUR: layup detik 18,2 hanya mencapai 8 px di atas pusat rim lalu ditolak.
+FG_ABOVE_MARGIN_PX     = int(os.getenv(
+    "FG_ABOVE_MARGIN_PX", {"rfdetr": 4, "yolo": 18}.get(_DETEKTOR, 10)))
 FG_ABOVE_WINDOW_F      = 20     # frames to look back for "was above" check (~1.3 s @ 15 eff fps)
 FG_ATTEMPT_WINDOW_F    = 150    # kept for MISSED_FG accounting only (not scoring gate)
 FG_MISS_TIMEOUT_F      = 100    # frames after SHOOT with no MADE → MISSED_FG
 FG_BALL_LOST_RESET_F   = 3      # consecutive ball-absent frames before resetting zone state
-FG_ZONE_DWELL_F        = int(os.getenv("FG_ZONE_DWELL_F",
-                                       _FG_BAWAAN["dwell"]))  # lihat catatan
-                                # di FG_HOOP_RADIUS_PX: bawaannya ikut detektor
+# Catatan penskalaan, ini sumber satu bug nyata: nilai di sini diskalakan ke
+# fps EFEKTIF (lihat set_fps). Video 60 fps diproses tiap 2 frame jadi 30 fps,
+# sehingga pengali 2x. Dwell 3 menjadi 6 frame BERTURUT TURUT, dan deretan
+# terpanjang bola di zona ring pada bola masuk 3 angka detik 144,5 cuma 5
+# frame karena diputus satu deteksi bola palsu dan satu frame bola hilang.
+# Syaratnya mustahil tercapai dan bola masuk yang sah hilang.
+#
+# Saat FG_CONFIRM_BELOW hidup, dwell boleh lebih longgar karena gerbang bawah
+# ring sudah jauh lebih kuat sebagai pembeda. Dwell 2 (jadi 4 di 30 fps) masih
+# cukup menolak deteksi sekejap satu frame.
+FG_ZONE_DWELL_F        = int(os.getenv(
+    "FG_ZONE_DWELL_F",
+    _FG_BAWAAN["dwell"] - 1 if os.getenv("FG_CONFIRM_BELOW", "0") == "1"
+    else _FG_BAWAAN["dwell"]))
 FG_HOOP_CACHE_TTL      = 90     # reject stale hoop cache after this many frames (~6 s)
 FG_SHOOTER_TTL_F       = 120    # frames after shot attempt before shooter attribution expires
+# Perpindahan minimum ke bawah, diukur selama 3 FRAME. Karena satuannya frame,
+# ambang ini harus diskalakan TERBALIK terhadap fps: di 30 fps bola menempuh
+# separuh jarak per frame dibanding di 15 fps, jadi ambang tetap 2 px membuat
+# syaratnya dua kali lebih ketat tanpa alasan fisik apa pun. Penskalaannya
+# dihitung di set_fps sebagai self._fg_min_dy. TERUKUR: layup detik 18,2
+# ditolak dengan dy 1,4 padahal itu setara 2,8 px di 15 fps, yaitu lolos.
 FG_MIN_DOWNWARD_DY     = 2
 
 # ── Cara menentukan POSISI PENEMBAK ─────────────────────────────────────────
@@ -135,6 +160,14 @@ FG_MIN_DOWNWARD_DY     = 2
 # Memakai +8 untuk YOLO akan menuntut bola turun jauh di bawah jaring dan
 # membuat bola masuk yang sah ikut tertolak.
 FG_CONFIRM_BELOW       = os.getenv("FG_CONFIRM_BELOW", "0") == "1"
+# Berapa frame kancing bertahan setelah bola terkunci di zona ring.
+# HARUS ada jendela, tidak bisa diperiksa di frame yang sama. Terukur pada
+# bola masuk 3 angka di detik 144,5: saat dwell tercukupi bola masih 4 px DI
+# ATAS cincin, dan saat bola sudah 25 px di bawah cincin penghitung dwell
+# sudah teriset oleh satu deteksi bola PALSU yang melompat 138 px. Dua momen
+# itu tidak pernah bertemu di satu frame, jadi poin tidak pernah menyala.
+# 10 frame di 15 fps sekitar 0,67 detik, cukup untuk bola jatuh melewati ring.
+FG_CONFIRM_FRAMES      = int(os.getenv("FG_CONFIRM_FRAMES", "10"))
 FG_BELOW_MARGIN_PX     = int(os.getenv(
     "FG_BELOW_MARGIN_PX",
     {"rfdetr": 8, "yolo": -5}.get(_DETEKTOR, -5)))
@@ -269,6 +302,9 @@ class EventEngine:
         self._shot_attempt_frame:  int             = -999
         self._fg_cooldown:         int             = 0
         self._ball_in_hoop_frames: int             = 0    # consecutive in-zone frames
+        self._fg_armed_until:      int             = -1   # kancing gerbang bawah
+        self._fg_armed_hoop                        = None
+        self._fg_below_ok:         bool            = False
         self._ball_lost_frames:    int             = 0    # consecutive ball-absent frames
         self._hoop_cache_age:      int             = 0    # frames since last hoop detection
         self._fg_miss_emitted:     bool            = False  # one miss per attempt
@@ -328,6 +364,11 @@ class EventEngine:
         self._fg_zone_dwell_f      = _sc(FG_ZONE_DWELL_F)
         self._fg_hoop_cache_ttl    = _sc(FG_HOOP_CACHE_TTL)
         self._fg_shooter_ttl_f     = _sc(FG_SHOOTER_TTL_F)
+        self._fg_confirm_frames    = _sc(FG_CONFIRM_FRAMES)
+        # TERBALIK terhadap fps, bukan _sc: makin tinggi fps makin kecil
+        # perpindahan bola per frame, jadi ambangnya harus ikut mengecil.
+        self._fg_min_dy            = max(
+            0.5, FG_MIN_DOWNWARD_DY * REFERENCE_FPS / max(self.fps, 1e-6))
         self._shot_pos_lookback_f  = _sc(SHOT_POS_LOOKBACK_F)
         self._rebound_cooldown_f   = _sc(REBOUND_COOLDOWN_F)
         self._reb_min_f            = _sc(REBOUND_MIN_F)
@@ -669,11 +710,44 @@ class EventEngine:
 
         in_zone = _dist(ball_px, hoop_ref_px) < FG_HOOP_RADIUS_PX
 
-        # Count consecutive in-zone frames; reset immediately on exit.
+        # Hitung frame bola di zona ring.
+        #
+        # Saat gerbang bawah hidup, penghitung DILULUHKAN satu, bukan direset
+        # total. Alasannya terukur: satu deteksi bola PALSU yang melompat 138
+        # piksel di detik 144,33 menghapus seluruh bukti yang sudah terkumpul,
+        # dan bola masuk yang sah ikut hilang. Peluruhan membuat satu frame
+        # menyimpang tidak menghapus semuanya, tapi bola yang benar benar pergi
+        # tetap turun ke nol dalam beberapa frame.
         if in_zone:
             self._ball_in_hoop_frames += 1
+        elif FG_CONFIRM_BELOW:
+            self._ball_in_hoop_frames = max(0, self._ball_in_hoop_frames - 1)
         else:
             self._ball_in_hoop_frames = 0
+
+        # ── 1b. KANCING: bola sudah pernah terkunci, sekarang sudah di bawah ──
+        # Begitu sebuah bola terkunci di zona ring (dwell + dari atas + turun),
+        # kancing dipasang selama FG_CONFIRM_FRAMES frame. Selama kancing itu
+        # aktif, CUKUP bola terlihat di bawah cincin untuk menyalakan poin,
+        # tanpa menuntut penghitung dwell utuh lagi.
+        #
+        # Ini WAJIB berupa jendela, bukan pemeriksaan sefrme. Satu deteksi bola
+        # palsu yang melompat jauh akan mereset penghitung dwell, dan tanpa
+        # kancing bola masuk yang sah ikut hilang. Terukur pada bola masuk 3
+        # angka di detik 144,5.
+        self._fg_below_ok = False
+        if FG_CONFIRM_BELOW and self._fg_armed_until >= self.frame_count and self._fg_armed_hoop:
+            ax, ay = float(self._fg_armed_hoop[0]), float(self._fg_armed_hoop[1])
+            if (float(ball_px[1]) > ay + FG_BELOW_MARGIN_PX
+                    and abs(float(ball_px[0]) - ax) < FG_HOOP_RADIUS_PX * 2.0):
+                self._fg_below_ok    = True
+                self._fg_armed_until = -1
+                # Paksa penghitung supaya gerbang dwell di bawah lolos; kondisi
+                # dari atas dan bergerak turun tetap diperiksa seperti biasa.
+                self._ball_in_hoop_frames = self._fg_zone_dwell_f
+                logger.debug("FG kancing terpenuhi — bola di bawah cincin "
+                             "(ball_y=%.0f > %.0f)", float(ball_px[1]),
+                             ay + FG_BELOW_MARGIN_PX)
 
         # Require ball to dwell in the zone for FG_ZONE_DWELL_F consecutive frames
         # before scoring.  This eliminates single-frame false positives from
@@ -719,10 +793,11 @@ class EventEngine:
             if len(self._ball_px_hist) >= 3:
                 recent_ys = [float(p[1]) for p in list(self._ball_px_hist)[-3:]]
                 dy = recent_ys[-1] - recent_ys[0]
-                if dy < FG_MIN_DOWNWARD_DY:
+                if dy < getattr(self, '_fg_min_dy', FG_MIN_DOWNWARD_DY):
                     logger.debug(
-                        "FG zone entry rejected — ball not moving downward (dy=%.1f)",
-                        dy,
+                        "FG zone entry rejected — ball not moving downward "
+                        "(dy=%.1f, butuh %.1f)",
+                        dy, getattr(self, '_fg_min_dy', FG_MIN_DOWNWARD_DY),
                     )
                     self._ball_in_hoop_frames = 0
                     return events
@@ -732,12 +807,18 @@ class EventEngine:
         # Tidak mereset _ball_in_hoop_frames: selama bola masih di zona,
         # frame berikutnya diperiksa lagi. Kalau bola memantul keluar zona,
         # penghitung ter-reset sendiri di bagian 1 dan poin tidak pernah menyala.
-        if FG_CONFIRM_BELOW:
+        if FG_CONFIRM_BELOW and not self._fg_below_ok:
             hoop_y_ref = float(hoop_ref_px[1])
             if float(ball_px[1]) <= hoop_y_ref + FG_BELOW_MARGIN_PX:
+                # Belum lewat. PASANG KANCING dan tunggu, jangan buang
+                # kesempatannya: penghitung dwell bisa teriset oleh deteksi
+                # bola palsu sebelum bola sempat terlihat di bawah.
+                self._fg_armed_until = self.frame_count + self._fg_confirm_frames
+                self._fg_armed_hoop  = hoop_ref_px
                 logger.debug(
-                    "FG ditahan — bola belum di bawah ring (ball_y=%.0f, "
-                    "butuh > %.0f)", float(ball_px[1]),
+                    "FG ditahan, kancing dipasang sampai frame %d — bola belum "
+                    "di bawah ring (ball_y=%.0f, butuh > %.0f)",
+                    self._fg_armed_until, float(ball_px[1]),
                     hoop_y_ref + FG_BELOW_MARGIN_PX)
                 return events
 
@@ -820,6 +901,8 @@ class EventEngine:
             })
 
         self._fg_cooldown          = self._fg_cooldown_f
+        self._fg_armed_until       = -1
+        self._fg_armed_hoop        = None
         self._miss_frame           = -999
         self._last_shooter_id      = None
         self.last_shot_pos         = None

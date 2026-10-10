@@ -140,13 +140,17 @@ FG_RIM_GATE            = os.getenv("FG_RIM_GATE", "0") == "1"
 # Margin mendatar yang ditambahkan ke tepi kotak rim untuk uji ZONA. Bawaannya
 # 0, yaitu persis rentang kotak rim seperti yang diminta. Dinaikkan kalau
 # ternyata terlalu ketat.
-FG_RIM_X_MARGIN_PX     = float(os.getenv("FG_RIM_X_MARGIN_PX", "0"))
+FG_RIM_X_MARGIN_PX     = float(os.getenv("FG_RIM_X_MARGIN_PX", "").strip() or 0)
 # Jalur tegak uji ZONA, di atas dan di bawah pusat rim. Bawaannya sama dengan
 # FG_HOOP_RADIUS_PX supaya jangkauan TEGAK tidak berubah dari lingkaran dan
 # satu satunya yang berubah adalah ketajaman MENDATAR. Dengan begitu kalau
 # hasilnya berbeda, sebabnya jelas tepi rim, bukan dua perubahan sekaligus.
-FG_RIM_Y_BAND_PX       = float(os.getenv("FG_RIM_Y_BAND_PX",
-                                         str(FG_HOOP_RADIUS_PX)))
+# .strip() or <bawaan> dipakai dengan sengaja, bukan getenv(nama, bawaan)
+# biasa: saklar yang DITULIS TAPI DIKOSONGKAN di .env mengembalikan "" bukan
+# None, dan float("") melempar ValueError saat modul DIIMPOR, yaitu seluruh
+# pipeline mati sebelum satu frame pun diproses. Sudah hampir terjadi.
+FG_RIM_Y_BAND_PX       = float(os.getenv("FG_RIM_Y_BAND_PX", "").strip()
+                               or FG_HOOP_RADIUS_PX)
 # Ambang "bola pernah di atas ring", PER DETEKTOR, mengikuti bentuk kotaknya.
 # Kotak rim RF-DETR tingginya 16,6 px jadi separuhnya 8,3; menuntut 10 px di
 # atas PUSAT berarti menuntut bola di atas tepi atas cincin, terlalu ketat

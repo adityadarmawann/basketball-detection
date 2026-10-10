@@ -222,18 +222,18 @@ HOOP_ROI_ENABLE  = os.getenv("HOOP_ROI_ENABLE", "0") == "1"
 # Sisi potongan dalam piksel frame ASLI. 448 dipilih sebagai imbangan: cukup
 # besar supaya bola yang masih 200 px di atas rim tetap masuk potongan, cukup
 # kecil supaya pembesarannya nyata (576/448 = 1,29x).
-HOOP_ROI_SIZE    = int(os.getenv("HOOP_ROI_SIZE", "448"))
+HOOP_ROI_SIZE    = int(os.getenv("HOOP_ROI_SIZE", "").strip() or 448)
 # Gerbang jarak. Potongan dijalankan hanya kalau bola terakhir yang diketahui
 # ada dalam jarak ini dari pusat rim. 0 berarti SELALU jalan (untuk pengukuran,
 # bukan untuk produksi, karena biayanya dua kali).
-HOOP_ROI_NEAR_PX = float(os.getenv("HOOP_ROI_NEAR_PX", "300"))
+HOOP_ROI_NEAR_PX = float(os.getenv("HOOP_ROI_NEAR_PX", "").strip() or 300)
 # Umur maksimum ingatan posisi bola yang masih boleh dipakai gerbang jarak.
 # Harus ada: justru saat menentukan bolanya sering HILANG beberapa frame, dan
 # kalau ingatannya langsung kedaluwarsa potongan tidak pernah jalan tepat pada
 # frame yang paling dibutuhkan. 15 frame kira kira 0,5 detik di 30 fps efektif.
-HOOP_ROI_HIST_F  = int(os.getenv("HOOP_ROI_HIST_F", "15"))
+HOOP_ROI_HIST_F  = int(os.getenv("HOOP_ROI_HIST_F", "").strip() or 15)
 # Ambang keyakinan khusus hasil potongan. 0 berarti ikut ambang bola biasa.
-HOOP_ROI_CONF    = float(os.getenv("HOOP_ROI_CONF", "0"))
+HOOP_ROI_CONF    = float(os.getenv("HOOP_ROI_CONF", "").strip() or 0)
 # ATURAN GABUNG, supaya satu bola TIDAK pernah jadi dua.
 # Keluaran "ball" memang satu slot, jadi tidak mungkin berganda secara bentuk.
 # Yang perlu aturan adalah SIAPA YANG MENANG:
@@ -246,11 +246,15 @@ HOOP_ROI_CONF    = float(os.getenv("HOOP_ROI_CONF", "0"))
 #      yang baru berarti berani memindahkan bola melintasi layar atas dasar
 #      satu potongan. Pelajaran uji ambang bola persis soal itu, posisi salah
 #      lebih merusak daripada celah jujur.
-HOOP_ROI_OVERLAP_PX = float(os.getenv("HOOP_ROI_OVERLAP_PX", "60"))
+HOOP_ROI_OVERLAP_PX = float(os.getenv("HOOP_ROI_OVERLAP_PX", "").strip() or 60)
 # Kotak yang MENYENTUH tepi potongan ditolak. Objek yang terpotong tepinya
 # memberi pusat yang digeser ke dalam, dan pusat itulah yang dipakai gerbang
 # bola masuk. Lebih baik tidak ada daripada bergeser.
-HOOP_ROI_EDGE_PX = float(os.getenv("HOOP_ROI_EDGE_PX", "2"))
+# Catatan sama dengan FG_RIM_Y_BAND_PX di event_engine: saklar yang DITULIS
+# TAPI DIKOSONGKAN mengembalikan "" bukan None, dan int("")/float("")
+# melempar ValueError saat modul DIIMPOR. Karena itu semua saklar di atas
+# memakai .strip() or <bawaan>, bukan getenv(nama, bawaan) biasa.
+HOOP_ROI_EDGE_PX = float(os.getenv("HOOP_ROI_EDGE_PX", "").strip() or 2)
 
 
 def _bbox_center(x1: float, y1: float, x2: float, y2: float) -> list:

@@ -34,6 +34,26 @@ THREE_PT_STRAIGHT_X  = 2.99    # x where corner straight meets arc (left basket)
 # ── Tunable thresholds ────────────────────────────────────────────────────────
 POSSESSION_DIST_PX     = 80     # pixels  — ball "owned" if player inside this
 POSSESSION_DIST_M      = 1.2    # meters
+
+# ── Penolak bola yang MELOMPAT ──────────────────────────────────────────────
+# Deteksi bola kadang melompat ke benda bulat lain. Terukur pada potongan uji:
+# kecepatan bola yang SAH maksimal sekitar 45 piksel per frame di 30 fps,
+# sedangkan lompatan palsu 118 sampai 430 piksel per frame. Bola basket tidak
+# mungkin berpindah 430 piksel dalam 1/30 detik. Celah antara keduanya lebar
+# dan bersih, jadi ambang 90 memisahkannya tanpa menyentuh yang sah.
+#
+# Lompatan palsu ini merusak TIGA hal sekaligus, semuanya sudah terlihat:
+#   1. mereset penghitung bola-di-zona-ring sehingga bola masuk yang sah hilang
+#   2. menimpa rekaman "terakhir dipegang" sehingga penembaknya jadi salah orang
+#   3. mengotori riwayat lintasan yang dipakai gerbang "datang dari atas"
+#
+# Satuannya piksel PER FRAME, jadi diskalakan TERBALIK terhadap fps. Nilai di
+# sini dinyatakan pada 15 fps acuan, dan 180 di 15 fps menjadi 90 di 30 fps,
+# yaitu tepat di tengah celah antara 45 (sah tercepat) dan 118 (palsu terpelan).
+# Hanya berlaku kalau bola terlihat di frame SEBELUMNYA; setelah bola sempat
+# hilang, posisi baru selalu diterima supaya tidak terkunci selamanya.
+BALL_MAX_JUMP_PX       = int(os.getenv("BALL_MAX_JUMP_PX", "180"))
+BALL_JUMP_REJECT       = os.getenv("BALL_JUMP_REJECT", "0") == "1"
 # Reference processed fps the frame-windows below were tuned & validated at.
 # EventEngine(fps=…)/set_fps() scale every window by fps/REFERENCE_FPS so event
 # timing stays constant wall-clock time at any processed rate (e.g. 45-frame FG
@@ -101,7 +121,7 @@ FG_BALL_LOST_RESET_F   = 3      # consecutive ball-absent frames before resettin
 # cukup menolak deteksi sekejap satu frame.
 FG_ZONE_DWELL_F        = int(os.getenv(
     "FG_ZONE_DWELL_F",
-    _FG_BAWAAN["dwell"] - 1 if os.getenv("FG_CONFIRM_BELOW", "0") == "1"
+    _FG_BAWAAN["dwell"] - 1 if os.getenv("FG_RECALL_BOOST", "0") == "1"
     else _FG_BAWAAN["dwell"]))
 FG_HOOP_CACHE_TTL      = 90     # reject stale hoop cache after this many frames (~6 s)
 FG_SHOOTER_TTL_F       = 120    # frames after shot attempt before shooter attribution expires
@@ -168,11 +188,34 @@ FG_CONFIRM_BELOW       = os.getenv("FG_CONFIRM_BELOW", "0") == "1"
 # itu tidak pernah bertemu di satu frame, jadi poin tidak pernah menyala.
 # 10 frame di 15 fps sekitar 0,67 detik, cukup untuk bola jatuh melewati ring.
 FG_CONFIRM_FRAMES      = int(os.getenv("FG_CONFIRM_FRAMES", "10"))
+
+# ── Pelonggaran demi MENEMUKAN LEBIH BANYAK bola masuk ──────────────────────
+# Tiga pelonggaran sekaligus: dwell dikurangi satu, penghitung zona meluruh
+# bukan direset, dan konfirmasi bawah ring dijadikan kancing berjendela.
+#
+# TERUKUR pada potongan 4 menit Q1 UNESA-UBAYA (kebenaran 5 bola masuk, 11 poin):
+#                        asli   palsu   poin
+#   RF-DETR  mati         3/5     1      10
+#   RF-DETR  hidup        4/5     5      18
+#   YOLO     mati         2/5     1       8
+#   YOLO     hidup        2/5     2       9
+#
+# Jadi satu bola masuk asli ditemukan, tapi EMPAT deteksi palsu ikut masuk.
+# Untuk skor itu merugikan, maka MATI secara bawaan. Nyalakan hanya kalau yang
+# kamu kejar adalah kelengkapan kejadian, bukan ketepatan skor.
+FG_RECALL_BOOST        = os.getenv("FG_RECALL_BOOST", "0") == "1"
 FG_BELOW_MARGIN_PX     = int(os.getenv(
     "FG_BELOW_MARGIN_PX",
     {"rfdetr": 8, "yolo": -5}.get(_DETEKTOR, -5)))
 
+#   "possession" = posisi pemain saat bola TERAKHIR DIPEGANG. Ini titik lepas
+#                   sebenarnya, tidak bergantung model aksi sama sekali.
 SHOT_POS_METHOD        = os.getenv("SHOT_POS_METHOD", "furthest").strip().lower()
+# Umur maksimum rekaman "terakhir dipegang" yang masih boleh dipakai, dalam
+# frame di 15 fps. Bola melayang 0,5 sampai 1,5 detik dari lepas sampai ring,
+# jadi 30 frame (2 detik) memberi kelonggaran yang cukup tanpa mengambil
+# penguasaan dari serangan sebelumnya.
+HELD_POS_MAX_AGE_F     = int(os.getenv("HELD_POS_MAX_AGE_F", "30"))
 SHOT_POS_LOOKBACK_F    = int(os.getenv("SHOT_POS_LOOKBACK_F", "15"))  # ~1 detik @15fps      # ball must be moving downward by at least this many px at entry
 
 REBOUND_HOOP_RADIUS_PX = 90
@@ -278,6 +321,13 @@ class EventEngine:
                                        "duration_frames": 0}
         self.last_passer:     Optional[int]  = None
         self.last_shot_pos:   Optional[list] = None
+        # Ruang koordinat last_shot_pos. WAJIB ada, karena _player_pos
+        # mengembalikan METER kalau lapangan terkalibrasi TAPI PIKSEL kalau
+        # tidak, sedangkan _is_three selalu menghitungnya sebagai meter.
+        # Tanpa penanda ini, posisi piksel masuk ke rumus busur 6,75 m dan
+        # SELALU menghasilkan 2 angka, diam diam tanpa pesan apa pun.
+        self.last_shot_pos_court: bool       = False
+        self._n_pos_tak_terpakai: int        = 0
         # Jalur roboflow untuk keputusan masuk atau tidak. Dibuat hanya kalau
         # saklarnya hidup, jadi jalur lama sama sekali tidak terbebani.
         self._shot_tracker = None
@@ -295,6 +345,18 @@ class EventEngine:
 
         # ── Possession confirmation ───────────────────────────────────────
         self._poss_candidate: Optional[int] = None
+        self._ball_px_prev:       Optional[list] = None  # posisi bola diterima terakhir
+        self._ball_px_prev_frame: int            = -999  # frame-nya, untuk jeda
+        self._n_bola_lompat:  int            = 0
+        # Posisi pemain saat bola TERAKHIR BENAR BENAR DIPEGANG. Inilah titik
+        # lepas tembakan, dan sinyal paling jujur untuk menilai 2 atau 3 angka.
+        # Tidak bergantung pada model aksi, yang terbukti menyalakan Shoot pada
+        # orang yang salah: layup detik 18,6 tercatat dari 12,0 m dan tembakan
+        # 3 angka detik 144,5 tercatat dari 3,4 m, terbalik sempurna.
+        self._held_pos:       Optional[list] = None
+        self._held_pos_court: bool           = False
+        self._held_pos_frame: int            = -999
+        self._held_pos_id:    Optional[int]  = None
         self._poss_frames:    int            = 0
 
         # ── Shot / FG state ───────────────────────────────────────────────
@@ -365,6 +427,10 @@ class EventEngine:
         self._fg_hoop_cache_ttl    = _sc(FG_HOOP_CACHE_TTL)
         self._fg_shooter_ttl_f     = _sc(FG_SHOOTER_TTL_F)
         self._fg_confirm_frames    = _sc(FG_CONFIRM_FRAMES)
+        self._held_pos_max_age     = _sc(HELD_POS_MAX_AGE_F)
+        # TERBALIK: piksel per frame mengecil saat fps naik.
+        self._ball_max_jump        = max(
+            20.0, BALL_MAX_JUMP_PX * REFERENCE_FPS / max(self.fps, 1e-6))
         # TERBALIK terhadap fps, bukan _sc: makin tinggi fps makin kecil
         # perpindahan bola per frame, jadi ambangnya harus ikut mengecil.
         self._fg_min_dy            = max(
@@ -488,6 +554,36 @@ class EventEngine:
         backboards = dets.get("backboards", [])
         actions    = actions_d.get("actions", [])
 
+        # ── Tolak bola yang MELOMPAT secara mustahil ────────────────────
+        if BALL_JUMP_REJECT and ball is not None:
+            _bc = ball.get("center")
+            if _bc and self._ball_px_prev is not None:
+                # Jatah jarak SEBANDING dengan jeda frame. Deteksi bola sering
+                # bolong, dan setelah bolong 5 frame bola memang sudah berpindah
+                # 5 kali lebih jauh secara sah. Membandingkannya seolah cuma
+                # selisih satu frame akan mengunci bola selamanya; itu sudah
+                # terjadi dan menghapus KEDUA bola masuk di uji jendela.
+                _jeda = max(1, self.frame_count - self._ball_px_prev_frame)
+                _batas = self._ball_max_jump * min(_jeda, 6)
+                _j = _dist(_bc, self._ball_px_prev)
+                if _jeda <= 6 and _j > _batas:
+                    self._n_bola_lompat += 1
+                    if self._n_bola_lompat <= 3 or self._n_bola_lompat % 200 == 0:
+                        logger.debug(
+                            "Bola ditolak, melompat %.0f px dalam %d frame "
+                            "(batas %.0f) [kejadian ke-%d]",
+                            _j, _jeda, _batas, self._n_bola_lompat)
+                    ball = None          # perlakukan seperti bola tak terdeteksi
+                    _bc  = None
+            # Ingat posisi TERAKHIR YANG DITERIMA, bukan yang ditolak, supaya
+            # satu lompatan palsu tidak menyeret acuan ikut pindah.
+            if _bc:
+                self._ball_px_prev       = list(_bc)
+                self._ball_px_prev_frame = self.frame_count
+        elif ball is not None and ball.get("center"):
+            self._ball_px_prev       = list(ball["center"])
+            self._ball_px_prev_frame = self.frame_count
+
         is_court = bool(court_info.get("is_calibrated", False))
         quarter  = int(frame_data.get("quarter", 1))
         ts_ms    = int(frame_data.get("timestamp_ms", 0))
@@ -591,6 +687,10 @@ class EventEngine:
                 self._fg_miss_emitted    = False
                 self._last_shooter_team  = p.get("team", "")
                 self.last_shot_pos       = self._player_pos(p, is_court)
+                # Benar benar meter lapangan hanya kalau lapangan terkalibrasi
+                # DAN pemain ini punya court_pos. Kalau salah satunya tidak,
+                # yang tersimpan adalah piksel dan tidak boleh dipakai geometri.
+                self.last_shot_pos_court = bool(is_court and p.get("court_pos") is not None)
                 trigger = "JUMP→SHOOT" if raw_act == "JUMP" else raw_act
                 logger.info(
                     "SHOT_ATTEMPT  trigger=%s  shooter=%s  team=%s  frame=%d  video=%s",
@@ -603,6 +703,7 @@ class EventEngine:
                 self.frame_count - self._shot_attempt_frame > self._fg_shooter_ttl_f):
             self._last_shooter_id = None
             self.last_shot_pos    = None
+            self.last_shot_pos_court = False
 
         # ── Field goal (made) ─────────────────────────────────────────────
         if self._fg_cooldown == 0:
@@ -720,7 +821,7 @@ class EventEngine:
         # tetap turun ke nol dalam beberapa frame.
         if in_zone:
             self._ball_in_hoop_frames += 1
-        elif FG_CONFIRM_BELOW:
+        elif FG_RECALL_BOOST:
             self._ball_in_hoop_frames = max(0, self._ball_in_hoop_frames - 1)
         else:
             self._ball_in_hoop_frames = 0
@@ -736,7 +837,8 @@ class EventEngine:
         # kancing bola masuk yang sah ikut hilang. Terukur pada bola masuk 3
         # angka di detik 144,5.
         self._fg_below_ok = False
-        if FG_CONFIRM_BELOW and self._fg_armed_until >= self.frame_count and self._fg_armed_hoop:
+        if (FG_CONFIRM_BELOW and FG_RECALL_BOOST
+                and self._fg_armed_until >= self.frame_count and self._fg_armed_hoop):
             ax, ay = float(self._fg_armed_hoop[0]), float(self._fg_armed_hoop[1])
             if (float(ball_px[1]) > ay + FG_BELOW_MARGIN_PX
                     and abs(float(ball_px[0]) - ax) < FG_HOOP_RADIUS_PX * 2.0):
@@ -753,7 +855,7 @@ class EventEngine:
         # before scoring.  This eliminates single-frame false positives from
         # dribbles, deflections, and ball-near-rim but not-through-rim moments.
         # Fire exactly on the Nth frame (== not >=) so cooldown prevents re-fire.
-        if FG_CONFIRM_BELOW:
+        if FG_CONFIRM_BELOW and FG_RECALL_BOOST:
             # Dengan gerbang keempat, bola diperiksa SETIAP frame selama masih
             # di zona, sampai dia terlihat di bawah ring atau keluar zona.
             # Aman dari penyalaan berulang karena _detect_field_goal hanya
@@ -813,8 +915,9 @@ class EventEngine:
                 # Belum lewat. PASANG KANCING dan tunggu, jangan buang
                 # kesempatannya: penghitung dwell bisa teriset oleh deteksi
                 # bola palsu sebelum bola sempat terlihat di bawah.
-                self._fg_armed_until = self.frame_count + self._fg_confirm_frames
-                self._fg_armed_hoop  = hoop_ref_px
+                if FG_RECALL_BOOST:
+                    self._fg_armed_until = self.frame_count + self._fg_confirm_frames
+                    self._fg_armed_hoop  = hoop_ref_px
                 logger.debug(
                     "FG ditahan, kancing dipasang sampai frame %d — bola belum "
                     "di bawah ring (ball_y=%.0f, butuh > %.0f)",
@@ -870,11 +973,42 @@ class EventEngine:
         # (best proxy for release point when action model didn't fire), (c) current
         # player position (last resort).
         # 3PT geometry only works in court coordinates — pixel space can't be used.
-        shot_pos = (
-            self.last_shot_pos
-            or self._estimate_shot_pos(shooter["track_id"], is_court)
-        )
-        is_three = self._is_three(shot_pos) if (shot_pos and is_court) else False
+        # HANYA koordinat lapangan yang boleh menilai 2 atau 3 angka.
+        shot_pos  = None
+        pos_court = False
+        # Prioritas 0: posisi saat bola TERAKHIR DIPEGANG. Dipakai lebih dulu
+        # daripada last_shot_pos karena tidak bergantung pada model aksi.
+        if (SHOT_POS_METHOD == "possession"
+                and self._held_pos is not None
+                and self._held_pos_court
+                and self.frame_count - self._held_pos_frame <= self._held_pos_max_age):
+            shot_pos, pos_court = self._held_pos, True
+            logger.debug("Posisi tembakan dari PENGUASAAN track %s, umur %d frame",
+                         self._held_pos_id, self.frame_count - self._held_pos_frame)
+        elif self.last_shot_pos is not None and self.last_shot_pos_court:
+            shot_pos, pos_court = self.last_shot_pos, True
+        else:
+            # last_shot_pos tersimpan dalam piksel (lapangan tidak terkalibrasi
+            # saat pelepasan) atau memang belum ada. Pakai riwayat posisi
+            # lapangan pemain, yang hanya terisi saat terkalibrasi.
+            kira = self._estimate_shot_pos(shooter["track_id"], is_court)
+            if kira is not None:
+                shot_pos, pos_court = kira, True
+            elif self.last_shot_pos is not None:
+                shot_pos, pos_court = self.last_shot_pos, False
+
+        if shot_pos is not None and not pos_court:
+            # Tidak bisa menilai 2 atau 3 angka. Dihitung 2 karena itu yang
+            # jauh lebih sering, TAPI dicatat supaya tidak tersembunyi.
+            self._n_pos_tak_terpakai += 1
+            if self._n_pos_tak_terpakai <= 3 or self._n_pos_tak_terpakai % 25 == 0:
+                logger.warning(
+                    "Nilai 2/3 angka TIDAK bisa ditentukan: posisi penembak "
+                    "bukan koordinat lapangan (lapangan tidak terkalibrasi saat "
+                    "pelepasan). Dihitung 2 angka. Kejadian ke-%d.",
+                    self._n_pos_tak_terpakai)
+
+        is_three = self._is_three(shot_pos) if (shot_pos and is_court and pos_court) else False
         is_ft    = self._is_free_throw(shooter["track_id"], shot_pos, is_court)
 
         # ── 5. Emit event ────────────────────────────────────────────────
@@ -906,6 +1040,7 @@ class EventEngine:
         self._miss_frame           = -999
         self._last_shooter_id      = None
         self.last_shot_pos         = None
+        self.last_shot_pos_court   = False
         self._fg_miss_emitted      = True
         self._ball_in_hoop_frames  = 0
         # Clear trajectory history so the just-scored ball position can't
@@ -1423,6 +1558,16 @@ class EventEngine:
             self._poss_candidate = None
             self._poss_frames    = 0
             return None
+
+        # Bola berada dalam jangkauan pegang. Rekam posisinya SEKARANG, sebelum
+        # gerbang konfirmasi, karena tangkap-lalu-tembak bisa selesai sebelum
+        # _possession_confirm_f frame tercapai.
+        _hp = self._player_pos(closest, is_court)
+        if _hp is not None:
+            self._held_pos       = _hp
+            self._held_pos_court = bool(is_court and closest.get("court_pos") is not None)
+            self._held_pos_frame = self.frame_count
+            self._held_pos_id    = closest["track_id"]
 
         cand_id = closest["track_id"]
         if cand_id == self._poss_candidate:

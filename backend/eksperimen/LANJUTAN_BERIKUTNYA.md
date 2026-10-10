@@ -125,6 +125,37 @@ posisi bola" yang saya pakai sebagai penentu JUSTRU MERAMALKAN ARAH YANG SALAH
 untuk potongan ring. Lihat `PENDEKATAN_DITOLAK.md` bagian "Menilai POTONGAN
 RING dari laju lompatan posisi saja". Yang memutuskan tetap skrip 17.
 
+### KEPUTUSAN AKHIR nomor 2, 10 Oktober 2026: KEDUANYA DINYALAKAN
+
+    setelan              asli   palsu   ketepatan   poin   waktu
+    acuan awal            2/5     2       50 %       9    16,1 mnt
+    gerbang rim saja      2/5     1       67 %       7    16,4 mnt
+    ROI saja              3/5     3       50 %      13    16,9 mnt
+    ROI + gerbang rim     3/5     2       60 %      11    16,9 mnt
+
+`.env` sekarang: `FG_RIM_GATE=1` dan `HOOP_ROI_ENABLE=1`. Bawaan di KODE tetap
+mati, jadi lingkungan lain tidak ikut berubah. Alasan dan angkanya ada di
+`.env.saklar.example` yang terlacak git, karena `.env` sendiri diabaikan git.
+
+Poin 11 lawan kebenaran 11 itu KEBETULAN. Dua palsu bernilai 2 dan 3 angka
+menutupi dua bola masuk yang terlewat. Jangan jadikan bukti.
+
+## BATAS YANG MASIH TERSISA, lead untuk berikutnya
+
+1. **Palsu 3:52 selamat di SEMUA setelan**, dihitung 3 angka dari 10,2 meter.
+   Gerbang rim tidak menyentuhnya, jadi sebabnya bukan geometri ring melainkan
+   POSISI PENEMBAK. Ini lead paling jelas yang belum dikerjakan.
+2. **Bola masuk 1:30 dan 2:26 tidak pernah ditemukan satu setelan pun.** ROI
+   maupun gerbang rim tidak menyentuhnya. Perlu diperiksa apa yang terjadi di
+   dua saat itu, apakah ringnya tidak terdeteksi, bolanya hilang total, atau
+   gerbangnya tertahan syarat lain.
+3. **`ball-in-basket` layak dilatih ulang PADA POTONGAN dekat rim**, bukan pada
+   frame penuh. Buktinya 2 deteksi dari 2.623 potongan resolusi asli lawan NOL
+   di frame diperkecil, jadi kelas itu tenggelam karena ukuran piksel, bukan
+   karena tidak bisa dipelajari.
+4. `DIGIT_CLS_ENABLE` masih 0 padahal terukur menaikkan bacaan nomor 22 jadi
+   37,5 persen. Perlu satu kali uji pipeline penuh.
+
 ### Nomor 3, DISETUJUI USER, BELUM DIMULAI
 Tabel pemilik kelas: dua detektor jalan bersama, tiap kelas dimiliki SATU model
 yang paling kuat, kelas yang sama di model lemah DIMATIKAN supaya tidak terhitung

@@ -28,6 +28,8 @@ import numpy as np
 
 # VERIF_LOG=1 menyalakan log INFO, supaya kejadian seperti ganti sudut kamera
 # dan pelepasan kuncian nomor benar benar terlihat, bukan cuma diasumsikan.
+JENIS_KEJADIAN: dict = {}
+
 if os.getenv("VERIF_LOG") == "1":
     import logging
     logging.basicConfig(level=logging.INFO,
@@ -131,7 +133,15 @@ def main() -> int:
                 c["tim"] += 1
                 tim_unik.add(jr["team"])
         c["aksi"] += len((fd.get("actions", {}) or {}).get("actions", []) or [])
-        c["kejadian"] += len(fd.get("events", []) or [])
+        _ev = fd.get("events", []) or []
+        c["kejadian"] += len(_ev)
+        # Rincian JENIS kejadian. Cacah total saja menyembunyikan sebab: saat
+        # DIGIT_CLS dinyalakan cacahnya turun 35 jadi 27, dan tanpa rincian
+        # tidak bisa dibedakan apakah yang hilang kejadian palsu yang terkoreksi
+        # atau kejadian sah yang ikut tertahan.
+        for _e in _ev:
+            _j = str(_e.get("type") or _e.get("jenis") or "TANPA_JENIS").upper()
+            JENIS_KEJADIAN[_j] = JENIS_KEJADIAN.get(_j, 0) + 1
         for p in pl:
             tid_unik.add(p["track_id"])
         fid += 1
@@ -152,6 +162,9 @@ def main() -> int:
     print(f"  {'tim terpasang':26s} {c['tim']} bacaan, tim unik {sorted(tim_unik)}")
     print(f"  {'aksi terklasifikasi':26s} {c['aksi']}")
     print(f"  {'kejadian terbit':26s} {c['kejadian']}")
+    if JENIS_KEJADIAN:
+        for _j, _n in sorted(JENIS_KEJADIAN.items(), key=lambda x: -x[1]):
+            print(f"    {_j:24s} {_n}")
     print(f"  {'track_id unik':26s} {len(tid_unik)}")
 
     if vp._stats:
@@ -172,6 +185,10 @@ def main() -> int:
     hasil = {"label": label, "saklar": saklar, "cacah": c,
              "nomor_unik": sorted(nomor_unik), "tim_unik": sorted(tim_unik),
              "track_unik": len(tid_unik), "detik": round(lama, 1)}
+    # Rincian jenis kejadian ikut disimpan supaya bisa disilangkan antar
+    # percobaan tanpa menjalankan ulang pipeline.
+    hasil["jenis_kejadian"] = dict(JENIS_KEJADIAN)
+
     out = os.getenv("VERIF_OUT")
     if out:
         with open(out, "w") as f:

@@ -397,11 +397,58 @@ async def get_processing_progress(match_id: str):
 
     processor = _processors.get(match_id)
     if processor is None:
+        # Tidak ada di proses INI, tapi belum tentu gagal. Dua keadaan nyata:
+        #  1. Analisisnya jalan di PROSES LAIN (pernah terjadi saat dua backend
+        #     hidup di port yang sama; halaman menanyai proses yang salah dan
+        #     menerima 404, lalu menampilkannya sebagai "Analisis Gagal").
+        #  2. Analisisnya SUDAH SELESAI dan backend sempat dinyalakan ulang,
+        #     sehingga penampung di memori kosong padahal hasilnya ada.
+        # Keduanya harus dijawab apa adanya, bukan dianggap gagal.
+        try:
+            redis = await get_redis()
+            if _gpu is not None and redis is not None:
+                pemegang = await _gpu.keadaan(redis)
+                if pemegang.get("terkunci") and pemegang.get("match_id") == match_id:
+                    return {
+                        "match_id": match_id,
+                        "status": "processing",
+                        "frames_processed": 0,
+                        "total_frames": 0,
+                        "fps_actual": 0.0,
+                        "quarter": 0,
+                        "game_clock": "00:00",
+                        "catatan": (
+                            "Analisis sedang berjalan di proses backend lain "
+                            f"(sudah {pemegang.get('lama_detik', 0):.0f} detik). "
+                            "Kemajuan rinci tidak bisa dibaca dari sini, tapi "
+                            "hasilnya tetap akan tersimpan."
+                        ),
+                    }
+        except Exception as e:
+            logger.warning("Pemeriksaan kunci GPU gagal untuk %s: %s", match_id, e)
+
+        db = get_db()
+        if db is not None:
+            m = db.matches.find_one({"match_id": match_id},
+                                    {"status": 1, "ringkasan": 1})
+            if m and (m.get("status") == "done" or m.get("ringkasan")):
+                return {
+                    "match_id": match_id,
+                    "status": "done",
+                    "frames_processed": 0,
+                    "total_frames": 0,
+                    "fps_actual": 0.0,
+                    "quarter": 0,
+                    "game_clock": "00:00",
+                    "catatan": ("Analisis sudah selesai. Buka hasilnya lewat "
+                                "riwayat; tidak perlu menganalisis ulang."),
+                }
+
         raise HTTPException(
             status_code=404,
             detail=(
-                f"No active processing session for match_id='{match_id}'. "
-                "Upload a video first, or wait a moment for the pipeline to initialise."
+                f"Belum ada analisis untuk match_id='{match_id}'. "
+                "Unggah video dulu, atau tunggu sebentar sampai pipeline siap."
             ),
         )
 

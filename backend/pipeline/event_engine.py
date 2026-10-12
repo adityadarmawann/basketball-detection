@@ -310,12 +310,33 @@ FG_HANG_MIN_DROP_PX    = float(os.getenv("FG_HANG_MIN_DROP_PX", "").strip() or 0
 # ring sintetis dari homografi): tanpa kotak rim tidak ada lebar cincin untuk
 # dijadikan acuan, jadi jalur ini dilewati dan perilakunya persis seperti dulu.
 FG_RIM_CORE_CONFIRM    = os.getenv("FG_RIM_CORE_CONFIRM", "0").strip() == "1"
-# Separuh lebar inti, sebagai pecahan dari separuh lebar kotak rim. Kotak rim
-# RF-DETR lebarnya 38,0 px (separuh 19,0), jadi 0,35 memberi inti +-6,7 px.
-FG_RIM_CORE_FRAC       = float(os.getenv("FG_RIM_CORE_FRAC", "").strip() or 0.35)
-# Berapa piksel DI ATAS pusat cincin yang masih diterima. 0 berarti menuntut
-# titik tengah bola sudah sampai bidang cincin.
-FG_RIM_CORE_UP_PX      = float(os.getenv("FG_RIM_CORE_UP_PX", "").strip() or 0)
+# Dua angka bawaan di bawah DIPILIH DARI TELEMETRI, bukan dikira kira. Diukur
+# 12 Oktober 2026 dengan skrip 23 dan 24 pada potongan 4 menit, kotak rim
+# RF-DETR lebar median 37,5 px (separuh 18,8) dan tinggi median 18,8 px.
+#
+# Untuk tiap rentetan dwell, jarak mendatar TERKECIL dari pusat cincin di antara
+# frame NYATA, dibagi separuh lebar kotak rim:
+#
+#   rentetan   isinya                        toleransi tegak 0 px   2 px
+#   0:18,7     bola masuk ASLI, sudah nyala        0,08             0,08
+#   0:58,4     bola masuk ASLI, sudah nyala        0,17             0,04
+#   2:24,3     bola masuk ASLI, SELALU TERLEWAT    3,68             0,02
+#   1:56,4     tidak pernah nyala                  tak ada          tak ada
+#   3:51,9     PALSU, sudah nyala                  0,27             0,27
+#   3:57,4     tidak pernah nyala                  0,75             0,12
+#
+# Dua hal yang dibaca dari tabel itu:
+#   1. Toleransi tegak 0 px TIDAK BISA DIPAKAI. Di frame terdalam, titik tengah
+#      bola justru masih 0,1 sampai 1,8 px DI ATAS pusat kotak rim, jadi
+#      menuntut "sudah sampai bidang cincin" persis membuang bukti yang ada.
+#      2 px cukup dan masih jauh di dalam kotak rim yang separuh tingginya 9,4.
+#   2. Pecahan lebar 0,15 memisahkan bola masuk yang terlewat (0,02) dari
+#      rentetan yang tidak pernah menyala di 3:57,4 (0,12) dengan jarak sempit.
+#      Dipilih 0,15, bukan 0,10 yang lebih aman tapi disetel pas ke satu
+#      kejadian saja. Paparannya: 34 frame nyata dari 4.723 di seluruh klip.
+FG_RIM_CORE_FRAC       = float(os.getenv("FG_RIM_CORE_FRAC", "").strip() or 0.15)
+# Berapa piksel DI ATAS pusat cincin yang masih diterima.
+FG_RIM_CORE_UP_PX      = float(os.getenv("FG_RIM_CORE_UP_PX", "").strip() or 2)
 
 #   "possession" = posisi pemain saat bola TERAKHIR DIPEGANG. Ini titik lepas
 #                   sebenarnya, tidak bergantung model aksi sama sekali.

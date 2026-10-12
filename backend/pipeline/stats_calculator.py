@@ -46,6 +46,33 @@ MAX_POS_HISTORY = 2000       # position samples kept per player
 #                percepatan median dari 103 ke 15,2 m/s squared.
 # Perhitungan lama TETAP jalan di balik layar, jadi dua duanya bisa dibandingkan
 # lewat get_live_stats tanpa mengulang proses video.
+# ── Percepatan: dua cacat hitung yang diperbaiki 12 Oktober 2026 ──────────
+# Terukur SEBELUM perbaikan: percepatan median 53,7 m/s2 dan 64 dari 66 track
+# "mustahil", padahal manusia paling banter sekitar 10 m/s2.
+#
+# Cacat 1, PEMBAGI SALAH. Percepatan dihitung (v[i]-v[i-1]) / (1/fps), yaitu 33
+# ms di 30 fps. Tapi isi _speed_ms_buf TIDAK berjarak 33 ms: sampel hanya masuk
+# kalau jedanya di bawah MAX_GAP_MS (500 ms), dan sampel yang kena batas
+# kecepatan atau di bawah MIN_SPEED_KMH DILEWATI sama sekali. Jadi dua sampel
+# berurutan bisa terpisah sampai 500 ms lalu dibagi 33 ms, melebih-lebihkan
+# percepatan sampai 15 kali.
+#
+# Cacat 2, MEMAKAI KECEPATAN MENTAH. Statistik kecepatan memakai nilai yang
+# sudah dihaluskan, tapi penampung percepatan diisi nilai MENTAH. Menurunkan
+# sinyal berisik justru melipatgandakan kebisingannya, dan penapis yang sudah
+# ada malah dilewati tepat di tempat yang paling membutuhkannya.
+#
+# CATATAN: jalur bersih (clean path) TIDAK terkena. Di sana kecepatan dibuat
+# dengan `steps * fps`, jadi deretnya memang berjarak satu frame dan pembagi
+# 1/fps di situ BENAR. Karena itu _accel_from_ms dibiarkan apa adanya dan
+# jalur mentah diberi perhitungannya sendiri.
+ACC_REAL_DT     = os.getenv("ACC_REAL_DT", "").strip() != "0"
+ACC_USE_SMOOTH  = os.getenv("ACC_USE_SMOOTH", "").strip() != "0"
+# Pasangan sampel yang terpisah lebih lama dari ini TIDAK dipakai menghitung
+# percepatan. Selisih kecepatan selama setengah detik bukan percepatan sesaat,
+# dan memakainya hanya memasukkan lompatan posisi sebagai percepatan.
+ACC_MAX_GAP_MS  = float(os.getenv("ACC_MAX_GAP_MS", "").strip() or 120)
+
 PATH_CLEAN_METHOD = os.getenv("PATH_CLEAN_METHOD", "none").strip().lower()
 # Panjang potongan jalur yang diproses sekali jalan, dan ekor yang disimpan
 # supaya penghalusan di batas potongan tidak putus.
@@ -436,7 +463,11 @@ class StatsCalculator:
 
                     if smoothed >= MIN_SPEED_KMH:
                         self._all_speeds[tid].append(smoothed)
-                        self._speed_ms_buf[tid].append(speed_ms)
+                        # Stempel waktu IKUT disimpan supaya percepatan bisa
+                        # memakai jeda yang SEBENARNYA, bukan 1/fps. Lihat
+                        # catatan ACC_REAL_DT di atas berkas.
+                        self._speed_ms_buf[tid].append(
+                            ((smoothed / 3.6) if ACC_USE_SMOOTH else speed_ms, ts))
                         self._total_dist[tid] += dist_m
                         self._quarter_speeds[tid][q].append(smoothed)
                         self._quarter_dist[tid][q] += dist_m
@@ -813,8 +844,40 @@ class StatsCalculator:
         return round(max(0.0, (q1_avg - q4_avg) / q1_avg * 100.0), 2)
 
     def _calc_acceleration(self, tid: int) -> float:
-        """Mean absolute acceleration in m/s² from raw speed history."""
-        return self._accel_from_ms(list(self._speed_ms_buf.get(tid, deque())))
+        """Percepatan rata rata mutlak, m/s2, dari riwayat kecepatan jalur mentah.
+
+        Memakai jeda SEBENARNYA antar sampel, bukan 1/fps, karena isi
+        penampung ini tidak berjarak tetap. Lihat catatan ACC_REAL_DT di atas
+        berkas untuk dua cacat yang diperbaiki di sini.
+        """
+        buf = list(self._speed_ms_buf.get(tid, deque()))
+        if not buf:
+            return 0.0
+        # Bentuk lama (deretan angka saja) tetap diterima supaya pemanggil lama
+        # dan uji mandiri tidak putus.
+        if not isinstance(buf[0], tuple):
+            return self._accel_from_ms(buf)
+        if not ACC_REAL_DT:
+            return self._accel_from_ms([v for v, _ in buf])
+        return self._accel_from_samples(buf)
+
+    @staticmethod
+    def _accel_from_samples(buf: list) -> float:
+        """Percepatan rata rata dari pasangan (kecepatan m/s, stempel waktu ms).
+
+        Pasangan yang terpisah lebih lama dari ACC_MAX_GAP_MS DILEWATI: selisih
+        kecepatan selama jeda panjang bukan percepatan sesaat, dan memakainya
+        hanya memasukkan lompatan posisi sebagai percepatan.
+        """
+        accels = []
+        for i in range(1, len(buf)):
+            v1, t1 = buf[i - 1]
+            v2, t2 = buf[i]
+            dt_ms = t2 - t1
+            if dt_ms <= 0 or dt_ms > ACC_MAX_GAP_MS:
+                continue
+            accels.append(abs(v2 - v1) / (dt_ms / 1000.0))
+        return round(sum(accels) / len(accels), 3) if accels else 0.0
 
     def _accel_from_ms(self, buf: list) -> float:
         """Percepatan rata rata dari satu deret kecepatan m/s. Dipisah supaya
@@ -1105,6 +1168,28 @@ if __name__ == "__main__":
     sc9._speed_ms_buf[2] = deque([5.0])   # only 1 value → 0
     assert sc9._calc_acceleration(2) == 0.0
     print("  Single speed sample → 0  ✓")
+
+    # Bentuk BARU: (kecepatan m/s, stempel waktu ms). Membuktikan dua cacat
+    # yang diperbaiki 12 Oktober 2026.
+    sc9b = StatsCalculator(fps=30)      # 1/fps = 33,3 ms
+    # Dua sampel terpisah 100 ms, bukan 33 ms. Rumus lama membagi 33 ms dan
+    # memberi 150 m/s2; yang benar membagi 100 ms dan memberi 50 m/s2.
+    sc9b._speed_ms_buf[1] = deque([(0.0, 1000), (5.0, 1100)])
+    a = sc9b._calc_acceleration(1)
+    assert abs(a - 50.0) < 0.01, f"jeda sebenarnya diabaikan, dapat {a}"
+    print(f"  jeda 100 ms → {a} m/s2 (rumus lama memberi 150)  ✓")
+
+    # Pasangan dengan jeda melebihi ACC_MAX_GAP_MS harus DILEWATI, bukan
+    # dihitung, supaya lompatan posisi tidak masuk sebagai percepatan.
+    sc9b._speed_ms_buf[2] = deque([(0.0, 1000), (9.0, 1500), (9.5, 1550)])
+    a = sc9b._calc_acceleration(2)
+    assert abs(a - 10.0) < 0.01, f"jeda 500 ms mestinya dilewati, dapat {a}"
+    print(f"  jeda 500 ms dilewati, sisa pasangan sah → {a} m/s2  ✓")
+
+    # Tidak ada pasangan yang jedanya sah → 0, bukan galat.
+    sc9b._speed_ms_buf[3] = deque([(0.0, 1000), (9.0, 2000)])
+    assert sc9b._calc_acceleration(3) == 0.0
+    print("  semua pasangan terlalu jauh → 0  ✓")
 
     # ── 10. reset_match() ────────────────────────────────────────────────────
     print("\n--- 10. reset_match() ---")

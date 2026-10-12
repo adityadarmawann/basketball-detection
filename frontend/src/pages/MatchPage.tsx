@@ -54,6 +54,40 @@ export default function MatchPage() {
     }
   }, [store.matchId])
 
+  // Pulihkan keadaan "sedang menganalisis" setelah halaman dimuat ulang.
+  //
+  // `isLive` dan `step` sengaja TIDAK disimpan di penyimpanan browser (lihat
+  // partialize di matchStore: "live game state always starts fresh"). Akibatnya,
+  // menyegarkan halaman atau laptop mati membuat kartu analisis HILANG dari
+  // layar, padahal analisisnya tetap berjalan di server. Pengguna mengira
+  // prosesnya gagal padahal tidak.
+  //
+  // Maka sekali saat halaman dibuka, tanyakan ke backend apakah match ini masih
+  // diproses. Kalau ya, kembalikan tampilannya ke keadaan menganalisis. Server
+  // yang jadi sumber kebenaran, bukan penyimpanan browser.
+  useEffect(() => {
+    if (!store.matchId) return
+    let batal = false
+    axios
+      .get<{ status?: string }>(
+        `${import.meta.env.VITE_API_URL}/api/upload/progress/${store.matchId}`,
+      )
+      .then((r) => {
+        if (batal) return
+        if (r.data?.status === 'processing') {
+          store.setIsLive(true)
+          setStepLocal('analyzing')
+          store.setMatchStep('analyzing')
+        }
+      })
+      .catch(() => {
+        // 404 berarti memang tidak ada analisis berjalan. Bukan galat, dan
+        // tampilan dibiarkan apa adanya.
+      })
+    return () => { batal = true }
+    // Sengaja hanya saat matchId berubah, supaya tidak memanggil berulang.
+  }, [store.matchId])
+
   const setVideoUrl = useCallback((url: string) => {
     setVideoUrlLocal(url)
     store.setVideoUrl(url)

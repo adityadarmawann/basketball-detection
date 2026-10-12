@@ -14,6 +14,9 @@ import subprocess
 from datetime import datetime
 from typing import Optional
 
+import asyncio as _asyncio
+import time as _time
+
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -68,6 +71,16 @@ except ImportError:
 # dict[match_id, VideoProcessor]  — populated by _run_pipeline before processing starts
 _processors: dict = {}
 
+# Pemrosesan yang DITOLAK karena GPU sedang dipakai sisi lain. Disimpan supaya
+# endpoint kemajuan bisa memberi keterangan jelas, bukan 404 yang membingungkan.
+_ditolak: dict = {}
+
+try:
+    from db import gpu_lock as _gpu
+except Exception as _e:                                  # pragma: no cover
+    _gpu = None
+    logger.warning("gpu_lock tidak tersedia (%s) — kunci GPU dilewati", _e)
+
 
 # ── Background pipeline helper ────────────────────────────────────────────────
 
@@ -92,12 +105,51 @@ async def _run_pipeline(
     except Exception as e:
         logger.warning("Redis unavailable, skipping: %s", e)
 
+    # ── Kunci GPU: hanya SATU sisi boleh memproses pada satu waktu ──────────
+    # Kartunya 8 GB dan satu pipeline memakai sekitar 4 GB, jadi dua pemrosesan
+    # bersamaan tidak muat. Produksi didahulukan; dev ditolak dengan keterangan.
+    if _gpu is not None:
+        boleh, pemegang = await _gpu.ambil(redis, match_id)
+        if not boleh:
+            pesan = (f"GPU sedang dipakai {pemegang.get('sisi', 'sisi lain')} "
+                     f"(match {pemegang.get('match_id', '?')}, "
+                     f"{pemegang.get('lama_detik', 0):.0f} detik). "
+                     f"Produksi didahulukan. Coba lagi setelah selesai.")
+            logger.warning("Pemrosesan %s ditolak: %s", match_id, pesan)
+            _ditolak[match_id] = {"pesan": pesan, "pemegang": pemegang,
+                                  "waktu": _time.time()}
+            return
+
     processor = create_video_processor(
         models_path=MODELS_PATH,
         mongo_db=db,
         redis_client=redis,
     )
     _processors[match_id] = processor      # register before blocking call
+    _ditolak.pop(match_id, None)
+
+    # Denyut kunci berjalan di latar: memperpanjang kunci selama masih sehat,
+    # dan MENGHENTIKAN pemrosesan baik baik kalau produksi meminta GPU. Berhenti
+    # baik baik penting supaya hasil sampai frame terakhir tetap tersimpan.
+    async def _jaga_kunci():
+        while True:
+            await _asyncio.sleep(getattr(_gpu, "DENYUT_S", 15))
+            try:
+                if await _gpu.denyut(redis):
+                    logger.warning("Pemrosesan %s dihentikan: produksi butuh GPU",
+                                   match_id)
+                    _ditolak[match_id] = {
+                        "pesan": "Dihentikan di tengah jalan karena produksi "
+                                 "membutuhkan GPU. Hasil sampai frame terakhir "
+                                 "tetap tersimpan.",
+                        "pemegang": {"sisi": "prod"}, "waktu": _time.time()}
+                    processor.stop()
+                    return
+            except Exception:
+                return
+
+    _tugas_jaga = (_asyncio.create_task(_jaga_kunci())
+                   if _gpu is not None and redis is not None else None)
 
     try:
         await processor.process_video(
@@ -119,13 +171,52 @@ async def _run_pipeline(
         # stays in _processors, so progress/frames/video/csv endpoints keep
         # serving the finished result from disk — a refresh still lands on the
         # result and never re-analyses. Models reload only on the next upload.
+        if _tugas_jaga is not None:
+            _tugas_jaga.cancel()
         try:
             processor.release()
         except Exception as e:
             logger.warning("processor.release() failed match_id=%s: %s", match_id, e)
+        # Kunci dilepas PALING AKHIR, setelah model benar benar dibebaskan,
+        # supaya sisi lain tidak mulai memuat model saat memori belum kosong.
+        if _gpu is not None:
+            try:
+                await _gpu.lepas(redis)
+            except Exception as e:
+                logger.warning("melepas kunci GPU gagal match_id=%s: %s", match_id, e)
 
 
 # ── POST /upload-video ────────────────────────────────────────────────────────
+
+@router.get("/gpu-status")
+async def gpu_status():
+    """Siapa yang sedang memakai GPU, dan sisi mana backend ini.
+
+    Dipakai dev UI supaya pengguna tahu SEBELUM menekan proses, bukan menunggu
+    lama lalu baru tahu ditolak.
+    """
+    if _gpu is None:
+        return {"tersedia": False, "alasan": "modul kunci GPU tidak termuat"}
+    redis = None
+    try:
+        redis = await get_redis()
+    except Exception:
+        pass
+    d = await _gpu.keadaan(redis)
+    aku = _gpu.sisi()
+    d["sisi_backend_ini"] = aku
+    d["boleh_proses"] = (not d.get("terkunci")) or d.get("sisi") == aku or aku == "prod"
+    if d.get("terkunci") and d.get("sisi") != aku:
+        d["keterangan"] = (
+            f"GPU dipakai {d.get('sisi')} sejak {d.get('lama_detik', 0):.0f} detik lalu."
+            + (" Produksi didahulukan, dev harus menunggu." if aku == "dev"
+               else " Produksi akan meminta dev berhenti baik baik."))
+    elif d.get("terkunci"):
+        d["keterangan"] = "Dipakai oleh backend ini sendiri."
+    else:
+        d["keterangan"] = "GPU bebas."
+    return d
+
 
 @router.post("/upload-video")
 async def upload_video(
@@ -292,6 +383,16 @@ async def get_processing_progress(match_id: str):
             status_code=503,
             detail="VideoProcessor not available in this environment",
         )
+
+    # Ditolak atau dihentikan karena kunci GPU. Dijawab 409 dengan keterangan,
+    # BUKAN 404, supaya pengguna tahu sebabnya dan tidak mengira uploadnya hilang.
+    tolak = _ditolak.get(match_id)
+    if tolak is not None and _processors.get(match_id) is None:
+        raise HTTPException(status_code=409, detail={
+            "status": "ditolak_gpu",
+            "pesan": tolak["pesan"],
+            "pemegang": tolak.get("pemegang", {}),
+        })
 
     processor = _processors.get(match_id)
     if processor is None:

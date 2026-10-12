@@ -264,6 +264,30 @@ FG_BELOW_MARGIN_PX     = int(os.getenv(
     "FG_BELOW_MARGIN_PX",
     {"rfdetr": 8, "yolo": -5}.get(_DETEKTOR, -5)))
 
+# ── SAKLAR B: TOLAK BOLA MENGGANTUNG ────────────────────────────────────────
+# Bola masuk sungguhan MENEMBUS cincin. Diameter cincin 0,45 m, dan bola yang
+# jatuh dari puncak lengkungnya bergerak 4 sampai 6 m/s saat melewati ring,
+# jadi menyeberangi cincin hanya perlu sekitar 0,1 detik, yaitu 3 frame di 30
+# fps. Penghitung dwell yang terus naik 9, 10, 11 frame berarti bola BERTAHAN
+# di dalam rentang mendatar cincin selama 0,3 detik atau lebih. Itu bukan bola
+# menembus; itu bola dipegang di dekat ring, memantul di cincin, atau deteksi
+# palsu yang menempel ke kotak rim.
+#
+# Dua syarat, dua duanya hanya dipakai di titik keputusan terakhir:
+#   1. BATAS ATAS dwell. Kalau penghitung sudah melewati batas ini saat gerbang
+#      hendak menyala, kejadian ditolak.
+#   2. PERPINDAHAN TEGAK minimum sejak bola MASUK zona sampai saat menyala.
+#      Bola menembus bergerak ke bawah beberapa belas piksel; bola menggantung
+#      hampir tidak bergerak.
+# MATI secara bawaan. Angka bawaannya dipilih dari telemetri skrip 23.
+FG_HANG_REJECT         = os.getenv("FG_HANG_REJECT", "0").strip() == "1"
+# Batas atas dwell, dalam frame pada acuan 15 fps (diskalakan ke fps nyata
+# seperti FG_ZONE_DWELL_F). 4 di acuan berarti 8 frame di 30 fps.
+FG_ZONE_DWELL_MAX_F    = int(os.getenv("FG_ZONE_DWELL_MAX_F", "").strip() or 4)
+# Perpindahan tegak minimum dalam PIKSEL sejak masuk zona. Bukan diskalakan
+# fps: yang diukur jarak total menembus ring, bukan laju per frame.
+FG_HANG_MIN_DROP_PX    = float(os.getenv("FG_HANG_MIN_DROP_PX", "").strip() or 0)
+
 # ── SAKLAR C: KONFIRMASI DARI INTI CINCIN ───────────────────────────────────
 # Gerbang sekarang menuntut deteksi NYATA dengan titik tengah bola DI BAWAH
 # tepi bawah kotak rim. Pada dua bola masuk yang selalu terlewat, syarat itulah
@@ -453,6 +477,10 @@ class EventEngine:
         self._shot_attempt_frame:  int             = -999
         self._fg_cooldown:         int             = 0
         self._ball_in_hoop_frames: int             = 0    # consecutive in-zone frames
+        # Posisi tegak bola saat MASUK zona ring, dipakai saklar B untuk
+        # mengukur sudah berapa piksel bola turun sejak masuk. None berarti
+        # belum pernah masuk zona, dan saklar B melewatkan syarat itu.
+        self._fg_zone_entry_y: Optional[float]     = None
         self._fg_armed_until:      int             = -1   # kancing gerbang bawah
         self._fg_armed_hoop                        = None
         self._fg_below_ok:         bool            = False
@@ -518,6 +546,9 @@ class EventEngine:
         self._fg_miss_timeout_f    = _sc(FG_MISS_TIMEOUT_F)
         self._fg_ball_lost_reset_f = _sc(FG_BALL_LOST_RESET_F)
         self._fg_zone_dwell_f      = _sc(FG_ZONE_DWELL_F)
+        # Batas atas dwell saklar B, diskalakan sama seperti ambang minimumnya
+        # supaya keduanya tetap sebanding saat fps berubah.
+        self._fg_zone_dwell_max_f  = _sc(FG_ZONE_DWELL_MAX_F)
         self._fg_hoop_cache_ttl    = _sc(FG_HOOP_CACHE_TTL)
         self._fg_shooter_ttl_f     = _sc(FG_SHOOTER_TTL_F)
         self._fg_confirm_frames    = _sc(FG_CONFIRM_FRAMES)
@@ -949,6 +980,10 @@ class EventEngine:
         # menyimpang tidak menghapus semuanya, tapi bola yang benar benar pergi
         # tetap turun ke nol dalam beberapa frame.
         if in_zone:
+            # Catat posisi tegak saat bola BARU masuk zona. Dipakai saklar B
+            # untuk mengukur perpindahan tegak sepanjang rentetan dwell.
+            if self._ball_in_hoop_frames == 0:
+                self._fg_zone_entry_y = float(ball_px[1])
             self._ball_in_hoop_frames += 1
         elif FG_RECALL_BOOST:
             self._ball_in_hoop_frames = max(0, self._ball_in_hoop_frames - 1)
@@ -1114,6 +1149,29 @@ class EventEngine:
                     "FG ditahan, kancing dipasang sampai frame %d — bola belum "
                     "di bawah ring (ball_y=%.0f, butuh > %.0f)",
                     self._fg_armed_until, float(ball_px[1]), batas_bawah)
+                return events
+
+        # ── 2c. SAKLAR B: tolak bola MENGGANTUNG ─────────────────────────
+        # Diperiksa PALING AKHIR, tepat sebelum kejadian dibuat, supaya yang
+        # ditolak benar benar hanya yang akan menjadi poin. Penghitung dwell
+        # TIDAK direset di sini: mereset berarti memberi kesempatan kedua
+        # beberapa frame kemudian, dan itulah cacat halus yang dulu membuat
+        # gerbang "tepat sama dengan dwell" kelihatan benar karena kebetulan.
+        if FG_HANG_REJECT:
+            if self._ball_in_hoop_frames > self._fg_zone_dwell_max_f:
+                logger.debug(
+                    "FG ditolak — bola MENGGANTUNG di zona ring %d frame, "
+                    "batas %d. Bola menembus cincin hanya perlu 3 frame.",
+                    self._ball_in_hoop_frames, self._fg_zone_dwell_max_f)
+                return events
+            if (FG_HANG_MIN_DROP_PX > 0 and self._fg_zone_entry_y is not None
+                    and float(ball_px[1]) - self._fg_zone_entry_y
+                    < FG_HANG_MIN_DROP_PX):
+                logger.debug(
+                    "FG ditolak — bola hampir tidak turun sejak masuk zona "
+                    "(%.1f px, butuh %.1f px)",
+                    float(ball_px[1]) - self._fg_zone_entry_y,
+                    FG_HANG_MIN_DROP_PX)
                 return events
 
         # ── 3. Identify shooter + the SCORING (offensive) team ────────────
@@ -1880,6 +1938,7 @@ class EventEngine:
         # leaked across quarters and could trigger a phantom MADE_FG on the first
         # frames of the next quarter).
         self._ball_in_hoop_frames = 0
+        self._fg_zone_entry_y     = None
         self._ball_lost_frames    = 0
         self._hoop_cache_age      = 0
         self._fg_miss_emitted    = False

@@ -46,6 +46,48 @@ DENYUT_S    = int(os.getenv("GPU_LOCK_HEARTBEAT_S", "3"))
 # Berapa lama produksi menunggu dev melepas sebelum mengambil paksa.
 TUNGGU_S    = int(os.getenv("GPU_PREEMPT_WAIT_S", "30"))
 
+# ── Kunci WAJIB berada di satu tempat yang sama untuk prod dan dev ──────────
+# CACAT NYATA yang pernah terjadi: prod memakai REDIS_URL=redis://localhost:6379
+# (basis data 0) sedangkan dev memakai .../1. Keduanya BENAR BENAR mengambil
+# kunci, tapi di basis data yang BERBEDA, jadi tidak pernah saling melihat dan
+# penguncinya tidak berguna sama sekali. Uji saya saat itu lolos karena kedua
+# sisi diuji di dalam satu basis data yang sama.
+#
+# Maka modul ini TIDAK memakai sambungan Redis milik pemanggil. Ia membuka
+# sambungannya sendiri ke basis data tetap, sehingga prod dan dev selalu
+# bertemu di ruangan yang sama berapa pun REDIS_URL masing masing.
+GPU_LOCK_URL = os.getenv(
+    "GPU_LOCK_REDIS_URL",
+    (os.getenv("REDIS_URL", "redis://localhost:6379").rsplit("/", 1)[0]
+     if os.getenv("REDIS_URL", "").count("/") > 2
+     else os.getenv("REDIS_URL", "redis://localhost:6379")).rstrip("/") + "/15",
+)
+
+_koneksi = None
+
+
+async def _redis_kunci(cadangan=None):
+    """Sambungan khusus kunci, selalu ke basis data yang sama.
+
+    Kalau gagal, jatuh ke sambungan milik pemanggil supaya tidak memblokir
+    pekerjaan; tapi itu dicatat keras karena saat itu penguncinya kembali
+    rapuh terhadap perbedaan basis data.
+    """
+    global _koneksi
+    if _koneksi is not None:
+        return _koneksi
+    try:
+        import redis.asyncio as _ar
+        _koneksi = _ar.from_url(GPU_LOCK_URL, decode_responses=True)
+        await _koneksi.ping()
+        logger.info("Kunci GPU memakai %s", GPU_LOCK_URL)
+        return _koneksi
+    except Exception as e:
+        logger.warning("Sambungan khusus kunci GPU gagal (%s). "
+                       "Memakai Redis pemanggil; kunci bisa TIDAK terlihat "
+                       "oleh sisi lain kalau basis datanya berbeda.", e)
+        return cadangan
+
 
 def sisi() -> str:
     """"prod" atau "dev". Diambil dari env, kalau tidak ada ditebak dari port.
@@ -64,6 +106,7 @@ def _punyaku(data: dict) -> bool:
 
 async def keadaan(redis) -> dict:
     """Siapa yang sedang memegang GPU. Dipakai endpoint status dan dev UI."""
+    redis = await _redis_kunci(redis)
     if redis is None:
         return {"terkunci": False, "alasan": "redis tidak tersedia"}
     try:
@@ -88,6 +131,7 @@ async def ambil(redis, match_id: str):
     dahulu lalu menunggu dev melepas, dan setelah TUNGGU_S tetap mengambil
     karena produksi memang didahulukan.
     """
+    redis = await _redis_kunci(redis)
     if redis is None:
         # Tanpa Redis tidak ada koordinasi. Jangan memblokir pekerjaan; cukup
         # beri tahu supaya ketahuan kalau dua sisi berebut.
@@ -145,6 +189,7 @@ async def denyut(redis) -> bool:
     dari produksi harus berhenti baik baik, bukan dimatikan paksa, supaya hasil
     sampai frame terakhir tetap tersimpan.
     """
+    redis = await _redis_kunci(redis)
     if redis is None:
         return False
     try:
@@ -165,6 +210,7 @@ async def denyut(redis) -> bool:
 
 async def lepas(redis) -> None:
     """Lepas kunci, HANYA kalau memang milik proses ini."""
+    redis = await _redis_kunci(redis)
     if redis is None:
         return
     try:

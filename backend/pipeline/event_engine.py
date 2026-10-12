@@ -330,11 +330,17 @@ FG_RIM_CORE_CONFIRM    = os.getenv("FG_RIM_CORE_CONFIRM", "0").strip() == "1"
 #      bola justru masih 0,1 sampai 1,8 px DI ATAS pusat kotak rim, jadi
 #      menuntut "sudah sampai bidang cincin" persis membuang bukti yang ada.
 #      2 px cukup dan masih jauh di dalam kotak rim yang separuh tingginya 9,4.
-#   2. Pecahan lebar 0,15 memisahkan bola masuk yang terlewat (0,02) dari
-#      rentetan yang tidak pernah menyala di 3:57,4 (0,12) dengan jarak sempit.
-#      Dipilih 0,15, bukan 0,10 yang lebih aman tapi disetel pas ke satu
-#      kejadian saja. Paparannya: 34 frame nyata dari 4.723 di seluruh klip.
-FG_RIM_CORE_FRAC       = float(os.getenv("FG_RIM_CORE_FRAC", "").strip() or 0.15)
+#   2. Pecahan lebarnya DIUJI DUA KALI di pipeline, dan 0,15 terbukti kelewat
+#      longgar: rentetan 3:57,4 ikut menyala jadi palsu baru, tepat seperti
+#      yang diramalkan tabel di atas (0,12 lolos ambang 0,15).
+#
+#        pecahan   asli /5   palsu   ketepatan   nilai 2/3 benar
+#          0,15       4        3       57 %            2
+#          0,10       4        2       67 %            2
+#
+#      Maka bawaannya 0,10, yaitu +-1,9 px dari pusat cincin mendatar.
+#      Paparannya 22 frame nyata dari 4.723 di seluruh klip.
+FG_RIM_CORE_FRAC       = float(os.getenv("FG_RIM_CORE_FRAC", "").strip() or 0.10)
 # Berapa piksel DI ATAS pusat cincin yang masih diterima.
 FG_RIM_CORE_UP_PX      = float(os.getenv("FG_RIM_CORE_UP_PX", "").strip() or 2)
 

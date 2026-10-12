@@ -91,7 +91,11 @@ export default function ViewMatchPage() {
 
   const teamA    = meta?.team_a || 'Team A'
   const teamB    = meta?.team_b || 'Team B'
-  const videoUrl = `${API}/api/upload/raw/${matchId}`
+  // Endpoint ini mencari video ANALISIS lebih dulu lalu video mentah, dan
+  // hanya 404 kalau benar benar tidak ada satu pun. Sebelumnya halaman ini
+  // hanya meminta video mentah, jadi pemutarnya kosong begitu berkas itu
+  // dibersihkan demi menghemat disk.
+  const videoUrl = `${API}/api/video/${matchId}`
 
   if (loading) {
     return (

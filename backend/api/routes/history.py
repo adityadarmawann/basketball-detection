@@ -177,3 +177,38 @@ async def hapus_riwayat(
     logger.info("Riwayat %s dihapus mode=%s, %s berkas, %.1f MB",
                 match_id, mode, terhapus, dibebaskan / 1048576)
     return hasil
+
+@router.get("/video/{match_id}")
+async def video_apa_saja(match_id: str):
+    """Video mana pun yang MASIH ADA untuk satu match.
+
+    Halaman hasil dulu hanya meminta video MENTAH hasil unggahan. Begitu berkas
+    itu dibersihkan demi menghemat disk, pemutarnya kosong padahal video hasil
+    ANALISIS kadang masih ada, atau sebaliknya. Endpoint ini mencari keduanya
+    dan mengembalikan yang pertama ketemu, dengan mengutamakan video hasil
+    analisis karena itu yang bergambar kotak pemain dan berguna untuk ditonton.
+
+    404 hanya kalau benar benar tidak ada satu pun.
+    """
+    from fastapi.responses import FileResponse
+
+    kandidat = []
+    # 1. Hasil analisis (ada anotasinya) — diutamakan.
+    out_dir = os.path.join(OUTPUT_PATH, match_id)
+    kandidat += sorted(glob.glob(os.path.join(out_dir, "*.mp4")))
+    kandidat += sorted(glob.glob(os.path.join(OUTPUT_PATH, f"*{match_id}*.mp4")))
+    # 2. Video mentah hasil unggahan.
+    kandidat += sorted(glob.glob(os.path.join(UPLOAD_PATH, f"*{match_id}*")))
+
+    for p in kandidat:
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            jenis = "analisis" if OUTPUT_PATH in p else "mentah"
+            return FileResponse(p, media_type="video/mp4",
+                                filename=os.path.basename(p),
+                                headers={"X-Sumber-Video": jenis})
+
+    raise HTTPException(
+        status_code=404,
+        detail=("Video untuk match ini sudah tidak ada di disk. "
+                "Statistik dan MPI tetap bisa dilihat."),
+    )

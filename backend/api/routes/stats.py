@@ -29,6 +29,7 @@ client = MongoClient(MONGO_URL)
 db = client["smart_vision_basketball"]
 
 from db.redis_client import get_redis
+from db.mongo import get_db
 
 # ── Default empty-stats structure returned when no live data is available ──────
 
@@ -79,7 +80,54 @@ async def get_live_stats(match_id: str = Query(None)):
     except Exception as e:
         logger.warning("Redis read error for match %s: %s", match_id, e)
 
-    # ── 2. Fallback: return default structure ─────────────────────────────────
+    # ── 2. Redis per KUARTER ──────────────────────────────────────────────────
+    # Saat pemrosesan SELESAI, VideoProcessor menulis stats:{id}:q{n} (TTL 7
+    # hari), sedangkan kunci tanpa kuarter di atas hanya hidup selama proses
+    # berjalan. Tanpa langkah ini, halaman hasil selalu kosong begitu analisis
+    # selesai, dan itu gejala yang dilaporkan pengguna.
+    try:
+        redis = await get_redis()
+        if redis is not None:
+            gabung = None
+            for q in range(1, 5):
+                raw = await redis.get(f"stats:{match_id}:q{q}")
+                if raw:
+                    gabung = json.loads(raw)      # kuarter terakhir yang ada menang
+            if gabung:
+                base = _default_response()
+                base.update(gabung)
+                return base
+    except Exception as e:
+        logger.warning("Redis per-kuarter gagal untuk %s: %s", match_id, e)
+
+    # ── 3. Mongo: ringkasan PERMANEN ──────────────────────────────────────────
+    # Sumber terakhir dan satu satunya yang tidak punya masa berlaku. Redis
+    # kedaluwarsa setelah 7 hari dan kosong setelah restart, sedangkan berkas
+    # di disk ikut terhapus saat penyimpanan dibersihkan. Ringkasan inilah yang
+    # membuat riwayat analisis tetap bisa dibuka berbulan bulan kemudian.
+    try:
+        db = get_db()
+        if db is not None:
+            m = db.matches.find_one({"match_id": match_id}, {"ringkasan": 1})
+            ring = (m or {}).get("ringkasan") or {}
+            terpilih = None
+            for q in sorted(ring.keys()):
+                if ring[q]:
+                    terpilih = ring[q]
+            if terpilih:
+                base = _default_response()
+                if terpilih.get("player_stats") is not None:
+                    base["player_stats"] = terpilih["player_stats"]
+                if terpilih.get("team_stats") is not None:
+                    base["team_stats"] = terpilih["team_stats"]
+                if terpilih.get("skor") is not None:
+                    base["score"] = terpilih["skor"]
+                base["sumber"] = "ringkasan_mongo"
+                return base
+    except Exception as e:
+        logger.warning("Ringkasan Mongo gagal untuk %s: %s", match_id, e)
+
+    # ── 4. Terakhir: bentuk kosong, JANGAN melempar galat ─────────────────────
     return _default_response()
 
 # ── MPI helpers ───────────────────────────────────────────────────────────────

@@ -135,6 +135,33 @@ async def hapus_riwayat(
     if not db.matches.find_one({"match_id": match_id}):
         raise HTTPException(status_code=404, detail=f"match {match_id} tidak ada")
 
+    # ── PENGAMAN: jangan hapus analisis yang SEDANG BERJALAN ────────────────
+    # Pernah terjadi: tombol hapus ditekan pada match yang pipeline-nya masih
+    # menulis, sehingga catatan dan 226 kejadiannya hilang sementara prosesnya
+    # jalan terus dan mulai menulis dari nol. Hasilnya kacau dan tidak bisa
+    # dibatalkan. Pemegang kunci GPU adalah penanda paling bisa dipercaya untuk
+    # "sedang diproses", karena dipegang selama pipeline hidup dan terlepas
+    # sendiri kalau prosesnya mati.
+    try:
+        from db.redis_client import get_redis
+        from db import gpu_lock as _gpu
+        _r = await get_redis()
+        _pemegang = await _gpu.keadaan(_r)
+        if _pemegang.get("terkunci") and _pemegang.get("match_id") == match_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Match {match_id} SEDANG dianalisis "
+                        f"({_pemegang.get('lama_detik', 0):.0f} detik berjalan). "
+                        f"Hentikan analisisnya dulu lewat tombol stop, atau "
+                        f"tunggu sampai selesai, baru bisa dihapus."),
+            )
+    except HTTPException:
+        raise
+    except Exception as e:                                # pragma: no cover
+        # Pengaman tidak boleh MEMBLOKIR penghapusan kalau Redis bermasalah,
+        # tapi kegagalannya harus terlihat, bukan ditelan diam diam.
+        logger.warning("Pengaman hapus tidak bisa memeriksa kunci GPU: %s", e)
+
     berkas = _berkas_match(match_id)
     dibebaskan = sum(_ukuran(p) for p in berkas)
     terhapus = 0

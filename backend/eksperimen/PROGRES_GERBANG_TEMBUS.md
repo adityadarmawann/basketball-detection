@@ -29,7 +29,8 @@ Diisi saat tiap run selesai. Lihat juga `/home/paul/hasil_*.log`.
 | A | `FG_ZONE_DWELL_F=2` | 3 | 2 | 60 % | 3 | 11 | 18,1 mnt | TIDAK BERPENGARUH |
 | B | `FG_HANG_REJECT=1` | 2 | 1 | 67 % | 2 | 6 | 18,2 mnt | DITOLAK |
 | C inti 0,15 | `FG_RIM_CORE_CONFIRM=1` | 4 | 3 | 57 % | 2 | 16 | 18,1 mnt | tawar menawar |
-| C inti 0,10 | `+ FG_RIM_CORE_FRAC=0.10` | 4 | 2 | 67 % | 2 | 14 | 18,4 mnt | **MEMENUHI SYARAT TERIMA** |
+| C inti 0,10 | `+ FG_RIM_CORE_FRAC=0.10` | 4 | 2 | 67 % | 2 | 14 | 18,4 mnt | **DITERIMA, dinyalakan di `.env`** |
+| B + C 0,10 | `FG_HANG_REJECT=1` + C 0,10 | 4 | 1 | **80 %** | 2 | 11 | 18,3 mnt | memenuhi syarat, TAPI rapuh |
 
 Daftar kejadian tiap run:
 
@@ -38,6 +39,7 @@ Daftar kejadian tiap run:
     B          0:18 asli             1:45 PALSU  1:57 asli
     C 0,15     0:18 asli  0:58 asli  1:45 PALSU  1:57 asli  2:24 asli   3:52 PALSU  3:57 PALSU
     C 0,10     0:18 asli  0:58 asli  1:45 PALSU  1:57 asli  2:24 asli   3:52 PALSU
+    B + C      0:18 asli  0:58 asli  1:45 PALSU  1:57 asli  2:24 asli
 
 Yang selalu terlewat di SEMUA setelan: 1:30. Yang selalu palsu: 1:45 dan 3:52.
 
@@ -106,9 +108,15 @@ Dua hal penting:
    toleransi 2 px, bola masuk terlewat 2:26 lolos (0,02) TAPI rentetan 3:57,4
    yang sekarang tidak pernah menyala juga ikut lolos (0,12). Kalau rentetan
    itu memang lolos syarat lain, hasilnya satu asli naik DAN satu palsu naik,
-   yaitu TAWAR MENAWAR, bukan perbaikan bersih. Pecahan 0,10 akan memisahkan
-   keduanya, tapi itu menyetel ambang pas ke satu kejadian; sengaja TIDAK
-   dipakai sebagai bawaan supaya tidak menipu diri sendiri.
+   yaitu TAWAR MENAWAR, bukan perbaikan bersih. Pecahan 0,10 memisahkan
+   keduanya.
+
+   Pecahan 0,15 DIJALANKAN lebih dulu justru supaya ramalan ini bisa diuji,
+   bukan diakali. Hasilnya tepat seperti ramalannya (asli 4, palsu 3), lalu
+   0,10 dijalankan dan juga tepat (asli 4, palsu 2). Setelah dua duanya
+   terukur, bawaan di kode diubah jadi **0,10**. Perlu diingat ambang itu
+   dipisahkan oleh satu kejadian saja (0,02 lawan 0,12), jadi kalau detektor
+   atau resolusi potongan ring berubah, ukur ulang dengan skrip 17.
 
 ## TEMUAN YANG SUDAH PASTI SEBELUM RUN APA PUN
 
@@ -207,6 +215,37 @@ salah dan jaraknya meledak 2,5 jadi 10,8 m.
 Ini menguatkan lead nomor 1 di `LANJUTAN_BERIKUTNYA.md`: penghambat berikutnya
 POSISI PENEMBAK, bukan lagi geometri ring. Dua dari tiga galat nilai sekarang
 berasal dari situ, dan palsu 3:52 juga dinilai 3 angka dari 10,2 m.
+
+### GABUNGAN B + C: hasil terbaik, tapi keamanannya KEBETULAN
+Asli 4 dari 5, palsu 1, ketepatan 80 persen. Naik di KEDUA sumbu sekaligus
+dibanding acuan (asli 3 jadi 4, palsu 2 jadi 1), jadi memenuhi syarat terima.
+
+Mekanismenya sebuah INTERAKSI, bukan penjumlahan:
+saklar C membuat kejadian 0:58 menyala JAUH LEBIH AWAL di dalam rentetan dwell.
+Sendirian, saklar B membuang 0:58 justru karena kejadian itu menyala pada dwell
+14, di atas batas 8. Begitu C menyalakannya pada dwell rendah, batas atas tidak
+lagi menyentuhnya, sementara palsu 3:52 yang menyala pada dwell 10 tetap
+terbuang.
+
+**Itu sebabnya B TIDAK dinyalakan di `.env`.** Keamanannya bergantung pada satu
+kejadian di satu klip. Kalau setelan C diubah atau dimatikan, B kembali
+membuang bola masuk asli tanpa pemberitahuan apa pun. Keputusan menyalakannya
+diserahkan ke user, dan kalau dinyalakan harus diukur ulang dengan skrip 17
+setiap kali setelan C berubah.
+
+Poin 11 lawan kebenaran 11 pada baris ini KEBETULAN: satu palsu bernilai 2
+angka menutupi satu bola masuk yang terlewat, dan satu nilai 2/3 yang salah
+menambal sisanya. Jangan dipakai sebagai bukti.
+
+## YANG DINYALAKAN DI `.env` SETELAH PEKERJAAN INI
+
+    FG_RIM_CORE_CONFIRM=1
+    FG_RIM_CORE_FRAC=0.10
+    FG_RIM_CORE_UP_PX=2
+
+Alasan dan angkanya ada di `.env.saklar.example` yang TERLACAK git, karena
+`.env` sendiri diabaikan git. `FG_HANG_REJECT` dan `FG_ZONE_DWELL_MAX_F`
+ditulis di situ juga tapi DIKOMENTARI, beserta peringatannya.
 
 ## ANTREAN DAN CARA MELANJUTKAN
 

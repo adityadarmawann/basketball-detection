@@ -140,21 +140,62 @@ mati, jadi lingkungan lain tidak ikut berubah. Alasan dan angkanya ada di
 Poin 11 lawan kebenaran 11 itu KEBETULAN. Dua palsu bernilai 2 dan 3 angka
 menutupi dua bola masuk yang terlewat. Jangan jadikan bukti.
 
+### Nomor 4, SELESAI 12 Oktober 2026: tiga saklar gerbang TEMBUS cincin
+Diuji satu saklar satu run, skrip 17, `/home/paul/q1_4menit.mp4`, RF-DETR.
+
+    setelan                       asli /5  palsu  ketepatan  nilai 2/3  poin  waktu
+    acuan (DIGIT_CLS hidup)          3       2       60 %        3       11   18,1 mnt
+    A  FG_ZONE_DWELL_F=2             3       2       60 %        3       11   18,1 mnt
+    B  FG_HANG_REJECT=1              2       1       67 %        2        6   18,2 mnt
+    C  inti cincin 0,15              4       3       57 %        2       16   18,1 mnt
+    C  inti cincin 0,10              4       2       67 %        2       14   18,4 mnt
+    B + C inti 0,10                  4       1       80 %        2       11   18,3 mnt
+
+**A TIDAK BERPENGARUH.** Daftar kejadiannya sama persis dengan acuan, detik
+demi detik. Kelima kejadian acuan sudah menyala pada dwell 6, 6, 6, 10, dan 14,
+jadi ambang minimum 6 tidak pernah menjadi penghalang.
+
+**B DITOLAK sendirian.** Mekanismenya jalan, premisnya keliru: bola masuk ASLI
+0:59 menyala pada dwell 14, lebih lama daripada palsu 3:52 yang menyala pada
+dwell 10. Jadi batas atas apa pun yang membuang palsu juga membuang asli.
+
+**C DITERIMA dan DINYALAKAN di `.env`** dengan pecahan 0,10. Bola masuk 2:26,
+yang TIDAK PERNAH terdeteksi di setelan mana pun sebelum ini, sekarang
+ditemukan, dan palsu tidak bertambah. Biaya waktu nol.
+
+**B + C memberi ketepatan tertinggi 80 persen tapi TIDAK dinyalakan.**
+Keamanannya kebetulan: saklar C membuat 0:58 menyala pada dwell rendah sehingga
+batas atas tidak lagi membuangnya. Kalau setelan C berubah, B kembali membuang
+bola masuk asli tanpa pemberitahuan. Keputusannya diserahkan ke user.
+
+Rincian lengkap, telemetri, dan sebab teknisnya:
+`eksperimen/PROGRES_GERBANG_TEMBUS.md` dan `eksperimen/PENDEKATAN_DITOLAK.md`.
+Alat barunya `eksperimen/23_telemetri_gerbang.py` dan `24_analisis_telemetri.py`.
+
 ## BATAS YANG MASIH TERSISA, lead untuk berikutnya
 
-1. **Palsu 3:52 selamat di SEMUA setelan**, dihitung 3 angka dari 10,2 meter.
-   Gerbang rim tidak menyentuhnya, jadi sebabnya bukan geometri ring melainkan
-   POSISI PENEMBAK. Ini lead paling jelas yang belum dikerjakan.
-2. **Bola masuk 1:30 dan 2:26 tidak pernah ditemukan satu setelan pun.** ROI
-   maupun gerbang rim tidak menyentuhnya. Perlu diperiksa apa yang terjadi di
-   dua saat itu, apakah ringnya tidak terdeteksi, bolanya hilang total, atau
-   gerbangnya tertahan syarat lain.
-3. **`ball-in-basket` layak dilatih ulang PADA POTONGAN dekat rim**, bukan pada
-   frame penuh. Buktinya 2 deteksi dari 2.623 potongan resolusi asli lawan NOL
-   di frame diperkecil, jadi kelas itu tenggelam karena ukuran piksel, bukan
-   karena tidak bisa dipelajari.
-4. `DIGIT_CLS_ENABLE` masih 0 padahal terukur menaikkan bacaan nomor 22 jadi
-   37,5 persen. Perlu satu kali uji pipeline penuh.
+DIPERBARUI 12 Oktober 2026, setelah `FG_RIM_CORE_CONFIRM` dinyalakan.
+
+1. **NILAI 2 atau 3 angka sekarang penghambat UTAMA, bukan lagi geometri ring.**
+   Dari 4 bola masuk yang dikenali, hanya 2 nilainya benar:
+
+       0:58  2 angka dari 2,5 m  ->  3 angka dari 10,8 m   SALAH
+       2:26  baru ditemukan      ->  2 angka, harusnya 3   SALAH
+
+   Sebabnya FRAME saat kejadian menyala dipakai memperkirakan posisi penembak,
+   dan gerbang inti cincin menyalakan kejadian lebih awal. Palsu 3:52 juga
+   dinilai 3 angka dari 10,2 m. Jadi tiga galat nilai di klip ini SATU SEBAB:
+   posisi penembak. Ini lead paling jelas sekarang.
+2. **Bola masuk 1:30 tidak bisa dicapai dari sisi gerbang, TERUKUR.** Frame
+   nyata terdekat ke pusat cincin 24,3 px, dan frame yang lebih dalam (14 px,
+   9 px) semuanya posisi PERKIRAAN pelacak yang dilarang dipakai sebagai bukti
+   terakhir. Jalannya memperbaiki DETEKSI bola di potongan dekat rim.
+3. **Palsu 1:45 bertahan di SEMUA setelan**, menyala pada dwell 6 dengan pola
+   geometri yang tidak terpisahkan dari bola masuk asli. Sama seperti 3:52,
+   jaraknya yang salah (3,2 m) menunjuk posisi penembak juga.
+4. **`ball-in-basket` layak dilatih ulang PADA POTONGAN dekat rim**, bukan pada
+   frame penuh. 2 deteksi dari 2.623 potongan resolusi asli lawan NOL di frame
+   diperkecil, jadi kelas itu tenggelam karena ukuran piksel.
 
 ### Nomor 3, DISETUJUI USER, BELUM DIMULAI
 Tabel pemilik kelas: dua detektor jalan bersama, tiap kelas dimiliki SATU model

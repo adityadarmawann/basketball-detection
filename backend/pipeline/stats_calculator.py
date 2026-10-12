@@ -72,6 +72,22 @@ ACC_USE_SMOOTH  = os.getenv("ACC_USE_SMOOTH", "").strip() != "0"
 # percepatan. Selisih kecepatan selama setengah detik bukan percepatan sesaat,
 # dan memakainya hanya memasukkan lompatan posisi sebagai percepatan.
 ACC_MAX_GAP_MS  = float(os.getenv("ACC_MAX_GAP_MS", "").strip() or 120)
+# Jendela waktu dasar pengukuran percepatan, dalam milidetik.
+#
+# SEBAB PALING MENDASAR, dihitung bukan ditebak. Percepatan antar frame sama
+# dengan selisih langkah dikali fps KUADRAT. Di 30 fps itu 900. Jadi getaran
+# posisi 1,28 cm per frame saja sudah menghasilkan 11,5 m/s2, dan getaran 5 cm
+# menghasilkan 45 m/s2. Posisi lapangan diturunkan dari kotak pemain lewat
+# homografi, dan itu mustahil setepat 1 cm; realistisnya 5 sampai 20 cm. Maka
+# percepatan antar frame MENGUKUR KEBISINGAN, bukan gerakan pemain.
+#
+# Jalan keluarnya mengukur pada jarak waktu yang lebih panjang. Ledakan tenaga
+# di basket berlangsung sekitar 0,3 sampai 1 detik, jadi jendela 250 ms masih
+# menangkap gerakan yang nyata sementara dasar waktunya 7,5 kali lebih panjang
+# sehingga kebisingannya turun sebanding.
+#
+# Isi 0 untuk kembali ke cara antar frame yang lama.
+ACC_WINDOW_MS   = float(os.getenv("ACC_WINDOW_MS", "").strip() or 250)
 
 PATH_CLEAN_METHOD = os.getenv("PATH_CLEAN_METHOD", "none").strip().lower()
 # Panjang potongan jalur yang diproses sekali jalan, dan ekor yang disimpan
@@ -610,7 +626,16 @@ class StatsCalculator:
             if c_ms:
                 dist   = c_dist
                 speeds = [v * 3.6 for v in c_ms]
-                accel  = self._accel_from_ms(c_ms)
+                # Jalur bersih deretnya berjarak SATU FRAME, jadi stempel
+                # waktunya disusun dari indeks. Jendela waktu dipakai di sini
+                # juga: pelipatan kebisingan oleh fps kuadrat berlaku sama
+                # untuk jalur bersih maupun mentah.
+                if ACC_WINDOW_MS > 0:
+                    langkah_ms = 1000.0 / max(float(self.fps), 1e-6)
+                    accel = self._accel_berjendela(
+                        [(v, i * langkah_ms) for i, v in enumerate(c_ms)])
+                else:
+                    accel = self._accel_from_ms(c_ms)
 
         avg_spd = (sum(speeds) / len(speeds)) if speeds else 0.0
         max_spd = max(speeds, default=0.0)
@@ -859,7 +884,33 @@ class StatsCalculator:
             return self._accel_from_ms(buf)
         if not ACC_REAL_DT:
             return self._accel_from_ms([v for v, _ in buf])
+        if ACC_WINDOW_MS > 0:
+            return self._accel_berjendela(buf)
         return self._accel_from_samples(buf)
+
+    @staticmethod
+    def _accel_berjendela(buf: list) -> float:
+        """Percepatan dari pasangan (kecepatan m/s, stempel waktu ms), diukur
+        pada jarak waktu ACC_WINDOW_MS, bukan antar frame.
+
+        Tiap sampel dipasangkan dengan sampel TERBARU yang jaraknya sudah
+        mencapai jendela. Mengukur antar frame membuat kebisingan posisi
+        dikalikan fps kuadrat, lihat catatan ACC_WINDOW_MS di atas berkas.
+        """
+        if len(buf) < 2:
+            return 0.0
+        accels = []
+        j = 0
+        for i in range(1, len(buf)):
+            # Majukan j selama masih ada sampel yang cukup jauh ke belakang,
+            # supaya pasangannya sedekat mungkin dengan lebar jendela.
+            while j + 1 < i and (buf[i][1] - buf[j + 1][1]) >= ACC_WINDOW_MS:
+                j += 1
+            dt_ms = buf[i][1] - buf[j][1]
+            if dt_ms < ACC_WINDOW_MS:
+                continue
+            accels.append(abs(buf[i][0] - buf[j][0]) / (dt_ms / 1000.0))
+        return round(sum(accels) / len(accels), 3) if accels else 0.0
 
     @staticmethod
     def _accel_from_samples(buf: list) -> float:
@@ -1169,27 +1220,56 @@ if __name__ == "__main__":
     assert sc9._calc_acceleration(2) == 0.0
     print("  Single speed sample → 0  ✓")
 
-    # Bentuk BARU: (kecepatan m/s, stempel waktu ms). Membuktikan dua cacat
-    # yang diperbaiki 12 Oktober 2026.
+    # Bentuk BARU: (kecepatan m/s, stempel waktu ms). Membuktikan perbaikan
+    # 12 Oktober 2026. Jendela dimatikan dulu supaya jalur antar frame teruji
+    # sendiri, lalu dinyalakan untuk menguji jalur berjendela.
+    # CATATAN: uji ini berjalan sebagai __main__, jadi JANGAN menyetel saklar
+    # lewat `import pipeline.stats_calculator` — itu salinan modul yang BERBEDA
+    # dan perubahannya tidak terbaca di sini. Setel langsung sebagai global.
+    _simpan_win = ACC_WINDOW_MS
+    ACC_WINDOW_MS = 0.0
+
     sc9b = StatsCalculator(fps=30)      # 1/fps = 33,3 ms
     # Dua sampel terpisah 100 ms, bukan 33 ms. Rumus lama membagi 33 ms dan
     # memberi 150 m/s2; yang benar membagi 100 ms dan memberi 50 m/s2.
     sc9b._speed_ms_buf[1] = deque([(0.0, 1000), (5.0, 1100)])
     a = sc9b._calc_acceleration(1)
     assert abs(a - 50.0) < 0.01, f"jeda sebenarnya diabaikan, dapat {a}"
-    print(f"  jeda 100 ms → {a} m/s2 (rumus lama memberi 150)  ✓")
+    print(f"  antar frame, jeda 100 ms → {a} m/s2 (rumus lama memberi 150)  ✓")
 
-    # Pasangan dengan jeda melebihi ACC_MAX_GAP_MS harus DILEWATI, bukan
-    # dihitung, supaya lompatan posisi tidak masuk sebagai percepatan.
+    # Pasangan dengan jeda melebihi ACC_MAX_GAP_MS harus DILEWATI.
     sc9b._speed_ms_buf[2] = deque([(0.0, 1000), (9.0, 1500), (9.5, 1550)])
     a = sc9b._calc_acceleration(2)
     assert abs(a - 10.0) < 0.01, f"jeda 500 ms mestinya dilewati, dapat {a}"
-    print(f"  jeda 500 ms dilewati, sisa pasangan sah → {a} m/s2  ✓")
+    print(f"  antar frame, jeda 500 ms dilewati → {a} m/s2  ✓")
 
-    # Tidak ada pasangan yang jedanya sah → 0, bukan galat.
-    sc9b._speed_ms_buf[3] = deque([(0.0, 1000), (9.0, 2000)])
-    assert sc9b._calc_acceleration(3) == 0.0
-    print("  semua pasangan terlalu jauh → 0  ✓")
+    # ── Jalur BERJENDELA ─────────────────────────────────────────────────
+    ACC_WINDOW_MS = 250.0
+
+    # Kecepatan tetap 5 m/s dengan getaran +-0,5 m/s tiap frame. Antar frame
+    # getaran itu terbaca sebagai percepatan besar; berjendela, hampir nol.
+    # Inilah inti perbaikannya.
+    goyang = [(5.0 + (0.5 if i % 2 else -0.5), i * 33.3) for i in range(40)]
+    sc9c = StatsCalculator(fps=30)
+    sc9c._speed_ms_buf[1] = deque(goyang)
+    a_jendela = sc9c._calc_acceleration(1)
+    ACC_WINDOW_MS = 0.0
+    a_frame = sc9c._calc_acceleration(1)
+    ACC_WINDOW_MS = 250.0
+    assert a_jendela < a_frame / 5, (
+        f"jendela mestinya jauh menekan getaran: {a_jendela} lawan {a_frame}")
+    print(f"  getaran +-0,5 m/s: antar frame {a_frame} → berjendela "
+          f"{a_jendela} m/s2  ✓")
+
+    # Percepatan NYATA harus tetap terbaca: 0 ke 6 m/s dalam 1 detik = 6 m/s2.
+    naik = [(i * 6.0 / 30.0, i * 33.3) for i in range(31)]
+    sc9d = StatsCalculator(fps=30)
+    sc9d._speed_ms_buf[1] = deque(naik)
+    a = sc9d._calc_acceleration(1)
+    assert 5.0 < a < 7.0, f"percepatan nyata hilang, dapat {a}"
+    print(f"  percepatan NYATA 6 m/s2 tetap terbaca → {a} m/s2  ✓")
+
+    ACC_WINDOW_MS = _simpan_win
 
     # ── 10. reset_match() ────────────────────────────────────────────────────
     print("\n--- 10. reset_match() ---")

@@ -87,6 +87,29 @@ def main() -> int:
 
     cap = cv2.VideoCapture(video)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+
+    # ── Samakan DASAR WAKTU dengan produksi, ini WAJIB ───────────────────────
+    # Skrip ini memanggil _process_frame LANGSUNG, jadi koreksi fps yang ada di
+    # process_video TIDAK PERNAH jalan. Pelangkahan frame memang sudah benar
+    # (PROCESS_STRIDE), TAPI StatsCalculator tetap memakai TARGET_FPS=25 bawaan.
+    # Akibatnya jeda SEBENARNYA 33,3 ms (2 frame dari 60 fps) sementara rumus
+    # memakai 1/fps = 40 ms, meleset 1,2 kali. Batas langkah jalur bersih juga
+    # ikut longgar, 0,400 m lawan 0,333 m yang benar.
+    # Produksi menyetel fps efektif 30 sehingga 1/fps = 33,3 ms dan COCOK.
+    try:
+        from pipeline.video_processor import PROCESS_STRIDE as _STRIDE
+    except Exception:
+        _STRIDE = 2
+    _eff_fps = max(1, round(fps / _STRIDE))
+    vp._source_fps = fps
+    vp._target_fps = _eff_fps
+    if getattr(vp, "_stats", None) is not None:
+        vp._stats.fps = _eff_fps
+    if getattr(vp, "_events_engine", None) is not None and hasattr(vp._events_engine, "set_fps"):
+        vp._events_engine.set_fps(_eff_fps)
+    if getattr(vp, "_tracker", None) is not None and hasattr(vp._tracker, "frame_rate"):
+        vp._tracker.frame_rate = _eff_fps
+    print(f"  dasar waktu             = langkah {_STRIDE}, fps efektif {_eff_fps}")
     # VERIF_START memungkinkan menguji SEGMEN tertentu, misalnya bagian yang
     # memuat time out, tanpa memproses seluruh video dari awal.
     mulai = int(os.getenv("VERIF_START", "0"))

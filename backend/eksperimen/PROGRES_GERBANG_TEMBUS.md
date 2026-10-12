@@ -25,10 +25,79 @@ Diisi saat tiap run selesai. Lihat juga `/home/paul/hasil_*.log`.
 
 | Run | setelan | asli /5 | palsu | ketepatan | poin | waktu | putusan |
 |---|---|---|---|---|---|---|---|
-| acuan baru | `.env` apa adanya (DIGIT_CLS hidup) | | | | | | |
+| acuan baru | `.env` apa adanya (DIGIT_CLS hidup) | 3 | 2 | 60 % | 11 | 18,1 mnt | acuan |
 | A | `FG_ZONE_DWELL_F=2` | | | | | | |
-| B | `FG_HANG_REJECT=1` | | | | | | |
 | C | `FG_RIM_CORE_CONFIRM=1` | | | | | | |
+| B | `FG_HANG_REJECT=1` | | | | | | |
+
+Acuan baru PERSIS SAMA per kejadian dengan acuan sebelum `DIGIT_CLS_ENABLE`
+dinyalakan: ditemukan 0:18, 0:58, 1:57; terlewat 1:30 dan 2:26; palsu 1:45 dan
+3:52. Jadi tahap kedua classify digit TIDAK menyentuh skor sama sekali, sesuai
+harapan, dan angka acuan lama tetap berlaku sebagai pembanding.
+
+## TELEMETRI: SAKLAR B TERBANTAH SEBELUM DIJALANKAN
+
+Diukur dengan skrip 23 lalu 24, satu kali jalan, 6.756 frame gerbang. Kolom
+`dwell saat nyala` adalah nilai penghitung zona pada frame saat kejadian dibuat
+(sudah termasuk penambahan frame itu sendiri).
+
+    rentetan   isinya                      dwell maks  dwell saat nyala  turun px
+    0:18,7     bola masuk ASLI                  6              6           36,4
+    0:58,4     bola masuk ASLI                 14             14           52,0
+    1:45,2     PALSU                            6              6           37,4
+    1:57,0     bola masuk ASLI                  6              6           33,2
+    3:51,9     PALSU                           10             10           40,1
+    2:24,3     bola masuk ASLI, TERLEWAT        8         tidak nyala     186,0
+    1:56,4     tidak pernah nyala               9         tidak nyala      20,9
+    3:57,4     tidak pernah nyala               8         tidak nyala     146,8
+
+**Batas ATAS dwell tidak bisa disetel.** Untuk membuang palsu 3:52 batasnya
+harus di bawah 10, tapi bola masuk ASLI di 0:58 menyala pada dwell **14**, jadi
+batas apa pun yang membuang 3:52 juga membuang satu bola masuk asli. Urutannya
+malah TERBALIK dari dugaan: kejadian dengan dwell terpanjang di klip ini adalah
+bola masuk yang BENAR, bukan yang palsu.
+
+**Perpindahan tegak minimum juga tidak bisa disetel.** Dua palsu turun 37,4 dan
+40,1 px, sedangkan bola masuk asli yang paling sedikit turun hanya 33,2 px. Jadi
+ambang apa pun yang membuang palsu lebih dulu membuang bola masuk asli 1:57.
+`FG_HANG_MIN_DROP_PX` tetap 0 (mati) karena itu.
+
+Gambaran "bola menggantung di dalam zona belasan frame" sendiri tidak terbukti:
+deretan jarak hampir tetap 28, 27, 27 px di 3:51,8 semuanya pada `dwell=0`,
+artinya gerbang tepi rim sudah menolaknya secara mendatar dan itu BUKAN frame
+di dalam zona. Rentetan dwell 3:51,9 yang sebenarnya bergerak 27 -> 6 -> 18 px,
+yaitu pola menembus.
+
+Saklar B tetap DIJALANKAN satu kali untuk membuktikan ramalan di atas, dengan
+batas bawaan `FG_ZONE_DWELL_MAX_F=4` (efektif 8 frame). Ramalannya: asli turun
+3 jadi 2 karena 0:58 ikut terbuang, palsu turun 2 jadi 1.
+
+## TELEMETRI: SAKLAR C punya sasaran yang jelas
+
+Jarak mendatar TERKECIL dari pusat kotak rim di antara frame NYATA, dibagi
+separuh lebar kotak rim (lebar median 37,5 px):
+
+    rentetan   isinya                      toleransi tegak 0 px   2 px
+    0:18,7     bola masuk ASLI                   0,08            0,08
+    0:58,4     bola masuk ASLI                   0,17            0,04
+    2:24,3     bola masuk ASLI, TERLEWAT         3,68            0,02
+    1:56,4     tidak pernah nyala               tak ada         tak ada
+    3:51,9     PALSU, sudah nyala                0,27            0,27
+    3:57,4     tidak pernah nyala                0,75            0,12
+
+Dua hal penting:
+1. **Toleransi tegak 0 px mustahil dipakai.** Di frame terdalam, titik tengah
+   bola masih 0,1 sampai 1,8 px DI ATAS pusat kotak rim. Jadi bawaan yang
+   semula saya tulis (`FG_RIM_CORE_UP_PX=0`) tidak akan meloloskan satu bola
+   masuk pun. Diganti 2 px, masih jauh di dalam kotak rim yang separuh
+   tingginya 9,4 px.
+2. **Risikonya sudah terlihat sebelum dijalankan.** Dengan pecahan 0,15 dan
+   toleransi 2 px, bola masuk terlewat 2:26 lolos (0,02) TAPI rentetan 3:57,4
+   yang sekarang tidak pernah menyala juga ikut lolos (0,12). Kalau rentetan
+   itu memang lolos syarat lain, hasilnya satu asli naik DAN satu palsu naik,
+   yaitu TAWAR MENAWAR, bukan perbaikan bersih. Pecahan 0,10 akan memisahkan
+   keduanya, tapi itu menyetel ambang pas ke satu kejadian; sengaja TIDAK
+   dipakai sebagai bawaan supaya tidak menipu diri sendiri.
 
 ## TEMUAN YANG SUDAH PASTI SEBELUM RUN APA PUN
 

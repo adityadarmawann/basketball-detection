@@ -20,8 +20,8 @@ type Baris = {
   warna_a: string
   warna_b: string
   status: string
-  dibuat: number | null
-  diproses: number | null
+  dibuat: number | string | null
+  diproses: number | string | null
   kuarter: string[]
   skor: { team_a?: number; team_b?: number } | null
   ada_ringkasan: boolean
@@ -30,9 +30,24 @@ type Baris = {
   ukuran_mb: number
 }
 
-function waktuSingkat(d: number | null): string {
-  if (!d) return '-'
-  const t = new Date(d * 1000)
+/**
+ * Mongo menyimpan waktu dalam DUA bentuk berbeda: `created_at` sebagai objek
+ * datetime yang dikirim FastAPI sebagai teks ISO, sedangkan `processed_at`
+ * ditulis pipeline sebagai detik epoch berupa angka. Mengalikan teks ISO dengan
+ * 1000 menghasilkan "Invalid Date", dan itu yang muncul di riwayat.
+ * Fungsi ini menerima keduanya, dan mengembalikan tanda hubung kalau memang
+ * tidak ada, bukan tanggal palsu.
+ */
+function waktuSingkat(d: number | string | null | undefined): string {
+  if (d === null || d === undefined || d === '') return '-'
+  let t: Date
+  if (typeof d === 'number') {
+    // Epoch detik kalau masih di bawah 10^12, selebihnya sudah milidetik.
+    t = new Date(d < 1e12 ? d * 1000 : d)
+  } else {
+    t = new Date(d)
+  }
+  if (isNaN(t.getTime())) return '-'
   return t.toLocaleDateString('id-ID', { day: '2-digit', month: 'short' }) +
     ' ' + t.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
 }

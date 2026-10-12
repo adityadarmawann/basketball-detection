@@ -36,7 +36,7 @@ from db.mongo import connect_mongo, close_mongo
 from db.redis_client import get_redis  # noqa: F401 — used by routes/upload.py
 
 # Import routes
-from api.routes import upload, stats, events, roster, match, sponsors
+from api.routes import upload, stats, events, roster, match, sponsors, history
 
 # Lifespan context manager
 @asynccontextmanager
@@ -80,6 +80,7 @@ app.include_router(events.router,   prefix="/api", tags=["Events"])
 app.include_router(roster.router,   prefix="/api", tags=["Roster"])
 app.include_router(match.router,    prefix="/api", tags=["Match"])
 app.include_router(sponsors.router, prefix="/api", tags=["Sponsors"])
+app.include_router(history.router,  prefix="/api", tags=["History"])
 
 # Serve uploaded player photos and sponsor logos as static files
 _uploads_dir = Path(__file__).parent / "uploads"

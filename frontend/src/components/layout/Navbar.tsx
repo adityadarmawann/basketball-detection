@@ -1,7 +1,8 @@
 import { Link, useNavigate, useLocation } from 'react-router-dom'
-import { LogOut, User, PlusCircle } from 'lucide-react'
+import { LogOut, PlusCircle } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useMatchStore } from '../../store/matchStore'
+import RiwayatAnalisis from './RiwayatAnalisis'
 
 export default function Navbar() {
   const navigate  = useNavigate()
@@ -83,15 +84,10 @@ export default function Navbar() {
             )}
             {isLoggedIn ? (
               <>
-                {/* User badge */}
-                <div className="hidden sm:flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-3 py-1.5">
-                  <div className="w-6 h-6 bg-primary rounded-full flex items-center justify-center">
-                    <User size={13} className="text-white" />
-                  </div>
-                  <span className="text-sm font-medium text-text-primary max-w-[120px] truncate">
-                    {user?.name}
-                  </span>
-                </div>
+                {/* Lencana pengguna, sekaligus pintu RIWAYAT ANALISIS.
+                    Hasil analisis sudah bisa dibuka lagi lewat /view/{match_id}
+                    tanpa render ulang; yang selama ini tidak ada cuma daftarnya. */}
+                <RiwayatAnalisis namaUser={user?.name} />
                 <button
                   onClick={handleLogout}
                   className="flex items-center gap-1.5 px-3 py-2 text-sm text-text-secondary hover:text-danger hover:bg-red-50 rounded-lg transition-colors"

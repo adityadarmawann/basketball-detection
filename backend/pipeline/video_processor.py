@@ -2569,6 +2569,30 @@ class VideoProcessor:
             try:
                 final_stats = self._stats.get_live_stats()
 
+                # ── Ringkasan TAHAN BERSIH ke Mongo ─────────────────────────
+                # Statistik dan MPI selama ini hanya hidup di Redis (yang punya
+                # masa berlaku) dan di frames.json di disk. Begitu penyimpanan
+                # dibersihkan, angkanya HILANG PERMANEN padahal ukurannya kecil.
+                # Terbukti: dari 80 analisis lama, NOL yang berkasnya masih ada.
+                # Ringkasan ini yang membuat riwayat tetap bisa dibuka walau
+                # video dan frame-nya sudah dihapus untuk menghemat disk.
+                if self._mongo_db is not None:
+                    try:
+                        self._mongo_db["matches"].update_one(
+                            {"match_id": match_id},
+                            {"$set": {f"ringkasan.q{self._start_quarter}": {
+                                "skor":         final_stats.get("score"),
+                                "player_stats": final_stats.get("player_stats"),
+                                "team_stats":   final_stats.get("team_stats"),
+                                "disimpan_pada": time.time(),
+                            }}},
+                            upsert=True,
+                        )
+                        logger.info("Ringkasan kuarter %s disimpan ke Mongo",
+                                    self._start_quarter)
+                    except Exception as e:
+                        logger.warning("Menyimpan ringkasan ke Mongo gagal: %s", e)
+
                 # Write per-quarter key (7-day TTL) — survives subsequent uploads.
                 # This is the source of truth for "which quarters are done" and
                 # enables cross-quarter stat merging without losing Q1 when Q2 runs.

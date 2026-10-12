@@ -111,10 +111,15 @@ async def _run_pipeline(
     if _gpu is not None:
         boleh, pemegang = await _gpu.ambil(redis, match_id)
         if not boleh:
-            pesan = (f"GPU sedang dipakai {pemegang.get('sisi', 'sisi lain')} "
-                     f"(match {pemegang.get('match_id', '?')}, "
-                     f"{pemegang.get('lama_detik', 0):.0f} detik). "
-                     f"Produksi didahulukan. Coba lagi setelah selesai.")
+            pesan = (
+                f"GPU sedang dipakai untuk menganalisis match "
+                f"{pemegang.get('match_id', '?')} "
+                f"({pemegang.get('lama_detik', 0):.0f} detik berjalan). "
+                f"Kartu grafis 8 GB hanya muat satu analisis pada satu waktu, "
+                f"jadi permintaan ini ditolak supaya analisis yang sedang "
+                f"berjalan tidak mati kehabisan memori. "
+                f"Tunggu sampai selesai, lalu unggah lagi."
+            )
             logger.warning("Pemrosesan %s ditolak: %s", match_id, pesan)
             _ditolak[match_id] = {"pesan": pesan, "pemegang": pemegang,
                                   "waktu": _time.time()}
@@ -388,11 +393,7 @@ async def get_processing_progress(match_id: str):
     # BUKAN 404, supaya pengguna tahu sebabnya dan tidak mengira uploadnya hilang.
     tolak = _ditolak.get(match_id)
     if tolak is not None and _processors.get(match_id) is None:
-        raise HTTPException(status_code=409, detail={
-            "status": "ditolak_gpu",
-            "pesan": tolak["pesan"],
-            "pemegang": tolak.get("pemegang", {}),
-        })
+        raise HTTPException(status_code=409, detail=tolak["pesan"])
 
     processor = _processors.get(match_id)
     if processor is None:

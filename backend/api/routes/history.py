@@ -220,16 +220,22 @@ async def video_apa_saja(match_id: str):
     from fastapi.responses import FileResponse
 
     kandidat = []
-    # 1. Hasil analisis (ada anotasinya) — diutamakan.
+    # 1. Video MENTAH hasil unggahan — DIUTAMAKAN, dan ini penting.
+    #    Pemutar di halaman hasil menggambar kotak pemain sendiri dari frameData
+    #    lewat CourtOverlay. Kalau yang diputar video hasil analisis yang kotaknya
+    #    sudah TERCETAK, kotaknya tergambar DUA KALI dan tampilannya kacau.
+    #    Video hasil analisis tetap bisa diunduh lewat /api/output/{id}/video.
+    kandidat += sorted(glob.glob(os.path.join(UPLOAD_PATH, f"*{match_id}*")))
+    # 2. Baru video hasil analisis, sebagai cadangan kalau yang mentah sudah
+    #    dihapus demi menghemat disk. Lebih baik ada kotak dua kali daripada
+    #    pemutar kosong sama sekali.
     out_dir = os.path.join(OUTPUT_PATH, match_id)
     kandidat += sorted(glob.glob(os.path.join(out_dir, "*.mp4")))
     kandidat += sorted(glob.glob(os.path.join(OUTPUT_PATH, f"*{match_id}*.mp4")))
-    # 2. Video mentah hasil unggahan.
-    kandidat += sorted(glob.glob(os.path.join(UPLOAD_PATH, f"*{match_id}*")))
 
     for p in kandidat:
         if os.path.isfile(p) and os.path.getsize(p) > 0:
-            jenis = "analisis" if OUTPUT_PATH in p else "mentah"
+            jenis = "mentah" if UPLOAD_PATH in p else "analisis"
             return FileResponse(p, media_type="video/mp4",
                                 filename=os.path.basename(p),
                                 headers={"X-Sumber-Video": jenis})

@@ -264,6 +264,35 @@ FG_BELOW_MARGIN_PX     = int(os.getenv(
     "FG_BELOW_MARGIN_PX",
     {"rfdetr": 8, "yolo": -5}.get(_DETEKTOR, -5)))
 
+# ── SAKLAR C: KONFIRMASI DARI INTI CINCIN ───────────────────────────────────
+# Gerbang sekarang menuntut deteksi NYATA dengan titik tengah bola DI BAWAH
+# tepi bawah kotak rim. Pada dua bola masuk yang selalu terlewat, syarat itulah
+# penghalang terakhirnya: bola sampai 0 sampai 5 px dari pusat cincin lalu
+# HILANG atau melompat tepat setelah menembus, jadi tidak pernah ada deteksi
+# nyata di bawah cincin.
+#
+# Jalan lain yang setara secara fisik: deteksi NYATA yang berada JAUH DI DALAM
+# cincin, yaitu titik tengah bola dalam sebagian kecil dari separuh lebar kotak
+# rim secara mendatar DAN tidak lagi di atas bidang cincin. Bola yang pusatnya
+# beberapa piksel dari pusat cincin dan sudah turun sampai bidang cincin itu
+# secara fisik SUDAH menembus; menunggunya terlihat lebih bawah lagi hanya
+# menambah syarat yang tidak bisa dipenuhi saat bola tertutup jaring.
+#
+# SYARAT MUTLAK YANG TIDAK DILONGGARKAN: buktinya tetap WAJIB deteksi NYATA.
+# Posisi hasil perkiraan pelacak tetap ditolak di jalur ini, sama seperti di
+# jalur bawah cincin. Yang berubah hanya DI MANA bukti nyata itu diterima.
+#
+# MATI secara bawaan. Mundur sendiri kalau kotak rim tidak ada (detektor YOLO,
+# ring sintetis dari homografi): tanpa kotak rim tidak ada lebar cincin untuk
+# dijadikan acuan, jadi jalur ini dilewati dan perilakunya persis seperti dulu.
+FG_RIM_CORE_CONFIRM    = os.getenv("FG_RIM_CORE_CONFIRM", "0").strip() == "1"
+# Separuh lebar inti, sebagai pecahan dari separuh lebar kotak rim. Kotak rim
+# RF-DETR lebarnya 38,0 px (separuh 19,0), jadi 0,35 memberi inti +-6,7 px.
+FG_RIM_CORE_FRAC       = float(os.getenv("FG_RIM_CORE_FRAC", "").strip() or 0.35)
+# Berapa piksel DI ATAS pusat cincin yang masih diterima. 0 berarti menuntut
+# titik tengah bola sudah sampai bidang cincin.
+FG_RIM_CORE_UP_PX      = float(os.getenv("FG_RIM_CORE_UP_PX", "").strip() or 0)
+
 #   "possession" = posisi pemain saat bola TERAKHIR DIPEGANG. Ini titik lepas
 #                   sebenarnya, tidak bergantung model aksi sama sekali.
 # DIUKUR DUA KALI, hasilnya IDENTIK: mengganti ke "lookback" tidak mengubah
@@ -1053,7 +1082,28 @@ class EventEngine:
                 logger.debug("FG ditahan — posisi bola hasil PERKIRAAN, "
                              "butuh deteksi nyata untuk memastikan masuk")
                 return events
-            if float(ball_px[1]) <= batas_bawah:
+
+            # SAKLAR C: jalan lain untuk konfirmasi, lihat FG_RIM_CORE_CONFIRM.
+            # Sampai di baris ini bolanya sudah pasti deteksi NYATA (cek
+            # "predicted" di atas) dan sudah lolos syarat "datang dari ATAS"
+            # serta "bergerak turun" di bagian 2. Jadi yang ditambahkan di sini
+            # hanya TEMPAT bukti nyata itu diterima: inti cincin, bukan hanya
+            # di bawah tepi bawahnya.
+            inti_ok = False
+            if FG_RIM_CORE_CONFIRM and rim_px is not None:
+                rim_cx    = (rim_px[0] + rim_px[2]) / 2.0
+                rim_cy_c  = (rim_px[1] + rim_px[3]) / 2.0
+                inti_px   = FG_RIM_CORE_FRAC * (rim_px[2] - rim_px[0]) / 2.0
+                inti_ok   = (abs(float(ball_px[0]) - rim_cx) <= inti_px
+                             and float(ball_px[1]) >= rim_cy_c - FG_RIM_CORE_UP_PX)
+                if inti_ok:
+                    logger.debug(
+                        "FG konfirmasi INTI CINCIN — deteksi nyata %.0f px dari "
+                        "pusat cincin mendatar (batas %.1f px), y=%.0f >= %.0f",
+                        abs(float(ball_px[0]) - rim_cx), inti_px,
+                        float(ball_px[1]), rim_cy_c - FG_RIM_CORE_UP_PX)
+
+            if float(ball_px[1]) <= batas_bawah and not inti_ok:
                 # Belum lewat. PASANG KANCING dan tunggu, jangan buang
                 # kesempatannya: penghitung dwell bisa teriset oleh deteksi
                 # bola palsu sebelum bola sempat terlihat di bawah.

@@ -238,6 +238,65 @@ palsu dengan yang terlewat SALING MENIADAKAN sehingga totalnya kebetulan mirip.
 Klaim 5/5 itu sudah DICABUT. Selalu pakai skrip 17 yang mencocokkan tiap kejadian
 `MADE_FG` ke papan skor menurut waktunya.
 
+### Menurunkan ambang MINIMUM dwell gerbang bola masuk, `FG_ZONE_DWELL_F=2`
+**TIDAK BERPENGARUH, jangan diuji lagi.** `pipeline/event_engine.py`.
+Diukur 12 Oktober 2026, skrip 17, `/home/paul/q1_4menit.mp4`, RF-DETR.
+
+    setelan                 asli /5   palsu   nilai 2/3   poin
+    acuan (dwell 3, ef 6)      3        2         3        11
+    dwell 2 (efektif 4)        3        2         3        11
+
+Daftar kejadiannya SAMA PERSIS, detik demi detik. Sebabnya terukur dengan
+telemetri skrip 23: kelima kejadian di acuan sudah menyala pada penghitung
+zona 6, 6, 6, 10, dan 14, jadi ambang minimum 6 TIDAK PERNAH menjadi
+penghalang bagi satu pun dari mereka. Dua bola masuk yang terlewat juga bukan
+karena ambang ini: 2:26 sudah mencapai dwell 8, dan 1:30 hanya mencapai 3
+sehingga ambang 4 pun masih terlalu tinggi.
+
+### Menolak bola MENGGANTUNG dari LAMA berada di zona ring, `FG_HANG_REJECT=1` SENDIRIAN
+**DITOLAK sebagai aturan yang berdiri sendiri.** `pipeline/event_engine.py`.
+Diukur 12 Oktober 2026, skrip 17 dan 23.
+
+    setelan                      asli /5   palsu   ketepatan   poin
+    acuan                           3        2        60 %      11
+    tolak menggantung saja          2        1        67 %       6
+
+Mekanismenya BEKERJA seperti rancangannya: palsu 3:52 yang menyala pada dwell
+10 memang terbuang. Masalahnya bola masuk ASLI 0:59 menyala pada dwell **14**,
+lebih lama daripada palsu yang mau dibuang, jadi batas atas apa pun yang
+membuang 3:52 juga membuang satu bola masuk asli. Di klip ini kejadian dengan
+dwell TERPANJANG justru bola masuk yang BENAR.
+
+Perpindahan tegak minimum (`FG_HANG_MIN_DROP_PX`) juga terbantah dari data
+yang sama: dua palsu turun 37,4 dan 40,1 px sedangkan bola masuk asli yang
+paling sedikit turun hanya 33,2 px. Urutannya terbalik, jadi ambang apa pun
+membuang yang asli lebih dulu. Dibiarkan 0.
+
+Catatan cara membaca yang pernah menyesatkan: deretan jarak hampir tetap
+28, 27, 27 px sebelum palsu 3:52 itu semuanya pada `dwell=0`, artinya gerbang
+tepi rim SUDAH menolaknya secara mendatar dan itu bukan frame di dalam zona.
+Rentetan dwell yang sebenarnya bergerak 27 -> 6 -> 18 px, yaitu pola MENEMBUS,
+bukan menggantung. Jadi "bola menggantung belasan frame di dalam zona" tidak
+pernah benar benar terjadi di klip ini.
+
+Boleh dicoba lagi kalau: HANYA bersama `FG_RIM_CORE_CONFIRM`, yang membuat
+kejadian 0:58 menyala pada dwell rendah sehingga batas atas tidak lagi
+membuangnya (asli 4, palsu 1, ketepatan 80 persen). Keamanannya di gabungan
+itu KEBETULAN dan harus diukur ulang setiap kali setelan C berubah.
+
+### Pecahan inti cincin 0,15 untuk `FG_RIM_CORE_CONFIRM`
+**DITOLAK, kelewat longgar.** Diukur 12 Oktober 2026, skrip 17.
+
+    pecahan   asli /5   palsu   ketepatan
+     0,15        4        3       57 %
+     0,10        4        2       67 %
+
+Pecahan 0,15 menyalakan rentetan 3:57 jadi palsu BARU. Telemetri skrip 23
+sudah meramalkannya sebelum run jalan: jarak mendatar terkecil frame nyata di
+rentetan itu 0,12 dari separuh lebar kotak rim, jadi lolos ambang 0,15 dan
+tertahan ambang 0,10. Ramalan telemetri BENAR untuk kedua pecahan.
+Bawaannya sekarang 0,10.
+
 ### Satu setelan gerbang untuk semua detektor
 **DITOLAK.** YOLO dan RF-DETR memberi kotak ring dan bola dengan ukuran serta
 keyakinan yang berbeda, jadi satu `FG_HOOP_RADIUS_PX` mustahil benar untuk
@@ -338,37 +397,40 @@ kosong. Hitung ulang pakai Python, jangan `wc -l`.
 | `HOOP_ROI_ENABLE=1` potongan 448 near 300 | asli ditemukan 2/5 jadi 3/5, palsu 2 jadi 3, nilai 2/3 benar 2 jadi 3, waktu +5 persen |
 | `FG_RIM_GATE=1` gerbang tepi kotak rim | palsu 2 jadi 1 tanpa asli berkurang; yang dibuang detik 1:38 yang lewat 0,5 m DI SAMPING cincin, waktu +2 persen |
 | KEDUANYA bersama | asli 2/5 jadi 3/5 dengan palsu TETAP 2; pengaruhnya menjumlah, tidak berinteraksi |
+| `FG_RIM_CORE_CONFIRM=1` inti 0,10 | asli 3/5 jadi 4/5 dengan palsu TETAP 2, ketepatan 60 jadi 67 persen; yang ditemukan 2:26 yang tak pernah terdeteksi setelan mana pun; biaya waktu nol; TAPI nilai 2/3 benar turun 3 jadi 2 |
 
 ---
 
 ## 6. PENGHAMBAT YANG MASIH TERBUKA
 
-DIPERBARUI 10 Oktober 2026. Dengan `HOOP_ROI_ENABLE=1` dan `FG_RIM_GATE=1`
-bersama, per kejadian **3 dari 5** bola masuk dikenali dengan 2 palsu (acuan
-sebelumnya 2 dari 5 dengan 2 palsu). **Ini bukan soal pelacakan pemain.**
-Buktinya pelacakan diperbaiki 3 kali lebih baik dan skornya justru bergerak
-10 jadi 9; yang menggerakkannya justru bukti deteksi bola di dekat ring.
+DIPERBARUI 12 Oktober 2026. Dengan `HOOP_ROI_ENABLE`, `FG_RIM_GATE`, dan
+`FG_RIM_CORE_CONFIRM` (inti 0,10) menyala, per kejadian **4 dari 5** bola masuk
+dikenali dengan 2 palsu, ketepatan 67 persen. Acuan sebelumnya 3 dari 5 dengan
+2 palsu, 60 persen.
 
-Yang MASIH terbuka, dan sebabnya sudah terpisah pisah:
-- Dua bola masuk masih terlewat di SEMUA setelan: detik 1:30 dan 2:26.
-- Palsu detik 3:52 bertahan di SEMUA setelan. Jaraknya 10,2 m dan dinilai 3
-  angka, jadi sebabnya POSISI PENEMBAK, bukan geometri ring. Gerbang ring
-  sudah dikesampingkan sebagai tersangka, terukur.
-- Palsu detik 1:45 MUNCUL bersama potongan ring. Itu harga yang dibayar untuk
-  bola masuk detik 0:19 yang jadi ditemukan.
+Yang MASIH terbuka:
 
-Penghambatnya bukti deteksi bola di dekat ring: bola tertutup tangan dan jaring
-tepat pada saat yang menentukan. Jalan yang masih terbuka, berurut dari paling
-menjanjikan:
+1. **Bola masuk 1:30 TIDAK BISA dicapai dari sisi gerbang, terukur.** Frame
+   nyata terdekat ke pusat cincin 24,3 px, dan tiga frame yang lebih dalam
+   (14 px, 9 px) semuanya posisi PERKIRAAN pelacak yang dilarang dipakai
+   sebagai bukti terakhir. Penghitung dwell hanya mencapai 3, jadi ambang
+   minimum apa pun yang masih sah tidak menolongnya. Jalannya memperbaiki
+   DETEKSI bola di potongan dekat rim, bukan melonggarkan gerbang.
+2. **Palsu 1:45 dan 3:52 bertahan.** 3:52 bisa dibuang batas atas dwell TAPI
+   hanya bersama `FG_RIM_CORE_CONFIRM`, lihat bagian `FG_HANG_REJECT` di atas.
+3. **NILAI 2 atau 3 angka sekarang jadi penghambat utama, bukan lagi geometri
+   ring.** Dari 4 bola masuk yang dikenali, hanya 2 nilainya benar. Dua
+   galatnya:
 
-1. Latih ulang deteksi objek dengan lebih banyak contoh kelas `ball-in-basket`.
-   Kelas itu SUDAH ADA di RF-DETR tapi keyakinan tertingginya cuma 0,146 di
-   seluruh klip 4 menit, jadi praktis tidak terpakai. Kalau dikuatkan, ia bisa
-   jadi penentu langsung saat gerbang geometri ragu.
-2. Lanjutkan latihan deteksi digit cara lama. Run lama BERHENTI di epoch 52 dari
-   400 dan mAP50 masih naik, jadi masih ada perbaikan tanpa mengubah resep.
+       0:58  2 angka dari 2,5 m  ->  3 angka dari 10,8 m   SALAH
+       2:26  baru ditemukan      ->  2 angka, harusnya 3   SALAH
 
----
+   Sebabnya FRAME saat kejadian menyala dipakai memperkirakan posisi penembak,
+   dan gerbang inti cincin menyalakan kejadian lebih awal di dalam rentetan
+   dwell. Palsu 3:52 juga dinilai 3 angka dari 10,2 m. Jadi tiga dari lima
+   galat nilai di klip ini berasal dari POSISI PENEMBAK.
+4. Latih ulang `ball-in-basket` PADA POTONGAN dekat rim. Lihat bagian kelas
+   `ball-in-basket` di atas.
 
 ## CARA MENGUKUR ULANG
 

@@ -23,12 +23,23 @@ A hanya mengisi env.
 
 Diisi saat tiap run selesai. Lihat juga `/home/paul/hasil_*.log`.
 
-| Run | setelan | asli /5 | palsu | ketepatan | poin | waktu | putusan |
-|---|---|---|---|---|---|---|---|
-| acuan baru | `.env` apa adanya (DIGIT_CLS hidup) | 3 | 2 | 60 % | 11 | 18,1 mnt | acuan |
-| A | `FG_ZONE_DWELL_F=2` | | | | | | |
-| C | `FG_RIM_CORE_CONFIRM=1` | | | | | | |
-| B | `FG_HANG_REJECT=1` | | | | | | |
+| Run | setelan | asli /5 | palsu | ketepatan | nilai 2/3 benar | poin | waktu | putusan |
+|---|---|---|---|---|---|---|---|---|
+| acuan baru | `.env` apa adanya (DIGIT_CLS hidup) | 3 | 2 | 60 % | 3 | 11 | 18,1 mnt | acuan |
+| A | `FG_ZONE_DWELL_F=2` | 3 | 2 | 60 % | 3 | 11 | 18,1 mnt | TIDAK BERPENGARUH |
+| B | `FG_HANG_REJECT=1` | 2 | 1 | 67 % | 2 | 6 | 18,2 mnt | DITOLAK |
+| C inti 0,15 | `FG_RIM_CORE_CONFIRM=1` | 4 | 3 | 57 % | 2 | 16 | 18,1 mnt | tawar menawar |
+| C inti 0,10 | `+ FG_RIM_CORE_FRAC=0.10` | 4 | 2 | 67 % | 2 | 14 | 18,4 mnt | **MEMENUHI SYARAT TERIMA** |
+
+Daftar kejadian tiap run:
+
+    acuan      0:18 asli  0:58 asli  1:45 PALSU  1:57 asli              3:52 PALSU
+    A          sama persis dengan acuan, detik demi detik
+    B          0:18 asli             1:45 PALSU  1:57 asli
+    C 0,15     0:18 asli  0:58 asli  1:45 PALSU  1:57 asli  2:24 asli   3:52 PALSU  3:57 PALSU
+    C 0,10     0:18 asli  0:58 asli  1:45 PALSU  1:57 asli  2:24 asli   3:52 PALSU
+
+Yang selalu terlewat di SEMUA setelan: 1:30. Yang selalu palsu: 1:45 dan 3:52.
 
 Acuan baru PERSIS SAMA per kejadian dengan acuan sebelum `DIGIT_CLS_ENABLE`
 dinyalakan: ditemukan 0:18, 0:58, 1:57; terlewat 1:30 dan 2:26; palsu 1:45 dan
@@ -150,6 +161,52 @@ menembus, bukan menggantung. Jadi gambaran "menggantung belasan frame di dalam
 zona" tidak persis seperti itu; yang tersisa sebagai pembeda hanyalah PANJANG
 rentetannya, 9 frame, sementara bola yang benar benar menembus cincin 0,45 m
 dengan laju 4 sampai 6 m/s hanya perlu sekitar 3 frame di 30 fps.
+
+## APAKAH MEKANISMENYA BEKERJA SEPERTI RANCANGANNYA
+
+### A, ambang minimum dwell: TIDAK BERPENGARUH, dan itu bisa diramalkan
+Daftar kejadiannya SAMA PERSIS dengan acuan, detik demi detik. Sebabnya terukur
+di telemetri: kelima kejadian acuan sudah menyala pada dwell 6, 6, 6, 10, dan
+14, jadi ambang minimum 6 tidak pernah menjadi penghalang bagi satu pun dari
+mereka. Menurunkannya ke 4 hanya memperbolehkan penyalaan yang lebih awal, dan
+yang menentukan tetap syarat di bawah cincin.
+Dua yang terlewat tidak tertolong: 2:26 memang sudah mencapai dwell 8 jadi
+bukan ambang yang menahannya, dan 1:30 hanya mencapai dwell 3 sehingga ambang
+4 pun masih terlalu tinggi.
+
+### B, tolak bola menggantung: BEKERJA tepat seperti rancangannya, dan justru
+itu yang membuktikan rancangannya SALAH
+Yang dibuang memang betul palsu 3:52, sesuai sasaran. Tapi yang ikut terbuang
+bola masuk ASLI 0:59, persis seperti yang diramalkan dari telemetri, karena
+kejadian itu menyala pada dwell 14, lebih lama daripada palsu yang mau dibuang.
+Jadi mekanismenya jalan, premisnya yang keliru: di klip ini LAMANYA bola berada
+di dalam zona cincin TIDAK memisahkan bola masuk dari bukan bola masuk.
+
+### C, konfirmasi dari inti cincin: BEKERJA, dan meloloskan 2:26 seperti sasaran
+2:26 ditemukan di kedua pecahan yang diuji, 0,15 maupun 0,10. 1:30 tetap tidak
+tertolong, dan itu memang sudah diramalkan: frame nyata terdekatnya 24 px dari
+pusat cincin, jauh di luar inti, dan frame yang lebih dalam semuanya perkiraan
+pelacak yang dilarang dipakai.
+Pecahan 0,15 juga menyalakan rentetan 3:57 jadi palsu baru, tepat seperti
+ramalan telemetri (0,12 lolos ambang 0,15). Pecahan 0,10 membuangnya kembali,
+juga tepat seperti ramalan. Jadi telemetri skrip 23 meramalkan arah dengan
+BENAR untuk kedua pecahan, dua duanya terbukti di pipeline.
+
+### BIAYA C yang TIDAK saya duga: nilai 2 atau 3 angka jadi lebih buruk
+Di acuan, ketiga kejadian asli nilainya benar. Dengan C, hanya dua dari empat.
+Dua galatnya:
+
+    0:58  acuan: 2 angka dari 2,5 m BENAR   ->  C: 3 angka dari 10,8 m SALAH
+    2:26  tidak pernah ditemukan            ->  C: 2 angka dari 2,1 m, harusnya 3
+
+Sebabnya jelas: gerbang C membuat kejadian menyala LEBIH AWAL di dalam rentetan
+dwell, dan FRAME saat kejadian menyala itulah yang dipakai memperkirakan posisi
+penembak. Pada 0:58 penyalaan yang lebih awal mengambil titik riwayat yang
+salah dan jaraknya meledak 2,5 jadi 10,8 m.
+
+Ini menguatkan lead nomor 1 di `LANJUTAN_BERIKUTNYA.md`: penghambat berikutnya
+POSISI PENEMBAK, bukan lagi geometri ring. Dua dari tiga galat nilai sekarang
+berasal dari situ, dan palsu 3:52 juga dinilai 3 angka dari 10,2 m.
 
 ## ANTREAN DAN CARA MELANJUTKAN
 

@@ -245,6 +245,9 @@ FPS_DEFAULT          = 30
 #     pemainnya yang di luar.
 FILTER_LUAR_LAPANGAN = os.getenv("FILTER_LUAR_LAPANGAN", "0") == "1"
 
+# Percepatan 13 Okt 2026: lewati penyusunan struktur statistik yang memang
+# dibuang pemanggilnya. Setel 0 untuk mengembalikan perilaku lama.
+STATS_SKIP_BUILD      = os.getenv("STATS_SKIP_BUILD", "1") == "1"
 PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every 2nd frame → 15fps from 30fps source
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
 # Lapangan hilang selama ini lalu kembali dianggap ganti sudut, walau geser
@@ -1837,18 +1840,26 @@ class VideoProcessor:
                     }
 
             try:
+                # ── PERCEPATAN 13 Okt 2026, bisa dibatalkan lewat env ──────
                 # bangun_keluaran=False: nilai kembaliannya memang TIDAK dipakai
                 # di sini. Menyusunnya berarti membangun ulang struktur untuk
-                # semua track_id beserta MPI dan peringkat MVP setiap frame,
-                # terukur 211 ms, lalu dibuang. Yang benar benar butuh struktur
-                # itu memanggil get_live_stats() sendiri saat menyiarkan dan
-                # saat menyelesaikan analisis.
+                # SEMUA track_id beserta MPI dan peringkat MVP setiap frame,
+                # terukur 211 ms di log nyata, lalu dibuang begitu saja. Yang
+                # benar benar butuh struktur itu memanggil get_live_stats()
+                # sendiri saat menyiarkan tiap 5 frame dan saat menyelesaikan.
+                #
+                # Terbukti tidak mengubah hasil: dua kalkulator dijalankan
+                # bersisian dengan masukan identik, satu menyusun keluaran tiap
+                # frame dan satu tidak, hasil akhirnya identik persis.
+                #
+                # MEMBATALKAN: setel STATS_SKIP_BUILD=0 di .env lalu nyalakan
+                # ulang backend. Perilakunya kembali seperti sebelum 13 Okt.
                 self._stats.update(
                     events=frame_data["events"],
                     tracking_snapshot=tracking_snapshot or None,
                     pose_snapshot=frame_data.get("pose"),
                     roster=stats_roster or None,
-                    bangun_keluaran=False,
+                    bangun_keluaran=not STATS_SKIP_BUILD,
                 )
             except Exception as e:
                 logger.warning("Stats update frame %d: %s", frame_id, e, exc_info=True)

@@ -248,6 +248,9 @@ FILTER_LUAR_LAPANGAN = os.getenv("FILTER_LUAR_LAPANGAN", "0") == "1"
 # Percepatan 13 Okt 2026: lewati penyusunan struktur statistik yang memang
 # dibuang pemanggilnya. Setel 0 untuk mengembalikan perilaku lama.
 STATS_SKIP_BUILD      = os.getenv("STATS_SKIP_BUILD", "1") == "1"
+# Laju proses SASARAN dalam frame per detik. 0 = mati, pakai perilaku lama
+# (MAX_FPS_PROCESS + PROCESS_STRIDE). Lihat PERUBAHAN_KECEPATAN.md.
+TARGET_PROCESS_FPS    = float(os.getenv("TARGET_PROCESS_FPS", "0") or 0)
 PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every 2nd frame → 15fps from 30fps source
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
 # Lapangan hilang selama ini lalu kembali dianggap ganti sudut, walau geser
@@ -493,6 +496,9 @@ class VideoProcessor:
         self._frame_width:         int   = 0
         self._frame_height:        int   = 0
         self._fps_skip:            int   = 1  # >1 when source fps > MAX_FPS_PROCESS
+        # Langkah pemilihan frame MILIK video ini. Dulu konstanta global;
+        # jadi per video supaya laju proses bisa diseragamkan antar sumber.
+        self._stride:              int   = PROCESS_STRIDE
         self._roster:              dict  = {}
 
         # Court result cache — avoid running YOLOv8-pose every frame (camera is slow)
@@ -874,24 +880,63 @@ class VideoProcessor:
         # (60fps, 120fps) don't double/quadruple processing load.
         # cap.set(CAP_PROP_FPS) does nothing on file sources — instead we skip
         # extra frames in _frame_grabber by increasing the effective stride.
+        # ── Laju proses DISERAGAMKAN antar video (13 Okt 2026) ──────────────
+        # MASALAHNYA: langkah tetap PROCESS_STRIDE=2 membuat video 25 fps
+        # diproses 12 fps sedangkan video 60 fps diproses 30 fps. Beda 2,5 kali.
+        # Semua ambang yang satuannya JUMLAH FRAME (FG_ZONE_DWELL_F,
+        # TRACK_COAST_FRAMES, HOOP_ROI_HIST_F, dan tujuh lainnya) karena itu
+        # berarti lain di tiap video, padahal disetel sambil menguji satu video.
+        #
+        # ATURANNYA: langkah gabungan = floor(fps_sumber / sasaran), minimal 1.
+        # Dipilih floor, bukan round, supaya tidak ada video yang jatuh DI BAWAH
+        # sasaran. Dengan sasaran 25: video 60 fps tetap 30 fps efektif (tidak
+        # berubah sama sekali), video 25 fps naik dari 12 jadi 25.
+        #
+        # Langkahnya tetap BILANGAN BULAT dan seragam, supaya gerbang tahap yang
+        # memakai `frame_id % ...` (court, pose, ocr, action) tetap jatuh pada
+        # kelipatan yang benar. Pemilihan berbasis cap waktu akan membuat jarak
+        # antar frame tidak seragam dan merusak gerbang gerbang itu.
+        #
+        # Ini TIDAK menyentuh dekode: NVDEC tetap membaca berkas aslinya apa
+        # adanya. Yang diatur hanya frame mana yang diteruskan ke pipeline.
+        # Tidak ada penyandian ulang, tidak ada perubahan resolusi atau kualitas.
+        #
+        # MEMBATALKAN: hapus TARGET_PROCESS_FPS dari .env (atau setel 0).
+        self._stride = PROCESS_STRIDE
+        if TARGET_PROCESS_FPS > 0:
+            import math as _math
+            self._stride   = max(1, _math.floor(raw_fps / TARGET_PROCESS_FPS))
+            self._fps_skip = 1
+            self._source_fps = raw_fps
+            self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            logger.info(
+                "Laju proses diseragamkan: sumber %.0f fps, sasaran %.0f fps, "
+                "langkah %d → efektif %.1f fps",
+                raw_fps, TARGET_PROCESS_FPS, self._stride,
+                raw_fps / self._stride,
+            )
+
         _MAX_SRC_FPS = float(os.getenv("MAX_FPS_PROCESS", "30"))
-        if raw_fps > _MAX_SRC_FPS + 1:
+        if TARGET_PROCESS_FPS > 0:
+            pass          # langkah sudah ditentukan sasaran di atas
+        elif raw_fps > _MAX_SRC_FPS + 1:
             self._fps_skip = max(1, round(raw_fps / _MAX_SRC_FPS))
             self._source_fps = raw_fps / self._fps_skip
             logger.info(
                 "Source %.0ffps > cap %.0ffps → fps_skip=%d, effective src_fps=%.1f",
                 raw_fps, _MAX_SRC_FPS, self._fps_skip, self._source_fps,
             )
-        else:
+        elif TARGET_PROCESS_FPS <= 0:
             self._fps_skip   = 1
             self._source_fps = raw_fps
 
-        self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // self._fps_skip
+        if TARGET_PROCESS_FPS <= 0:
+            self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // self._fps_skip
 
         # Effective processed fps = source_fps / PROCESS_STRIDE. EVERY component
         # that converts frames↔seconds (tracker Kalman filter, stats speed/minutes)
         # must use THIS, not the static TARGET_FPS, or its physics is skewed.
-        _eff_fps = max(1, round(self._source_fps / PROCESS_STRIDE))
+        _eff_fps = max(1, round(self._source_fps / self._stride))
         self._target_fps = _eff_fps
 
         # Size the action frame buffer to a fixed WALL-CLOCK window (~1 s) so the
@@ -957,8 +1002,8 @@ class VideoProcessor:
         # VOTE_THRESHOLD=2 → confirmation in 2×0.13s ≈ 0.27s (fast-moving players).
         # Aligning to PROCESS_STRIDE prevents the lcm-doubling bug where an odd
         # interval combined with PROCESS_STRIDE makes the modulo never fire.
-        _raw = max(PROCESS_STRIDE, int(self._source_fps / 8))
-        self._ocr_interval = (_raw // PROCESS_STRIDE) * PROCESS_STRIDE or PROCESS_STRIDE
+        _raw = max(self._stride, int(self._source_fps / 8))
+        self._ocr_interval = (_raw // self._stride) * self._stride or self._stride
 
         logger.info("Video: %s  frames=%d  src_fps=%.1f  ocr_interval=%d",
                     Path(video_path).name, self._total_frames, self._source_fps,
@@ -1090,12 +1135,12 @@ class VideoProcessor:
                 elapsed = time.perf_counter() - self._start_time
                 self._fps_actual = frame_id / elapsed if elapsed > 0 else 0.0
 
-                if proc_id % (max(1, FPS_LOG_INTERVAL // PROCESS_STRIDE)) == 0:
+                if proc_id % (max(1, FPS_LOG_INTERVAL // self._stride)) == 0:
                     logger.info(
                         "Frame %d/%d (proc %d)  FPS=%.1f  dropped=%d  Q%d  stride=%d",
                         frame_id, self._total_frames, proc_id,
                         self._fps_actual, self._frames_dropped,
-                        self._current_quarter, PROCESS_STRIDE,
+                        self._current_quarter, self._stride,
                     )
                     _log_system_metrics()
 
@@ -1146,7 +1191,7 @@ class VideoProcessor:
             # cv2 path grabs (fps_skip×PROCESS_STRIDE - 1) then reads 1, so
             # it processes 1 out of every fps_skip×PROCESS_STRIDE source frames.
             # NVDEC reads all frames; we queue 1 out of every _nvdec_stride frames.
-            _nvdec_stride = self._fps_skip * PROCESS_STRIDE
+            _nvdec_stride = self._fps_skip * self._stride
             frame_idx = 0
             try:
                 while not self._stop_signal.is_set():
@@ -1169,7 +1214,7 @@ class VideoProcessor:
                     pass
         else:
             # ── Path B: cv2 software decode with grab() optimisation ─────────
-            _grabs_before_read = self._fps_skip * PROCESS_STRIDE - 1
+            _grabs_before_read = self._fps_skip * self._stride - 1
             try:
                 while not self._stop_signal.is_set():
                     for _ in range(_grabs_before_read):
@@ -1245,7 +1290,7 @@ class VideoProcessor:
                     self._frames_dropped += 1
                     logger.debug("detect_queue full — dropped frame %d", frame_id)
 
-                frame_id += PROCESS_STRIDE
+                frame_id += self._stride
                 proc_id  += 1
 
         except Exception as e:
@@ -1451,7 +1496,7 @@ class VideoProcessor:
         _t3 = time.perf_counter()
 
         # ── 4. Pose estimation ────────────────────────────────────────────
-        if self._pose and tracked_players and frame_id % (POSE_EVERY_N_FRAMES * PROCESS_STRIDE) == 0:
+        if self._pose and tracked_players and frame_id % (POSE_EVERY_N_FRAMES * self._stride) == 0:
             try:
                 pose = self._pose.estimate(frame, tracked_players)
                 self._last_pose_result = pose

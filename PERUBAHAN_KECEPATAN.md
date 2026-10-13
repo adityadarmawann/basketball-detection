@@ -72,6 +72,68 @@ terpengaruh, karena yang dilewati hanya penyusunan, bukan pencatatan.
 
 ---
 
+## 2. Laju proses diseragamkan antar video (13 Oktober 2026)
+
+**Masalahnya.** Langkah tetap `PROCESS_STRIDE=2` membuat tiap video diproses
+pada laju yang berbeda beda:
+
+| Video | fps sumber | Efektif SEBELUM |
+|---|---|---|
+| q1-UBAYA-UNESA.mp4 | 25 | **12 fps** |
+| UNESA-UBAYA-Q1-a.mp4 | 25 | **12 fps** |
+| Q1-UNESA-UBAYA-CUT-2-17.mp4 | 60 | 30 fps |
+| Quarter-1_UNESA-UBAYA.mp4 | 60 | 30 fps |
+
+Beda 2,5 kali. Sepuluh ambang yang satuannya JUMLAH FRAME karena itu berarti
+lain di tiap video. `FG_ZONE_DWELL_F=2` yang berarti 67 ms di video 60 fps,
+jadi 167 ms di video 25 fps, sehingga bola masuk yang asli bisa terlewat bukan
+karena modelnya, melainkan karena satuannya bergeser.
+
+**Yang diubah.** Langkah pemilihan frame jadi milik tiap video (`self._stride`,
+dulu konstanta global), dan ditentukan dari laju sasaran:
+
+```
+langkah = max(1, floor(fps_sumber / TARGET_PROCESS_FPS))
+```
+
+Dipilih `floor`, bukan `round`, supaya tidak ada video yang jatuh DI BAWAH
+sasaran. Hasilnya semua video mendarat di 25 sampai 30 fps efektif; sebarannya
+turun dari 2,5 kali jadi 1,2 kali.
+
+**Langkahnya tetap bilangan bulat dan seragam.** Itu disengaja. Enam tahap
+digerbangi `frame_id % ...` (court, pose, ocr, action, dan dua log), dan
+nilainya terjalin dengan langkah. Pemilihan berbasis cap waktu akan membuat
+jarak antar frame tidak seragam dan membuat gerbang gerbang itu meleset.
+
+**Ini TIDAK menyentuh dekode.** NVDEC tetap membaca berkas aslinya apa adanya.
+Yang diatur hanya frame mana yang diteruskan ke pipeline. Tidak ada penyandian
+ulang, tidak ada perubahan resolusi, tidak ada penurunan kualitas gambar.
+
+**Buktinya, diuji pada potongan 20 detik, pipeline penuh:**
+
+```
+video 25 fps  tanpa sasaran : langkah=2  eff_fps=12
+video 25 fps  sasaran 25    : langkah=1  eff_fps=25
+video 60 fps  sasaran 25    : langkah=2  eff_fps=30   (sama dengan produksi)
+```
+
+**Dampaknya.** Video 60 fps tidak berubah sama sekali, jadi materi demo aman.
+Video 25 fps memproses 2x lebih banyak frame: lebih lambat, tapi ambangnya
+akhirnya benar.
+
+**MEMBATALKAN.** Di `backend/.env`, setel `TARGET_PROCESS_FPS=0` atau hapus
+barisnya, lalu nyalakan ulang backend. Salinan `.env` sebelum perubahan ada di
+`backend/.env.bak-*`.
+
+**Catatan.** Saat sasaran aktif, `MAX_FPS_PROCESS` DILEWATI. Keduanya mengatur
+hal yang sama dengan cara berbeda, dan memakai keduanya sekaligus membingungkan.
+
+**Curigai ini kalau.** Bola masuk yang terdeteksi di video 25 fps berubah
+drastis. Itu memang diharapkan membaik, tapi kalau justru memburuk, ambang
+berbasis frame perlu disetel ulang untuk laju yang baru.
+
+---
+
 ## Yang DIPERIKSA lalu TIDAK diubah, beserta alasannya
 
 Supaya tidak ada yang mengulang pemeriksaan yang sama:

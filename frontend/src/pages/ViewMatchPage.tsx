@@ -4,6 +4,7 @@ import axios from 'axios'
 import { FrameBboxEntry, RosterPlayer, Sponsor } from '../types'
 import { useMatchStore } from '../store/matchStore'
 import { useMatchStats } from '../hooks/useMatchStats'
+import { tanamDariFrameTerakhir } from '../hooks/useWaktuVideoKeStore'
 import HasilPertandingan from '../components/match/HasilPertandingan'
 
 /**
@@ -82,10 +83,7 @@ export default function ViewMatchPage() {
         // Angka awal diambil dari frame TERAKHIR, supaya skor sudah benar
         // sebelum videonya diputar. Setelah diputar, hook waktu video yang
         // mengambil alih, sama seperti pada hasil analisis baru.
-        const last = frames[frames.length - 1]
-        if (last?.sc) store.setScore(last.sc[0], last.sc[1])
-        if (last?.q_sc) store.setQuarterScore(last.q_sc[0], last.q_sc[1])
-        if (last?.q != null) store.setQuarter(last.q)
+        tanamDariFrameTerakhir(frames)
       }
 
       if (rosterRes.status === 'fulfilled') {

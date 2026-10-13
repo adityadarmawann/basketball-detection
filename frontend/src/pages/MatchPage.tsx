@@ -9,7 +9,7 @@ import VideoUpload from '../components/video/VideoUpload'
 import VideoScanningStatus from '../components/video/VideoScanningStatus'
 import VideoPlayer from '../components/video/VideoPlayer'
 import HasilPertandingan from '../components/match/HasilPertandingan'
-import { useWaktuVideoKeStore } from '../hooks/useWaktuVideoKeStore'
+import { useWaktuVideoKeStore, tanamDariFrameTerakhir } from '../hooks/useWaktuVideoKeStore'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useMatchStats } from '../hooks/useMatchStats'
 import { FrameBboxEntry } from '../types'
@@ -238,14 +238,7 @@ export default function MatchPage() {
         setFrameData(frames)
         // Show final score from last analyzed frame — video playback will update
         // score as user scrubs/plays, but scoreboard starts at the correct final value.
-        const last = frames[frames.length - 1]
-        if (last?.sc) store.setScore(last.sc[0], last.sc[1])
-        // q_sc WAJIB ikut ditanam. TabsStatsLineup memakai quarterScoreA/B
-        // sebagai PTS kuarter yang sedang dilihat, jadi tanpa baris ini hasil
-        // segar menampilkan angka kuarter yang BERBEDA dari hasil yang sama
-        // ketika dibuka lagi dari riwayat, yang memang menanamnya.
-        if (last?.q_sc) store.setQuarterScore(last.q_sc[0], last.q_sc[1])
-        if (last?.q != null) store.setQuarter(last.q)
+        tanamDariFrameTerakhir(frames)
       }
     } catch {
       // Expected in dev mode or when backend is unavailable

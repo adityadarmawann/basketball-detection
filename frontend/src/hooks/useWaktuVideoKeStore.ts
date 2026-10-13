@@ -54,3 +54,30 @@ export function useWaktuVideoKeStore(frameData: FrameBboxEntry[]) {
     if (snap.q != null) setQuarter(snap.q)
   }, [frameData, setGameClock, setScore, setQuarterScore, setQuarter])
 }
+
+/**
+ * Menanam keadaan awal papan skor dari frame TERAKHIR.
+ *
+ * Dipanggil dua tempat: saat analisis baru selesai, dan saat hasil dibuka dari
+ * riwayat. Dulu keduanya menanam sendiri sendiri dan isinya BERBEDA: alur
+ * analisis tidak menanam `q_sc` sehingga tab kuarter menampilkan PTS nol,
+ * sedangkan jamnya menyisakan nilai terakhir dari WebSocket padahal riwayat
+ * menampilkan 12:00. Satu fungsi membuat keduanya mustahil berbeda.
+ *
+ * Papan skor sengaja menunjukkan keadaan AKHIR walau videonya belum diputar,
+ * supaya angkanya benar begitu halaman terbuka. Begitu video dijalankan,
+ * `useWaktuVideoKeStore` yang mengambil alih dan angkanya mengikuti posisi.
+ */
+export function tanamDariFrameTerakhir(frameData: FrameBboxEntry[]) {
+  const akhir = frameData[frameData.length - 1]
+  if (!akhir) return
+  const s = useMatchStore.getState()
+  if (akhir.sc) s.setScore(akhir.sc[0], akhir.sc[1])
+  if (akhir.q_sc) s.setQuarterScore(akhir.q_sc[0], akhir.q_sc[1])
+  if (akhir.q != null) s.setQuarter(akhir.q)
+  const detik = Math.max(0, Math.floor((akhir.ts ?? 0) / 1000))
+  s.setGameClock(
+    `${String(Math.floor(detik / 60)).padStart(2, '0')}:` +
+    `${String(detik % 60).padStart(2, '0')}`,
+  )
+}

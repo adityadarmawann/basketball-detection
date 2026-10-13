@@ -24,6 +24,7 @@ type Baris = {
   diproses: number | string | null
   kuarter: string[]
   skor: { team_a?: number; team_b?: number } | null
+  kejadian: number
   ada_ringkasan: boolean
   ada_berkas: boolean
   jumlah_berkas: number
@@ -189,6 +190,13 @@ export default function RiwayatAnalisis({ namaUser }: { namaUser?: string }) {
                     {b.kuarter.length > 0 && (
                       <span className="text-xs text-text-secondary">
                         {b.kuarter.join(' ')}
+                      </span>
+                    )}
+                    {/* Jumlah kejadian selalu bisa dipercaya lintas sisi, jadi
+                        inilah penanda paling jujur bahwa analisisnya berisi. */}
+                    {b.kejadian > 0 && (
+                      <span className="text-xs text-text-secondary">
+                        {b.kejadian} kejadian
                       </span>
                     )}
                   </div>

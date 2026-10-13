@@ -220,6 +220,31 @@ FPS_DEFAULT          = 30
 # Court keypoints: camera moves slowly → run every 30 processed frames
 # Action: SlowFast needs temporal clip, result is stable → run every 20 frames
 # OCR: jersey number is stable once confirmed → run every 30 frames
+# ── Saring orang DI LUAR LAPANGAN ───────────────────────────────────────────
+# MASALAH: RF-DETR jauh lebih peka daripada YOLO lama (terukur 8,33 lawan 5,58
+# orang per frame), jadi ia ikut menangkap orang di pinggir lapangan: penonton,
+# panitia, pelatih, dan orang yang berdiri di depan papan iklan. Mereka dapat
+# track_id, masuk statistik, dan menambah pecahan identitas.
+#
+# YANG SUDAH ADA TAPI TIDAK DIPAKAI: `court.pixel_to_court` SUDAH menolak titik
+# di luar batas -2 sampai +2 meter dari garis lapangan (lihat court.py), dan
+# mengembalikan None. Batas 2 meter itu kebetulan pas untuk pemain yang melempar
+# bola dari luar garis. Tapi hasilnya dibuang begitu saja: orangnya tetap
+# dihitung sebagai pemain.
+#
+# TERUKUR pada 18.035 frame nyata: 3.190 dari 121.063 deteksi (2,6 persen) ada
+# di luar lapangan, rata rata 0,2 orang per frame tapi sampai 10 orang sekaligus
+# saat kamera menyorot ke pinggir.
+#
+# DUA PENGAMAN, keduanya WAJIB:
+#  1. Hanya menyaring saat homografi HIDUP. Saat lapangan tidak terkalibrasi,
+#     SEMUA pemain bernilai None, dan menyaring saat itu akan membuang
+#     semuanya. Terukur: 446 dari 18.035 frame (2,5 persen) seperti itu.
+#  2. Hanya menyaring kalau MASIH ADA pemain yang berhasil dipetakan. Kalau
+#     tidak satu pun terpetakan, homografinya kemungkinan rusak, bukan
+#     pemainnya yang di luar.
+FILTER_LUAR_LAPANGAN = os.getenv("FILTER_LUAR_LAPANGAN", "0") == "1"
+
 PROCESS_STRIDE        = int(os.getenv("PROCESS_STRIDE",   "2"))   # 2=every 2nd frame → 15fps from 30fps source
 COURT_EVERY_N_FRAMES  = int(os.getenv("COURT_EVERY_N",    "5"))   # court keypoint YOLOv8-pose
 # Lapangan hilang selama ini lalu kembali dianggap ganti sudut, walau geser
@@ -1350,6 +1375,25 @@ class VideoProcessor:
                                     self._court.jarak_ekstrapolasi(player["court_pos"]))
                                 player["court_err_m"] = (
                                     self._court.perkiraan_galat_m(player["court_pos"]))
+                    # Buang orang di luar lapangan. Lihat catatan
+                    # FILTER_LUAR_LAPANGAN di atas berkas untuk sebab dan
+                    # kedua pengamannya.
+                    if FILTER_LUAR_LAPANGAN and tracked_players:
+                        di_dalam = [q for q in tracked_players
+                                    if q.get("court_pos") is not None]
+                        # Pengaman kedua: kalau TIDAK SATU PUN terpetakan,
+                        # homografinya yang bermasalah. Jangan buang siapa pun.
+                        if di_dalam and len(di_dalam) < len(tracked_players):
+                            dibuang = len(tracked_players) - len(di_dalam)
+                            self._n_luar_lapangan = getattr(
+                                self, "_n_luar_lapangan", 0) + dibuang
+                            tracked_players = di_dalam
+                            if self._n_luar_lapangan % 200 < dibuang:
+                                logger.info(
+                                    "Saring luar lapangan: %d orang dibuang "
+                                    "di frame ini, %d sejak mulai",
+                                    dibuang, self._n_luar_lapangan)
+
                     if ball_info:
                         bc = ball_info.get("center")
                         if bc:

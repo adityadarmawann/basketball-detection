@@ -105,6 +105,13 @@ async def daftar_riwayat(limit: int = Query(100, ge=1, le=500)):
             "diproses":      m.get("processed_at"),
             "kuarter":       sorted(ringkasan.keys()),
             "skor":          skor,
+            # Jumlah kejadian adalah satu satunya penanda isi yang BISA
+            # DIPERCAYA lintas sisi. Ringkasan hanya ditulis oleh dev, dan
+            # berkas dicari di folder milik sisi ini saja (uploads_dev lawan
+            # uploads), sehingga analisis yang dijalankan sisi LAIN akan
+            # terbaca seolah kosong padahal datanya ada. Kejadian disimpan di
+            # MongoDB yang dipakai bersama, jadi selalu terlihat.
+            "kejadian":      db.events.count_documents({"match_id": mid}),
             # Angka tetap bisa dilihat selama ringkasan ada, walau berkas hilang.
             "ada_ringkasan": bool(ringkasan),
             "ada_berkas":    bool(berkas),

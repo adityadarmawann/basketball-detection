@@ -1,18 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { ChevronLeft, LayoutDashboard, Download } from 'lucide-react'
+import { ChevronLeft, LayoutDashboard } from 'lucide-react'
 import axios from 'axios'
 import { useMatchStore } from '../store/matchStore'
 import FormSetupMatch from '../components/match/FormSetupMatch'
 import RosterManager from '../components/match/RosterManager'
 import SponsorSetup from '../components/match/SponsorSetup'
-import MatchHeader from '../components/match/MatchHeader'
 import VideoUpload from '../components/video/VideoUpload'
 import VideoScanningStatus from '../components/video/VideoScanningStatus'
 import VideoPlayer from '../components/video/VideoPlayer'
-import Scoreboard from '../components/dashboard/Scoreboard'
-import LiveEventFeed from '../components/dashboard/LiveEventFeed'
-import RewardBoxes from '../components/dashboard/RewardBoxes'
-import TabsStatsLineup from '../components/match/TabsStatsLineup'
+import HasilPertandingan from '../components/match/HasilPertandingan'
+import { useWaktuVideoKeStore } from '../hooks/useWaktuVideoKeStore'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useMatchStats } from '../hooks/useMatchStats'
 import { FrameBboxEntry } from '../types'
@@ -111,33 +108,10 @@ export default function MatchPage() {
   // const ss = String(Math.floor(remaining % 60)).padStart(2, '0')
   // store.setGameClock(`${mm}:${ss}`)
   //
-  const handleVideoTimeUpdate = useCallback((currentTime: number) => {
-    // Clock always follows video playback position (elapsed MM:SS).
-    // WS also calls setGameClock (FIBA countdown) but video fires more often —
-    // for pre-recorded video, elapsed time is more useful to the user.
-    const mm = String(Math.floor(currentTime / 60)).padStart(2, '0')
-    const ss = String(Math.floor(currentTime % 60)).padStart(2, '0')
-    store.setGameClock(`${mm}:${ss}`)
-
-    // Score & quarter: binary search frameData whenever available.
-    // WS score/quarter are blocked via isVideoMode when frameData is present,
-    // so video playback is the single source of truth. Pausing freezes score.
-    if (frameData.length > 0) {
-      const videoMs = currentTime * 1000
-      let lo = 0, hi = frameData.length - 1
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1
-        if (frameData[mid].ts < videoMs) lo = mid + 1
-        else hi = mid
-      }
-      const a = frameData[lo]
-      const b = lo > 0 ? frameData[lo - 1] : null
-      const snap = b && Math.abs(b.ts - videoMs) < Math.abs(a.ts - videoMs) ? b : a
-      if (snap.sc) store.setScore(snap.sc[0], snap.sc[1])
-      if (snap.q_sc) store.setQuarterScore(snap.q_sc[0], snap.q_sc[1])
-      if (snap.q != null) store.setQuarter(snap.q)
-    }
-  }, [store, frameData])
+  // Posisi video disalurkan ke store lewat hook yang DIPAKAI BERSAMA dengan
+  // halaman riwayat, supaya jam, skor, skor per kuarter, dan nomor kuarter
+  // dihitung dengan cara yang sama persis di kedua jalur.
+  const handleVideoTimeUpdate = useWaktuVideoKeStore(frameData)
 
   // Re-fetch frameData + uploadedQuarters when returning to live with no data.
   useEffect(() => {
@@ -377,187 +351,92 @@ export default function MatchPage() {
       )}
 
       {step === 'live' && (
-        <div className="space-y-6">
-          {/* Nav bar: back to video | quarter badges | lanjut/replace */}
-          <div className="flex items-center gap-3 flex-wrap">
-            {videoUrl && (
-              <button
-                onClick={goToVideo}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-surface border border-gray-200 text-text-secondary text-xs font-bold rounded-lg hover:border-primary hover:text-primary transition-smooth"
-              >
-                <ChevronLeft size={13} />
-                Video &amp; Analisis
-              </button>
-            )}
-
-            {/* Honest live-connection status (replaces the old silent mock fallback) */}
-            {store.isLive && store.wsStatus !== 'idle' && (
-              <span
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold border ${
-                  store.wsStatus === 'live'
-                    ? 'border-success/40 bg-success/10 text-success'
-                    : store.wsStatus === 'connecting'
-                      ? 'border-amber-300 bg-amber-50 text-amber-600'
-                      : 'border-danger/40 bg-danger/10 text-danger'
-                }`}
-              >
+        <HasilPertandingan
+          videoUrl={videoUrl}
+          frameData={frameData}
+          overlayLoading={overlayLoading}
+          onVideoError={(e) => {
+            // Blob URL died (page refresh) — fall back to server raw endpoint
+            if (store.matchId && (e.currentTarget.src || '').startsWith('blob:')) {
+              setVideoUrl(`${import.meta.env.VITE_API_URL}/api/upload/raw/${store.matchId}`)
+            }
+          }}
+          kendali={
+            <div className="flex items-center gap-3 flex-wrap">
+              {videoUrl && (
+                <button
+                  onClick={goToVideo}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-surface border border-gray-200 text-text-secondary text-xs font-bold rounded-lg hover:border-primary hover:text-primary transition-smooth"
+                >
+                  <ChevronLeft size={13} />
+                  Video &amp; Analisis
+                </button>
+              )}
+  
+              {/* Honest live-connection status (replaces the old silent mock fallback) */}
+              {store.isLive && store.wsStatus !== 'idle' && (
                 <span
-                  className={`w-1.5 h-1.5 rounded-full ${
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold border ${
                     store.wsStatus === 'live'
-                      ? 'bg-success animate-pulse'
+                      ? 'border-success/40 bg-success/10 text-success'
                       : store.wsStatus === 'connecting'
-                        ? 'bg-amber-500 animate-pulse'
-                        : 'bg-danger'
+                        ? 'border-amber-300 bg-amber-50 text-amber-600'
+                        : 'border-danger/40 bg-danger/10 text-danger'
                   }`}
-                />
-                {store.wsStatus === 'live'
-                  ? 'Live'
-                  : store.wsStatus === 'connecting'
-                    ? 'Menyambung…'
-                    : 'Terputus'}
-              </span>
-            )}
-
-            {/* Quarter status badges — shows which quarters already have data */}
-            <div className="flex items-center gap-1.5 ml-auto">
-              {([1, 2, 3, 4] as const).map((q) => {
-                const done = uploadedQuarters.includes(q)
-                const active = store.isLive && store.quarter === q
-                return (
-                  <button
-                    key={q}
-                    title={done ? `Q${q} selesai — klik untuk replace` : `Upload Q${q}`}
-                    onClick={() => { setNextUploadQuarter(q); setStep('upload') }}
-                    className={`px-2.5 py-1 rounded text-xs font-bold border transition-all ${
-                      active
-                        ? 'border-amber-400 bg-amber-50 text-amber-600 animate-pulse'
-                        : done
-                          ? 'border-success bg-success/10 text-success hover:bg-danger/10 hover:border-danger hover:text-danger'
-                          : 'border-gray-200 text-text-secondary hover:border-primary hover:text-primary'
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      store.wsStatus === 'live'
+                        ? 'bg-success animate-pulse'
+                        : store.wsStatus === 'connecting'
+                          ? 'bg-amber-500 animate-pulse'
+                          : 'bg-danger'
                     }`}
-                  >
-                    {done ? `Q${q} ✓` : active ? `Q${q} •` : `Q${q}`}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
-          {/* Analysis progress — visible while AI processes uploaded video, disappears on complete */}
-          {store.isLive && videoUrl && store.matchId && (
-            <VideoScanningStatus
-              matchId={store.matchId}
-              onComplete={handleAnalysisComplete}
-              onReupload={() => setStep('upload')}
-            />
-          )}
-
-          {/* 1. Video Original — full width */}
-          {videoUrl && (
-            <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
-              <div className="px-4 py-2 border-b border-gray-100">
-                <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
-                  Video Original
+                  />
+                  {store.wsStatus === 'live'
+                    ? 'Live'
+                    : store.wsStatus === 'connecting'
+                      ? 'Menyambung…'
+                      : 'Terputus'}
                 </span>
+              )}
+  
+              {/* Quarter status badges — shows which quarters already have data */}
+              <div className="flex items-center gap-1.5 ml-auto">
+                {([1, 2, 3, 4] as const).map((q) => {
+                  const done = uploadedQuarters.includes(q)
+                  const active = store.isLive && store.quarter === q
+                  return (
+                    <button
+                      key={q}
+                      title={done ? `Q${q} selesai — klik untuk replace` : `Upload Q${q}`}
+                      onClick={() => { setNextUploadQuarter(q); setStep('upload') }}
+                      className={`px-2.5 py-1 rounded text-xs font-bold border transition-all ${
+                        active
+                          ? 'border-amber-400 bg-amber-50 text-amber-600 animate-pulse'
+                          : done
+                            ? 'border-success bg-success/10 text-success hover:bg-danger/10 hover:border-danger hover:text-danger'
+                            : 'border-gray-200 text-text-secondary hover:border-primary hover:text-primary'
+                      }`}
+                    >
+                      {done ? `Q${q} ✓` : active ? `Q${q} •` : `Q${q}`}
+                    </button>
+                  )
+                })}
               </div>
-              <video
-                src={videoUrl}
-                controls
-                muted
-                className="w-full object-contain bg-black"
-                style={{ maxHeight: '480px' }}
-                onError={(e) => {
-                  // Blob URL died (page refresh) — fall back to server raw endpoint
-                  if (store.matchId && (e.currentTarget.src || '').startsWith('blob:')) {
-                    setVideoUrl(`${import.meta.env.VITE_API_URL}/api/upload/raw/${store.matchId}`)
-                  }
-                }}
-              />
             </div>
-          )}
-
-          {/* 2. Box Scoring & Waktu */}
-          <MatchHeader
-            teamA={store.teamA.name}
-            teamB={store.teamB.name}
-            scoreA={store.teamA.score}
-            scoreB={store.teamB.score}
-            quarter={store.quarter}
-            gameClock={store.gameClock}
-            shotClock={store.shotClock}
-            isLive={store.isLive}
-          />
-
-          {/* 3. Video Analisis AI — full width */}
-          {videoUrl && (
-            <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
-              <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between">
-                <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
-                  Video Analisis AI
-                </span>
-                {overlayLoading && (
-                  <span className="flex items-center gap-1.5 text-xs text-amber-500 font-medium">
-                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                    Menyiapkan overlay...
-                  </span>
-                )}
-              </div>
-              <VideoPlayer
-                videoUrl={videoUrl}
-                showCourtMap={true}
-                frameData={frameData}
-                onTimeUpdate={handleVideoTimeUpdate}
+          }
+          statusAnalisis={
+            /* Kemajuan analisis, tampil hanya selagi video diproses. */
+            store.isLive && videoUrl && store.matchId ? (
+              <VideoScanningStatus
                 matchId={store.matchId}
+                onComplete={handleAnalysisComplete}
+                onReupload={() => setStep('upload')}
               />
-            </div>
-          )}
-
-          {/* Scoreboard */}
-          <Scoreboard
-            teamA={store.teamA.name}
-            teamB={store.teamB.name}
-            scoreA={store.teamA.score}
-            scoreB={store.teamB.score}
-            quarter={store.quarter}
-            gameClock={store.gameClock}
-            shotClock={store.shotClock}
-            isLive={store.isLive}
-          />
-
-          {/* Reward & Appreciate — di atas statistik */}
-          <RewardBoxes
-            stats={store.stats}
-            mpi={store.mpi}
-            roster={store.roster}
-            sponsors={store.sponsors}
-          />
-
-          {/* Stats Tabs + download CSV */}
-          <div>
-            <div className="flex items-center justify-end mb-2">
-              <a
-                href={`${import.meta.env.VITE_API_URL}/api/output/${store.matchId}/stats`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold border border-gray-300 rounded-lg hover:border-primary hover:text-primary transition-smooth"
-                title="Download stats CSV (server-generated)"
-              >
-                <Download size={13} />
-                Export CSV
-              </a>
-            </div>
-            <TabsStatsLineup />
-          </div>
-
-          {/* Event Log — live real-time atau riwayat dari MongoDB setelah selesai */}
-          <LiveEventFeed
-            events={store.events}
-            teamA={store.teamA.name}
-            teamB={store.teamB.name}
-            matchId={store.matchId}
-            isLive={store.isLive}
-          />
-        </div>
+            ) : null
+          }
+        />
       )}
     </div>
   )

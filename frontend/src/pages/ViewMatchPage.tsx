@@ -1,101 +1,125 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import axios from 'axios'
-import { FrameBboxEntry } from '../types'
-import VideoPlayer from '../components/video/VideoPlayer'
-import MatchHeader from '../components/match/MatchHeader'
-import Scoreboard from '../components/dashboard/Scoreboard'
-import { normalizePlayerStats, RawPlayerStats } from '../hooks/useMatchStats'
+import { FrameBboxEntry, RosterPlayer, Sponsor } from '../types'
+import { useMatchStore } from '../store/matchStore'
+import { useMatchStats } from '../hooks/useMatchStats'
+import HasilPertandingan from '../components/match/HasilPertandingan'
 
-interface MatchMeta {
-  team_a: string
-  team_b: string
-  category?: string
-  round?: string
-}
-
-interface StatsData {
-  score: { team_a: number; team_b: number }
-  quarter: number
-  game_clock: string
-  // Backend nests the box score under total_stats — same shape useMatchStats reads.
-  player_stats: Record<string, RawPlayerStats>
-}
-
+/**
+ * Membuka kembali hasil analisis dari riwayat, di `/view/{match_id}`.
+ *
+ * MASALAH YANG DISELESAIKAN
+ * Halaman ini dulu menyusun tampilannya SENDIRI dengan state lokal. Akibatnya
+ * hasil yang sama tampil berbeda dari hasil setelah analisis baru selesai:
+ * tidak ada kotak sponsor, tidak ada tab STATS dan LINEUPS, tidak ada riwayat
+ * event, dan tab LINEUP serta MPI di navigasi atas KOSONG. Tab tersebut halaman
+ * terpisah yang membaca store, sedangkan store tidak pernah diisi.
+ *
+ * CARA KERJA SEKARANG
+ * Halaman ini tidak menggambar apa apa sendiri. Tugasnya hanya MENGISI store
+ * dari basis data, lalu merender `HasilPertandingan`, komponen yang sama persis
+ * dengan yang dipakai setelah analisis baru selesai. Karena sumber datanya satu
+ * dan komponennya satu, tampilan dan angkanya mustahil berbeda.
+ *
+ * Statistik dan MPI tidak diambil di sini: `useMatchStats(matchId)` yang
+ * mengisinya ke store, hook yang sama yang dipakai alur analisis.
+ */
 export default function ViewMatchPage() {
   const { matchId } = useParams<{ matchId: string }>()
-  const [meta, setMeta]           = useState<MatchMeta | null>(null)
+  const store = useMatchStore()
   const [frameData, setFrameData] = useState<FrameBboxEntry[]>([])
-  const [scoreA, setScoreA]       = useState(0)
-  const [scoreB, setScoreB]       = useState(0)
-  const [quarter, setQuarter]     = useState(1)
-  const [gameClock, setGameClock] = useState('00:00')
-  const [stats, setStats]         = useState<StatsData | null>(null)
   const [loading, setLoading]     = useState(true)
   const [notFound, setNotFound]   = useState(false)
 
   const API = import.meta.env.VITE_API_URL
 
+  // Mengisi store memakai matchId dari alamat. Begitu ini jalan, tab LINEUP dan
+  // MPI ikut terisi karena keduanya membaca store.matchId.
+  useMatchStats(matchId || '')
+
   useEffect(() => {
     if (!matchId) return
+    let batal = false
     setLoading(true)
     setNotFound(false)
 
     Promise.allSettled([
-      axios.get<MatchMeta>(`${API}/api/match/${matchId}`),
-      axios.get<FrameBboxEntry[]>(`${API}/api/upload/frames/${matchId}`),
-      axios.get<StatsData>(`${API}/api/stats/live?match_id=${matchId}`),
-    ]).then(([metaRes, framesRes, statsRes]) => {
-      if (metaRes.status === 'fulfilled') {
-        setMeta(metaRes.value.data)
-      } else {
+      axios.get(`${API}/api/match/${matchId}`),
+      axios.get(`${API}/api/upload/frames/${matchId}`),
+      axios.get(`${API}/api/roster/${matchId}`),
+      axios.get(`${API}/api/sponsors/${matchId}`),
+    ]).then(([metaRes, framesRes, rosterRes, sponsorRes]) => {
+      if (batal) return
+
+      if (metaRes.status !== 'fulfilled') {
         setNotFound(true)
+        setLoading(false)
+        return
       }
 
-      if (framesRes.status === 'fulfilled' && Array.isArray(framesRes.value.data) && framesRes.value.data.length > 0) {
-        const frames = framesRes.value.data
+      const meta = metaRes.value.data
+      // Hasil yang dibuka dari riwayat TIDAK sedang berjalan. Penanda ini yang
+      // membuat LiveEventFeed mengambil event dari MongoDB, bukan menunggu
+      // WebSocket yang tidak akan pernah datang.
+      store.setIsLive(false)
+      store.setMatchId(matchId)
+      store.setTeamA(meta.team_a || 'Team A')
+      store.setTeamB(meta.team_b || 'Team B')
+      if (meta.region) store.setRegion(meta.region)
+      // Tahap "live" adalah tahap HASIL di MatchPage. Disamakan supaya menekan
+      // menu PERTANDINGAN tidak melempar pengguna kembali ke formulir setup.
+      store.setMatchStep('live')
+
+      if (framesRes.status === 'fulfilled' && Array.isArray(framesRes.value.data)
+          && framesRes.value.data.length > 0) {
+        const frames: FrameBboxEntry[] = framesRes.value.data
         setFrameData(frames)
-        // Seed score/quarter from the last frame
+        // Angka awal diambil dari frame TERAKHIR, supaya skor sudah benar
+        // sebelum videonya diputar. Setelah diputar, hook waktu video yang
+        // mengambil alih, sama seperti pada hasil analisis baru.
         const last = frames[frames.length - 1]
-        if (last?.sc) { setScoreA(last.sc[0]); setScoreB(last.sc[1]) }
-        if (last?.q != null) setQuarter(last.q)
+        if (last?.sc) store.setScore(last.sc[0], last.sc[1])
+        if (last?.q_sc) store.setQuarterScore(last.q_sc[0], last.q_sc[1])
+        if (last?.q != null) store.setQuarter(last.q)
       }
 
-      if (statsRes.status === 'fulfilled') {
-        setStats(statsRes.value.data)
+      if (rosterRes.status === 'fulfilled') {
+        const mentah = rosterRes.value.data?.players ?? []
+        const roster: RosterPlayer[] = mentah.map((p: {
+          jersey_number: number; name: string; team: string; photo_url?: string
+        }) => ({
+          jerseyNumber: p.jersey_number,
+          name: p.name,
+          team: (p.team === 'A' || p.team === 'B' ? p.team : 'A') as 'A' | 'B',
+          photoUrl: p.photo_url ? `${API}${p.photo_url}` : undefined,
+        }))
+        if (roster.length > 0) store.setRoster(roster)
+      }
+
+      if (sponsorRes.status === 'fulfilled') {
+        const mentah = sponsorRes.value.data?.sponsors ?? []
+        // Pemetaan nama bidang mengikuti SponsorSetup supaya logonya muncul:
+        // backend mengirim jalur relatif, tampilan butuh URL lengkap.
+        const sponsors: Sponsor[] = mentah.map((s: {
+          id: string; category: string; company_name: string; logo_url: string | null
+        }) => ({
+          id: s.id,
+          category: s.category as Sponsor['category'],
+          companyName: s.company_name,
+          logoUrl: s.logo_url ? `${API}${s.logo_url}` : null,
+        }))
+        if (sponsors.length > 0) store.setSponsors(sponsors)
       }
 
       setLoading(false)
     })
+
+    return () => { batal = true }
+    // Sengaja hanya bergantung pada matchId: store berubah tiap set dan akan
+    // membuat pengambilan berulang tanpa henti kalau ikut didaftarkan.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [matchId, API])
-
-  const handleVideoTimeUpdate = useCallback((currentTime: number) => {
-    const mm = String(Math.floor(currentTime / 60)).padStart(2, '0')
-    const ss = String(Math.floor(currentTime % 60)).padStart(2, '0')
-    setGameClock(`${mm}:${ss}`)
-
-    if (frameData.length === 0) return
-    const videoMs = currentTime * 1000
-    let lo = 0, hi = frameData.length - 1
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (frameData[mid].ts < videoMs) lo = mid + 1
-      else hi = mid
-    }
-    const a = frameData[lo]
-    const b = lo > 0 ? frameData[lo - 1] : null
-    const snap = b && Math.abs(b.ts - videoMs) < Math.abs(a.ts - videoMs) ? b : a
-    if (snap.sc) { setScoreA(snap.sc[0]); setScoreB(snap.sc[1]) }
-    if (snap.q != null) setQuarter(snap.q)
-  }, [frameData])
-
-  const teamA    = meta?.team_a || 'Team A'
-  const teamB    = meta?.team_b || 'Team B'
-  // Endpoint ini mencari video ANALISIS lebih dulu lalu video mentah, dan
-  // hanya 404 kalau benar benar tidak ada satu pun. Sebelumnya halaman ini
-  // hanya meminta video mentah, jadi pemutarnya kosong begitu berkas itu
-  // dibersihkan demi menghemat disk.
-  const videoUrl = `${API}/api/video/${matchId}`
 
   if (loading) {
     return (
@@ -115,124 +139,23 @@ export default function ViewMatchPage() {
           <p className="text-danger font-bold text-lg mb-2">Match tidak ditemukan</p>
           <p className="text-text-secondary text-sm">Match ID: {matchId}</p>
           <p className="text-text-secondary text-xs mt-2">
-            Pastikan match sudah selesai dianalisis di perangkat utama.
+            Riwayatnya mungkin sudah dihapus seluruhnya.
           </p>
         </div>
       </div>
     )
   }
 
-  const playerRows = stats
-    ? Object.entries(stats.player_stats)
-        .map(([k, v]) => normalizePlayerStats(Number(k) || 0, v))
-        .sort((a, b) => b.eff - a.eff)
-    : []
-
   return (
     <div className="container mx-auto py-8 px-4">
-      {/* Hero */}
-      <div className="bg-gradient-to-r from-primary-dark to-primary rounded-lg p-8 mb-8 text-white">
-        <h1 className="font-display text-4xl font-bold">Hasil Analisis</h1>
-        <p className="text-white/70 mt-2">
-          {[meta?.round, meta?.category].filter(Boolean).join(' · ')}
-          {matchId && <span className="text-white/40 ml-2 text-sm">#{matchId}</span>}
-        </p>
-      </div>
-
-      <div className="space-y-6">
-        {/* Score header */}
-        <MatchHeader
-          teamA={teamA}
-          teamB={teamB}
-          scoreA={scoreA}
-          scoreB={scoreB}
-          quarter={quarter}
-          gameClock={gameClock}
-          shotClock={24}
-          isLive={false}
-        />
-
-        {/* Video + bbox overlay */}
-        <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
-          <div className="px-4 py-2 border-b border-gray-100">
-            <span className="text-xs font-bold text-text-secondary uppercase tracking-wide">
-              Video Analisis AI
-            </span>
-          </div>
-          <VideoPlayer
-            videoUrl={videoUrl}
-            showCourtMap={true}
-            frameData={frameData}
-            onTimeUpdate={handleVideoTimeUpdate}
-          />
-        </div>
-
-        {/* Scoreboard */}
-        <Scoreboard
-          teamA={teamA}
-          teamB={teamB}
-          scoreA={scoreA}
-          scoreB={scoreB}
-          quarter={quarter}
-          gameClock={gameClock}
-          shotClock={24}
-          isLive={false}
-        />
-
-        {/* Player stats table */}
-        {playerRows.length > 0 && (
-          <div className="bg-surface rounded-lg shadow-sm overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-100">
-              <span className="text-sm font-bold">Statistik Pemain</span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-gray-50 text-text-secondary text-xs uppercase tracking-wide">
-                    <th className="px-4 py-2 text-left">Pemain</th>
-                    <th className="px-4 py-2 text-center">Tim</th>
-                    <th className="px-4 py-2 text-center">PTS</th>
-                    <th className="px-4 py-2 text-center">REB</th>
-                    <th className="px-4 py-2 text-center">AST</th>
-                    <th className="px-4 py-2 text-center">STL</th>
-                    <th className="px-4 py-2 text-center">BLK</th>
-                    <th className="px-4 py-2 text-center">EFF</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {playerRows.map((p, idx) => (
-                    <tr key={idx} className="border-t border-gray-100 hover:bg-gray-50">
-                      <td className="px-4 py-2 font-medium">
-                        {p.jerseyNumber != null ? `#${p.jerseyNumber}` : `Track ${p.playerId || idx}`}
-                        {p.name ? ` · ${p.name}` : ''}
-                      </td>
-                      <td className="px-4 py-2 text-center">
-                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                          p.team === 'A'
-                            ? 'bg-primary/10 text-primary'
-                            : p.team === 'B'
-                              ? 'bg-amber-50 text-amber-600'
-                              : 'bg-gray-100 text-gray-500'
-                        }`}>
-                          {p.team === 'A' ? teamA : p.team === 'B' ? teamB : (p.team || '—')}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2 text-center font-bold">{p.pts}</td>
-                      <td className="px-4 py-2 text-center">{p.totReb}</td>
-                      <td className="px-4 py-2 text-center">{p.ast}</td>
-                      <td className="px-4 py-2 text-center">{p.stl}</td>
-                      <td className="px-4 py-2 text-center">{p.blocks}</td>
-                      <td className="px-4 py-2 text-center font-bold text-primary">
-                        {p.eff.toFixed(1)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-      </div>
+      {/* Endpoint ini mengutamakan video MENTAH lalu video hasil analisis, dan
+          hanya 404 kalau benar benar tidak ada satu pun. Video mentah yang
+          diutamakan karena pemutarnya menggambar kotak pemain sendiri; memakai
+          video hasil analisis membuat kotaknya tergambar dua kali. */}
+      <HasilPertandingan
+        videoUrl={`${API}/api/video/${matchId}`}
+        frameData={frameData}
+      />
     </div>
   )
 }

@@ -7,9 +7,26 @@ Kartu grafis mesin ini 8 GB, sedangkan satu kali jalan pipeline memakai sekitar
 jalan karena kehabisan memori. Itu sudah terjadi nyata saat dua pengukuran
 dijalankan bersamaan.
 
-Saat DIAM kedua backend hampir tidak memakai apa apa (terukur: GPU 42 MiB,
-RAM sekitar 700 MB masing masing), karena model baru dimuat ketika ada video
-diproses. Jadi yang perlu dikunci hanya PEMROSESAN, bukan hidupnya server.
+DIAM ADA DUA MACAM, dan ini pernah salah ditulis di sini.
+
+1. Diam SEBELUM analisis pertama: benar benar murah. Terukur GPU nol MiB dan
+   RAM sekitar 730 MB, karena model baru dimuat ketika ada video diproses.
+2. Diam SESUDAH pernah menganalisis: TIDAK murah. Terukur backend produksi
+   masih memegang 6150 MiB, 14 jam setelah analisis terakhirnya selesai.
+   `_release_gpu_cache` memanggil `torch.cuda.empty_cache()` yang hanya
+   mengembalikan kolam cadangan milik torch; log mencatat "reserved 1.94 ->
+   0.45 GB". Sisanya konteks CUDA beserta mesin TensorRT dan ONNX, yang berada
+   di luar pengurus memori torch dan tidak bisa dilepas tanpa mematikan
+   prosesnya. Komentarnya sendiri menulis "NOT a full unload".
+
+AKIBATNYA, DAN INI PENTING
+Pengunci ini menjaga PEMROSESAN, bukan tempat yang dipakai saat diam. Kartunya
+8 GB. Kalau satu sisi pernah menganalisis lalu diam sambil memegang 6 GB, sisi
+lain bisa kehabisan memori saat mulai menganalisis WALAU kuncinya bebas.
+
+Maka: kalau mau menjalankan analisis di satu sisi sementara sisi lain pernah
+menganalisis, NYALAKAN ULANG sisi yang menganggur itu lebih dulu supaya
+memorinya benar benar kembali.
 
 ATURAN
 1. Hanya SATU sisi yang boleh memproses video pada satu waktu.

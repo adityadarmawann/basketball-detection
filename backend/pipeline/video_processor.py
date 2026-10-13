@@ -271,6 +271,46 @@ def _norm_action(action_str: str) -> str:
     return _ACTION_WS_MAP.get((action_str or "stand").lower(), (action_str or "STAND").upper())
 
 
+def _kunci_teks(obj):
+    """Ubah SEMUA nama bidang jadi teks, sedalam apa pun susunannya.
+
+    KENAPA PERLU
+    MongoDB hanya menerima nama bidang berupa teks. `player_stats` dikunci
+    track_id yang bertipe angka, dan `quarter_stats` di dalamnya dikunci nomor
+    kuarter yang juga angka. Satu nama bidang angka saja membuat SELURUH
+    dokumen ditolak, bukan cuma bagian itu.
+
+    Cacat ini nyata dan sempat lolos: ringkasan kuarter gagal ditulis dengan
+    pesan "documents must have only string keys, key was 0", sehingga riwayat
+    analisis tampil tanpa skor sama sekali. Uji ulang saya saat itu LOLOS palsu
+    karena datanya diambil dari Redis dalam bentuk JSON, dan JSON sudah
+    mengubah kunci angka menjadi teks lebih dulu. Jadi menguji lewat Redis
+    tidak pernah bisa menangkap cacat ini; harus dari objek Python aslinya.
+    """
+    if isinstance(obj, dict):
+        return {str(k): _kunci_teks(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_kunci_teks(v) for v in obj]
+    return obj
+
+
+def _skor_dari_team_stats(team_stats) -> dict | None:
+    """Skor pertandingan, diambil dari tempatnya yang sebenarnya.
+
+    `get_live_stats()` TIDAK punya bidang "score"; angka poin tersimpan di
+    team_stats["A"]["pts"] dan team_stats["B"]["pts"]. Membaca "score" yang
+    tidak ada selalu menghasilkan kosong, dan itulah yang membuat riwayat
+    menampilkan skor hampa walau statistiknya lengkap.
+    """
+    if not isinstance(team_stats, dict):
+        return None
+    a = (team_stats.get("A") or {}).get("pts")
+    b = (team_stats.get("B") or {}).get("pts")
+    if a is None and b is None:
+        return None
+    return {"team_a": int(a or 0), "team_b": int(b or 0)}
+
+
 def _open_video_cap(video_path: str):
     """
     Open a video file preferring NVDEC hardware decode when available.
@@ -2622,19 +2662,37 @@ class VideoProcessor:
                 # video dan frame-nya sudah dihapus untuk menghemat disk.
                 if self._mongo_db is not None:
                     try:
+                        # Nama bidang WAJIB dijadikan teks lebih dulu: track_id
+                        # dan nomor kuarter bertipe angka, dan satu saja sudah
+                        # membuat seluruh dokumen ditolak MongoDB.
+                        _ts = final_stats.get("team_stats")
+                        _ringkas = _kunci_teks({
+                            # Skor diambil dari team_stats, bukan dari bidang
+                            # "score" yang memang tidak pernah ada.
+                            "skor":          _skor_dari_team_stats(_ts),
+                            "player_stats":  final_stats.get("player_stats"),
+                            "team_stats":    _ts,
+                            "mvp_ranking":   final_stats.get("mvp_ranking"),
+                            "possession_pct": final_stats.get("possession_pct"),
+                            "disimpan_pada": time.time(),
+                        })
                         self._mongo_db["matches"].update_one(
                             {"match_id": match_id},
-                            {"$set": {f"ringkasan.q{self._start_quarter}": {
-                                "skor":         final_stats.get("score"),
-                                "player_stats": final_stats.get("player_stats"),
-                                "team_stats":   final_stats.get("team_stats"),
-                                "disimpan_pada": time.time(),
-                            }}},
+                            {"$set": {f"ringkasan.q{self._start_quarter}": _ringkas}},
                             upsert=True,
                         )
-                        logger.info("Ringkasan kuarter %s disimpan ke Mongo",
-                                    self._start_quarter)
+                        _skor = _ringkas.get("skor") or {}
+                        logger.info(
+                            "Ringkasan kuarter %s disimpan ke Mongo "
+                            "(%s baris pemain, skor %s-%s)",
+                            self._start_quarter,
+                            len(_ringkas.get("player_stats") or {}),
+                            _skor.get("team_a", "-"), _skor.get("team_b", "-"),
+                        )
                     except Exception as e:
+                        # Kegagalan di sini TIDAK boleh menggagalkan analisis,
+                        # tapi harus terlihat jelas di log: riwayat yang tampil
+                        # tanpa skor selalu berakar di baris ini.
                         logger.warning("Menyimpan ringkasan ke Mongo gagal: %s", e)
 
                 # Write per-quarter key (7-day TTL) — survives subsequent uploads.

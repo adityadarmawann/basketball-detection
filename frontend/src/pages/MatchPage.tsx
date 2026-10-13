@@ -240,6 +240,11 @@ export default function MatchPage() {
         // score as user scrubs/plays, but scoreboard starts at the correct final value.
         const last = frames[frames.length - 1]
         if (last?.sc) store.setScore(last.sc[0], last.sc[1])
+        // q_sc WAJIB ikut ditanam. TabsStatsLineup memakai quarterScoreA/B
+        // sebagai PTS kuarter yang sedang dilihat, jadi tanpa baris ini hasil
+        // segar menampilkan angka kuarter yang BERBEDA dari hasil yang sama
+        // ketika dibuka lagi dari riwayat, yang memang menanamnya.
+        if (last?.q_sc) store.setQuarterScore(last.q_sc[0], last.q_sc[1])
         if (last?.q != null) store.setQuarter(last.q)
       }
     } catch {

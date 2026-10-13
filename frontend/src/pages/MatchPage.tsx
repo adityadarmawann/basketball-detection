@@ -9,7 +9,8 @@ import VideoUpload from '../components/video/VideoUpload'
 import VideoScanningStatus from '../components/video/VideoScanningStatus'
 import VideoPlayer from '../components/video/VideoPlayer'
 import HasilPertandingan from '../components/match/HasilPertandingan'
-import { useWaktuVideoKeStore, tanamDariFrameTerakhir } from '../hooks/useWaktuVideoKeStore'
+import { useWaktuVideoKeStore } from '../hooks/useWaktuVideoKeStore'
+import { muatHasilKeStore } from '../hooks/muatHasil'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useMatchStats } from '../hooks/useMatchStats'
 import { FrameBboxEntry } from '../types'
@@ -225,26 +226,25 @@ export default function MatchPage() {
     disconnect()              // stop WS & mock — analysis is done, no more live frames
     setStep('live')
     setOverlayLoading(true)
-    const { matchId } = useMatchStore.getState()
+    const { matchId, videoUrl: videoUrlStore } = useMatchStore.getState()
     if (!matchId) { setOverlayLoading(false); return }
-    // videoUrl stays as-is (blob URL from upload — still valid in same session)
     try {
-      const [framesRes] = await Promise.allSettled([
-        axios.get<FrameBboxEntry[]>(`${import.meta.env.VITE_API_URL}/api/upload/frames/${matchId}`),
-        fetchUploadedQuarters(matchId),
-      ])
-      if (framesRes.status === 'fulfilled' && Array.isArray(framesRes.value.data) && framesRes.value.data.length > 0) {
-        const frames = framesRes.value.data
-        setFrameData(frames)
-        // Show final score from last analyzed frame — video playback will update
-        // score as user scrubs/plays, but scoreboard starts at the correct final value.
-        tanamDariFrameTerakhir(frames)
-      }
+      // Keadaan hasil diisi oleh pengisi yang SAMA dengan yang dipakai halaman
+      // riwayat. Dulu bagian ini mengambil frame dan menanam skor sendiri,
+      // sehingga hasil segar dan hasil dari riwayat terus menerus berbeda
+      // dalam hal hal kecil. Sekarang jalurnya cuma satu.
+      //
+      // Alamat blob dari unggahan diteruskan supaya video tidak diunduh ulang;
+      // isinya berkas yang sama dengan yang dilayani server.
+      const frames = await muatHasilKeStore(matchId, { videoUrlAda: videoUrlStore })
+      if (frames.length > 0) setFrameData(frames)
+      setVideoUrlLocal(useMatchStore.getState().videoUrl)
+      await fetchUploadedQuarters(matchId)
     } catch {
       // Expected in dev mode or when backend is unavailable
     }
     setOverlayLoading(false)
-  }, [fetchUploadedQuarters, disconnect, store])
+  }, [fetchUploadedQuarters, disconnect])
 
   const goToVideo = useCallback(() => {
     setStep('analyzing')

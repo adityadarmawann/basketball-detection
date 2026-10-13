@@ -441,7 +441,7 @@ Yang MASIH terbuka:
     DETECTOR_METHOD=rfdetr VIDEO=/path/klip.mp4 RENDER_OUTPUT_VIDEO=0 \
       python eksperimen/17_ukur_kejadian.py
 
-Empat jebakan pengukuran yang pernah menyesatkan:
+Lima jebakan pengukuran yang pernah menyesatkan:
 1. **Ukuran "lompatan dari lintasan" BERAT SEBELAH kalau tiap sumber dinilai
    terhadap tetangganya SENDIRI.** Sumber yang deteksinya jarang hanya menemukan
    tetangga di dalam rentetannya sendiri yang mulus, jadi lajunya terlihat
@@ -472,3 +472,21 @@ Empat jebakan pengukuran yang pernah menyesatkan:
 4. **`env VAR=... python ...` TIDAK memuat `.env`.** Akibatnya `ACTION_EVERY_N`
    dan `COURT_EVERY_N` ikut berbeda, dan angka antar percobaan jadi tak
    sebanding. Skrip 16 dan 17 sudah memuat `.env` lebih dulu.
+5. **Menguji muatan MongoDB dengan data yang diambil dari Redis selalu LOLOS
+   PALSU.** Terbukti 13 Oktober 2026. Ringkasan kuarter gagal ditulis dengan
+   pesan `documents must have only string keys, key was 0`, karena
+   `player_stats` dikunci `track_id` bertipe angka dan `quarter_stats` di
+   dalamnya dikunci nomor kuarter yang juga angka. Satu nama bidang angka saja
+   membuat SELURUH dokumen ditolak, bukan cuma bagian itu.
+   Uji ulang saya saat itu BERHASIL dan menyesatkan, karena datanya diambil
+   dari Redis yang isinya JSON, dan JSON sudah mengubah kunci angka jadi teks
+   lebih dulu. Jadi jalur ujinya bukan jalur yang dipakai pipeline.
+   **Cara yang benar: bangun objek Python aslinya dengan kunci angka, jangan
+   lewat JSON sama sekali.** Penolongnya ada di `pipeline/video_processor.py`:
+   `_kunci_teks()`.
+   Jebakan kedua di kejadian yang sama: **log yang digerepe salah berkas.**
+   `backend_dev.log` sudah mati sejak 18:06 sementara backend yang hidup
+   menulis ke `backend_dev_1811.log`, sehingga ketiadaan baris log sempat
+   dianggap bukti bahwa kodenya tidak jalan. Selalu pastikan dulu berkas log
+   mana yang sedang ditulis proses yang hidup, lewat `ls -l /proc/<pid>/fd`
+   atau waktu ubah berkasnya.

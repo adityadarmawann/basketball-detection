@@ -70,6 +70,10 @@ export default function ViewMatchPage() {
       // Tahap "live" adalah tahap HASIL di MatchPage. Disamakan supaya menekan
       // menu PERTANDINGAN tidak melempar pengguna kembali ke formulir setup.
       store.setMatchStep('live')
+      // videoUrl ikut disimpan di penyimpanan browser dan dipakai MatchPage
+      // sebagai nilai awal. Tanpa diperbarui di sini, menekan menu PERTANDINGAN
+      // setelah membuka riwayat akan memutar video match SEBELUMNYA.
+      store.setVideoUrl(`${API}/api/video/${matchId}`)
 
       if (framesRes.status === 'fulfilled' && Array.isArray(framesRes.value.data)
           && framesRes.value.data.length > 0) {

@@ -80,11 +80,35 @@ async def get_live_stats(match_id: str = Query(None)):
     except Exception as e:
         logger.warning("Redis read error for match %s: %s", match_id, e)
 
-    # ── 2. Redis per KUARTER ──────────────────────────────────────────────────
-    # Saat pemrosesan SELESAI, VideoProcessor menulis stats:{id}:q{n} (TTL 7
-    # hari), sedangkan kunci tanpa kuarter di atas hanya hidup selama proses
-    # berjalan. Tanpa langkah ini, halaman hasil selalu kosong begitu analisis
-    # selesai, dan itu gejala yang dilaporkan pengguna.
+    # ── 2. Mongo: ringkasan GABUNGAN, permanen ────────────────────────────────
+    # URUTAN INI PENTING dan pernah salah. Dulu Redis per kuarter didahulukan,
+    # padahal isinya statistik MENTAH satu baris per track_id, sedangkan yang
+    # dilihat pengguna adalah hasil penggabungan per nomor punggung dan tim.
+    # Bedanya terukur: 488 pemain lawan 1292 baris. Kunci gabungan di Redis
+    # hanya berlaku SATU hari, jadi tanpa urutan ini angka riwayat berubah
+    # sendiri sehari setelah analisis, tanpa ada yang menyentuh apa pun.
+    try:
+        db = get_db()
+        if db is not None:
+            m = db.matches.find_one({"match_id": match_id},
+                                    {"ringkasan.gabungan": 1})
+            gab = ((m or {}).get("ringkasan") or {}).get("gabungan")
+            if gab:
+                base = _default_response()
+                if gab.get("player_stats") is not None:
+                    base["player_stats"] = gab["player_stats"]
+                if gab.get("team_stats") is not None:
+                    base["team_stats"] = gab["team_stats"]
+                if gab.get("skor") is not None:
+                    base["score"] = gab["skor"]
+                base["sumber"] = "ringkasan_gabungan_mongo"
+                return base
+    except Exception as e:
+        logger.warning("Ringkasan gabungan Mongo gagal untuk %s: %s", match_id, e)
+
+    # ── 3. Redis per KUARTER, sebagai jalan terakhir yang masih berisi ────────
+    # Isinya MENTAH, jadi hanya dipakai kalau ringkasan gabungan memang tidak
+    # ada, misalnya analisis lama yang selesai sebelum ringkasan diperkenalkan.
     try:
         redis = await get_redis()
         if redis is not None:
@@ -96,31 +120,21 @@ async def get_live_stats(match_id: str = Query(None)):
             if gabung:
                 base = _default_response()
                 base.update(gabung)
+                base["sumber"] = "redis_kuarter_mentah"
                 return base
     except Exception as e:
         logger.warning("Redis per-kuarter gagal untuk %s: %s", match_id, e)
 
-    # ── 3. Mongo: ringkasan PERMANEN ──────────────────────────────────────────
-    # Sumber terakhir dan satu satunya yang tidak punya masa berlaku. Redis
-    # kedaluwarsa setelah 7 hari dan kosong setelah restart, sedangkan berkas
-    # di disk ikut terhapus saat penyimpanan dibersihkan. Ringkasan inilah yang
-    # membuat riwayat analisis tetap bisa dibuka berbulan bulan kemudian.
+    # ── 4. Mongo: ringkasan per kuarter, juga mentah ──────────────────────────
     try:
         db = get_db()
         if db is not None:
             m = db.matches.find_one({"match_id": match_id}, {"ringkasan": 1})
             ring = (m or {}).get("ringkasan") or {}
-            # "gabungan" WAJIB didahulukan. Itulah blob yang sama persis dengan
-            # yang dipakai Redis dan yang dilihat pengguna tepat setelah
-            # analisis: barisnya sudah disatukan per nomor punggung dan tim.
-            # Ringkasan per kuarter masih MENTAH, satu baris per track_id, dan
-            # memakainya di sini membuat angka riwayat berbeda dari angka yang
-            # baru saja dilihat. Bedanya terukur: 488 pemain lawan 1292 baris.
-            terpilih = ring.get("gabungan")
-            if not terpilih:
-                for q in sorted(k for k in ring.keys() if k != "gabungan"):
-                    if ring[q]:
-                        terpilih = ring[q]
+            terpilih = None
+            for q in sorted(k for k in ring.keys() if k != "gabungan"):
+                if ring[q]:
+                    terpilih = ring[q]
             if terpilih:
                 base = _default_response()
                 if terpilih.get("player_stats") is not None:
@@ -129,12 +143,12 @@ async def get_live_stats(match_id: str = Query(None)):
                     base["team_stats"] = terpilih["team_stats"]
                 if terpilih.get("skor") is not None:
                     base["score"] = terpilih["skor"]
-                base["sumber"] = "ringkasan_mongo"
+                base["sumber"] = "ringkasan_kuarter_mongo"
                 return base
     except Exception as e:
         logger.warning("Ringkasan Mongo gagal untuk %s: %s", match_id, e)
 
-    # ── 4. Terakhir: bentuk kosong, JANGAN melempar galat ─────────────────────
+    # ── 5. Terakhir: bentuk kosong, JANGAN melempar galat ─────────────────────
     return _default_response()
 
 # ── MPI helpers ───────────────────────────────────────────────────────────────

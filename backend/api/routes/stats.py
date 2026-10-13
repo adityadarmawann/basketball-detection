@@ -348,7 +348,7 @@ async def _blob_bersumber_kuarter(match_id: str) -> list:
             for q in range(1, 5):
                 raw = await redis.get(f"stats:{match_id}:q{q}")
                 if raw:
-                    hasil.append(json.loads(raw))
+                    hasil.append((q, json.loads(raw)))
     except Exception as e:
         logger.warning("Baca blob kuarter dari Redis gagal %s: %s", match_id, e)
     if hasil:
@@ -359,8 +359,8 @@ async def _blob_bersumber_kuarter(match_id: str) -> list:
             m = db.matches.find_one({"match_id": match_id}, {"ringkasan": 1})
             ring = (m or {}).get("ringkasan") or {}
             for k in sorted(k for k in ring.keys() if k != "gabungan"):
-                if ring[k]:
-                    hasil.append(ring[k])
+                if ring[k] and k.startswith("q") and k[1:].isdigit():
+                    hasil.append((int(k[1:]), ring[k]))
     except Exception as e:
         logger.warning("Baca blob kuarter dari Mongo gagal %s: %s", match_id, e)
     return hasil
@@ -387,11 +387,22 @@ def _pemain_per_kuarter(blobs: list, quarter: int) -> dict:
     """
     qk = str(quarter)
     gabung: dict = {}
-    for blob in blobs:
+    for kuarter_kunci, blob in blobs:
         for pdata in (blob.get("player_stats") or {}).values():
-            qs = (pdata.get("quarter_stats") or {}).get(qk)
+            semua_qs = pdata.get("quarter_stats") or {}
+            qs = semua_qs.get(qk)
             if not qs:
-                continue
+                # Pemain yang TIDAK punya rincian kuarter sama sekali tetap
+                # dimasukkan ke kuarter milik blob ini. Mereka terdeteksi di
+                # lapangan tapi tidak punya catatan statistik, dan di tab "All"
+                # memang tampil sebagai baris nol. Tanpa langkah ini, baris
+                # mereka ada di tab All tapi hilang di tab kuarter, dan itu
+                # beda yang membingungkan. Terukur pada data nyata: 91 baris
+                # seperti ini, NOL di antaranya punya angka bukan nol, jadi
+                # tidak ada angka yang dikarang di sini.
+                if semua_qs or kuarter_kunci != quarter:
+                    continue
+                qs = pdata.get("total_stats") or {}
             jn   = pdata.get("jersey_number")
             team = pdata.get("team", "")
             key  = (jn, team) if jn is not None else (pdata.get("name", ""), team)
@@ -489,7 +500,7 @@ async def get_quarter_stats(quarter: int, match_id: str = Query(...)):
     # tab Q2 memperlihatkan angka Q1. Sudah terjadi saat diuji.
     ada_qs = any(
         (p.get("quarter_stats") or {})
-        for blob in blobs
+        for _, blob in blobs
         for p in (blob.get("player_stats") or {}).values()
     )
     if ada_qs:
@@ -498,7 +509,7 @@ async def get_quarter_stats(quarter: int, match_id: str = Query(...)):
         # angka kuarter lain.
         return _default_response()
 
-    for blob in blobs:
+    for _, blob in blobs:
         if not blob.get("player_stats"):
             continue
         base = _default_response()

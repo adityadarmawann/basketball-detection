@@ -318,6 +318,111 @@ async def get_team_stats(team_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Bidang yang boleh DIJUMLAHKAN saat satu pemain muncul di beberapa blob.
+_BISA_JUMLAH = (
+    "pts", "fgm", "fga", "three_pm", "three_pa", "ftm", "fta",
+    "oreb", "dreb", "reb", "ast", "stl", "blk", "tov", "pf", "min",
+)
+
+
+async def _blob_bersumber_kuarter(match_id: str) -> list:
+    """Semua blob yang mungkin memuat quarter_stats, Redis dulu lalu Mongo."""
+    hasil = []
+    try:
+        redis = await get_redis()
+        if redis is not None:
+            for q in range(1, 5):
+                raw = await redis.get(f"stats:{match_id}:q{q}")
+                if raw:
+                    hasil.append(json.loads(raw))
+    except Exception as e:
+        logger.warning("Baca blob kuarter dari Redis gagal %s: %s", match_id, e)
+    if hasil:
+        return hasil
+    try:
+        db = get_db()
+        if db is not None:
+            m = db.matches.find_one({"match_id": match_id}, {"ringkasan": 1})
+            ring = (m or {}).get("ringkasan") or {}
+            for k in sorted(k for k in ring.keys() if k != "gabungan"):
+                if ring[k]:
+                    hasil.append(ring[k])
+    except Exception as e:
+        logger.warning("Baca blob kuarter dari Mongo gagal %s: %s", match_id, e)
+    return hasil
+
+
+def _pemain_per_kuarter(blobs: list, quarter: int) -> dict:
+    """Statistik satu kuarter, diturunkan dari quarter_stats tiap pemain.
+
+    KENAPA BUKAN LANGSUNG DARI KUNCI stats:<id>:q<n>
+    Kunci itu dinamai memakai kuarter AWAL unggahan, bukan kuarter yang sedang
+    berjalan (`video_processor.py`: `q_key = f"stats:{id}:q{self._start_quarter}"`).
+    Akibatnya satu video yang melintasi Q1 sampai Q4 menumpuk SELURUH
+    statistiknya di `:q1`, dan tab Q2, Q3, Q4 tampil kosong padahal datanya ada.
+    Itu gejala "cuma tab All yang terisi" yang dilaporkan pengguna.
+
+    Angka per kuarter sebenarnya SUDAH dicatat stats_calculator di dalam tiap
+    pemain sebagai `quarter_stats`, dengan bentuk bidang yang sama persis dengan
+    `total_stats`. Fungsi ini membacanya dari sana, sehingga benar untuk dua
+    duanya: unggahan per klip maupun satu video penuh.
+
+    Pemain yang muncul di beberapa blob disatukan memakai aturan yang sama
+    dengan `_merge_all_quarters`, yaitu per (nomor punggung, tim), dan memakai
+    nama saat nomornya belum terbaca supaya tidak saling menelan.
+    """
+    qk = str(quarter)
+    gabung: dict = {}
+    for blob in blobs:
+        for pdata in (blob.get("player_stats") or {}).values():
+            qs = (pdata.get("quarter_stats") or {}).get(qk)
+            if not qs:
+                continue
+            jn   = pdata.get("jersey_number")
+            team = pdata.get("team", "")
+            key  = (jn, team) if jn is not None else (pdata.get("name", ""), team)
+            if key not in gabung:
+                gabung[key] = {
+                    "name":          pdata.get("name", ""),
+                    "jersey_number": jn,
+                    "team":          team,
+                    "mpi":           pdata.get("mpi", {}),
+                    "total_stats":   dict(qs),
+                }
+            else:
+                tujuan = gabung[key]["total_stats"]
+                for f in _BISA_JUMLAH:
+                    v = qs.get(f, 0)
+                    if isinstance(v, (int, float)):
+                        tujuan[f] = tujuan.get(f, 0) + v
+
+    for entri in gabung.values():
+        ts  = entri["total_stats"]
+        fgm = ts.get("fgm", 0); fga = ts.get("fga", 0)
+        ts["fg_pct"] = round(fgm / fga, 3) if fga > 0 else 0.0
+        ts["eff"] = (ts.get("pts", 0) + ts.get("reb", 0) + ts.get("ast", 0)
+                     + ts.get("stl", 0) + ts.get("blk", 0)) \
+                    - ((fga - fgm) + ts.get("tov", 0))
+
+    return {str(i): v for i, v in enumerate(gabung.values())}
+
+
+def _team_dari_pemain(player_stats: dict) -> dict:
+    """team_stats diturunkan dari pemain, supaya cocok dengan tabelnya."""
+    BIDANG = ("pts", "reb", "ast", "stl", "blk", "tov", "fgm", "fga")
+    keluar = {"A": {f: 0 for f in BIDANG}, "B": {f: 0 for f in BIDANG}}
+    for p in player_stats.values():
+        t = p.get("team")
+        if t not in ("A", "B"):
+            continue
+        ts = p.get("total_stats") or {}
+        for f in BIDANG:
+            keluar[t][f] += ts.get(f, 0) or 0
+    for v in keluar.values():
+        v["fg_pct"] = round(v["fgm"] / v["fga"], 3) if v["fga"] > 0 else 0.0
+    return keluar
+
+
 def _skor_dari_team(team_stats) -> dict:
     """Skor dari poin tim.
 
@@ -338,53 +443,59 @@ def _skor_dari_team(team_stats) -> dict:
 @router.get("/stats/quarter/{quarter}")
 async def get_quarter_stats(quarter: int, match_id: str = Query(...)):
     """
-    Get stats for a specific quarter (1-4).
-    Reads from Redis key  stats:{match_id}:q{quarter}  written by VideoProcessor.
-    Returns the same shape as /stats/live so the frontend can reuse normalizers.
+    Statistik SATU kuarter.
+
+    Diturunkan dari `quarter_stats` milik tiap pemain, BUKAN dari isi kunci
+    `stats:{match_id}:q{n}` apa adanya. Alasannya ada di `_pemain_per_kuarter`:
+    kunci itu dinamai memakai kuarter AWAL unggahan, jadi satu video yang
+    melintasi beberapa kuarter menumpuk semuanya di satu kunci dan tab kuarter
+    lainnya tampil kosong.
+
+    Bentuk keluarannya sama dengan /stats/live supaya frontend bisa memakai
+    penormal yang sama.
     """
     if quarter not in [1, 2, 3, 4]:
         raise HTTPException(status_code=400, detail="Quarter must be 1-4")
 
-    try:
-        redis = await get_redis()
-        if redis is None:
-            return _default_response()
+    blobs = await _blob_bersumber_kuarter(match_id)
+    pemain = _pemain_per_kuarter(blobs, quarter)
+    if pemain:
+        tim = _team_dari_pemain(pemain)
+        base = _default_response()
+        base["player_stats"] = pemain
+        base["team_stats"]   = tim
+        base["score"]        = _skor_dari_team(tim)
+        base["quarter"]      = quarter
+        base["sumber"]       = "quarter_stats"
+        return base
 
-        raw = await redis.get(f"stats:{match_id}:q{quarter}")
-        if raw:
-            data = json.loads(raw)
-            base = _default_response()
-            base.update(data)
-            base["quarter"] = quarter
-            if not (base.get("score") or {}).get("team_a") and \
-               not (base.get("score") or {}).get("team_b"):
-                base["score"] = _skor_dari_team(base.get("team_stats"))
-            return base
-    except Exception as e:
-        logger.warning("Redis quarter stats error match=%s q=%d: %s", match_id, quarter, e)
+    # Cadangan HANYA untuk data lama yang sama sekali tidak punya
+    # quarter_stats. Penjagaan ini penting: tanpa dia, kuarter yang memang
+    # TIDAK PERNAH diunggah akan menampilkan isi blob kuarter lain, sehingga
+    # tab Q2 memperlihatkan angka Q1. Sudah terjadi saat diuji.
+    ada_qs = any(
+        (p.get("quarter_stats") or {})
+        for blob in blobs
+        for p in (blob.get("player_stats") or {}).values()
+    )
+    if ada_qs:
+        # Datanya memang memuat quarter_stats, jadi kuarter ini benar benar
+        # kosong. Mengembalikan bentuk kosong lebih jujur daripada menampilkan
+        # angka kuarter lain.
+        return _default_response()
 
-    # Cadangan PERMANEN di Mongo. Kunci per kuarter di Redis berlaku 7 hari;
-    # tanpa langkah ini, tombol Q1 sampai Q4 di tab statistik berubah jadi
-    # kosong setelah itu, padahal halaman yang sama tampil penuh sebelumnya.
-    try:
-        db = get_db()
-        if db is not None:
-            m = db.matches.find_one({"match_id": match_id}, {"ringkasan": 1})
-            ring = (m or {}).get("ringkasan") or {}
-            isi = ring.get(f"q{quarter}")
-            if isi:
-                base = _default_response()
-                if isi.get("player_stats") is not None:
-                    base["player_stats"] = isi["player_stats"]
-                if isi.get("team_stats") is not None:
-                    base["team_stats"] = isi["team_stats"]
-                if isi.get("skor") is not None:
-                    base["score"] = isi["skor"]
-                base["quarter"] = quarter
-                base["sumber"] = "ringkasan_mongo"
-                return base
-    except Exception as e:
-        logger.warning("Ringkasan Mongo kuarter gagal match=%s q=%d: %s",
-                       match_id, quarter, e)
+    for blob in blobs:
+        if not blob.get("player_stats"):
+            continue
+        base = _default_response()
+        base.update({k: v for k, v in blob.items() if k != "skor"})
+        if blob.get("skor") is not None:
+            base["score"] = blob["skor"]
+        base["quarter"] = quarter
+        if not (base.get("score") or {}).get("team_a") and \
+           not (base.get("score") or {}).get("team_b"):
+            base["score"] = _skor_dari_team(base.get("team_stats"))
+        base["sumber"] = "blob_kuarter_apa_adanya"
+        return base
 
     return _default_response()

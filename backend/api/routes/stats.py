@@ -110,10 +110,17 @@ async def get_live_stats(match_id: str = Query(None)):
         if db is not None:
             m = db.matches.find_one({"match_id": match_id}, {"ringkasan": 1})
             ring = (m or {}).get("ringkasan") or {}
-            terpilih = None
-            for q in sorted(ring.keys()):
-                if ring[q]:
-                    terpilih = ring[q]
+            # "gabungan" WAJIB didahulukan. Itulah blob yang sama persis dengan
+            # yang dipakai Redis dan yang dilihat pengguna tepat setelah
+            # analisis: barisnya sudah disatukan per nomor punggung dan tim.
+            # Ringkasan per kuarter masih MENTAH, satu baris per track_id, dan
+            # memakainya di sini membuat angka riwayat berbeda dari angka yang
+            # baru saja dilihat. Bedanya terukur: 488 pemain lawan 1292 baris.
+            terpilih = ring.get("gabungan")
+            if not terpilih:
+                for q in sorted(k for k in ring.keys() if k != "gabungan"):
+                    if ring[q]:
+                        terpilih = ring[q]
             if terpilih:
                 base = _default_response()
                 if terpilih.get("player_stats") is not None:
@@ -172,10 +179,26 @@ async def _fetch_mpi_players(match_id: str) -> list:
 
         # Fallback: extract from embedded player_stats
         raw = await redis.get(f"stats:{match_id}")
-        if not raw:
+        ps_map = {}
+        if raw:
+            ps_map = (json.loads(raw) or {}).get("player_stats", {})
+        if not ps_map:
+            # Cadangan PERMANEN. Kunci stats:{id} hanya berlaku SATU hari,
+            # jadi tab MPI adalah yang paling cepat kosong dari semuanya.
+            # Ringkasan gabungan menyimpan player_stats yang sama beserta
+            # bagian mpi di dalam tiap pemain, jadi angkanya tetap sama.
+            try:
+                db = get_db()
+                if db is not None:
+                    m = db.matches.find_one({"match_id": match_id},
+                                            {"ringkasan.gabungan": 1})
+                    gab = ((m or {}).get("ringkasan") or {}).get("gabungan") or {}
+                    ps_map = gab.get("player_stats") or {}
+            except Exception as e:
+                logger.warning("Ringkasan Mongo untuk MPI gagal %s: %s",
+                               match_id, e)
+        if not ps_map:
             return []
-        data      = json.loads(raw)
-        ps_map    = data.get("player_stats", {})
         result    = []
         for tid_str, pdata in ps_map.items():
             mpi = pdata.get("mpi", {})
@@ -295,6 +318,23 @@ async def get_team_stats(team_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def _skor_dari_team(team_stats) -> dict:
+    """Skor dari poin tim.
+
+    Blob per kuarter yang ditulis pipeline TIDAK memuat bidang "score", jadi
+    jalur Redis mengembalikan 0-0 padahal team_stats di blob yang sama menyebut
+    8 dan 10. Ketidakcocokan itu nyata dan terukur. Menurunkannya dari poin tim
+    membuat jalur Redis dan jalur Mongo mengembalikan angka yang sama, dan
+    keduanya cocok dengan statistik tim yang ditampilkan di sebelahnya.
+    """
+    if not isinstance(team_stats, dict):
+        return {"team_a": 0, "team_b": 0}
+    return {
+        "team_a": int((team_stats.get("A") or {}).get("pts", 0) or 0),
+        "team_b": int((team_stats.get("B") or {}).get("pts", 0) or 0),
+    }
+
+
 @router.get("/stats/quarter/{quarter}")
 async def get_quarter_stats(quarter: int, match_id: str = Query(...)):
     """
@@ -311,14 +351,40 @@ async def get_quarter_stats(quarter: int, match_id: str = Query(...)):
             return _default_response()
 
         raw = await redis.get(f"stats:{match_id}:q{quarter}")
-        if not raw:
-            return _default_response()
-
-        data = json.loads(raw)
-        base = _default_response()
-        base.update(data)
-        base["quarter"] = quarter
-        return base
+        if raw:
+            data = json.loads(raw)
+            base = _default_response()
+            base.update(data)
+            base["quarter"] = quarter
+            if not (base.get("score") or {}).get("team_a") and \
+               not (base.get("score") or {}).get("team_b"):
+                base["score"] = _skor_dari_team(base.get("team_stats"))
+            return base
     except Exception as e:
         logger.warning("Redis quarter stats error match=%s q=%d: %s", match_id, quarter, e)
-        return _default_response()
+
+    # Cadangan PERMANEN di Mongo. Kunci per kuarter di Redis berlaku 7 hari;
+    # tanpa langkah ini, tombol Q1 sampai Q4 di tab statistik berubah jadi
+    # kosong setelah itu, padahal halaman yang sama tampil penuh sebelumnya.
+    try:
+        db = get_db()
+        if db is not None:
+            m = db.matches.find_one({"match_id": match_id}, {"ringkasan": 1})
+            ring = (m or {}).get("ringkasan") or {}
+            isi = ring.get(f"q{quarter}")
+            if isi:
+                base = _default_response()
+                if isi.get("player_stats") is not None:
+                    base["player_stats"] = isi["player_stats"]
+                if isi.get("team_stats") is not None:
+                    base["team_stats"] = isi["team_stats"]
+                if isi.get("skor") is not None:
+                    base["score"] = isi["skor"]
+                base["quarter"] = quarter
+                base["sumber"] = "ringkasan_mongo"
+                return base
+    except Exception as e:
+        logger.warning("Ringkasan Mongo kuarter gagal match=%s q=%d: %s",
+                       match_id, quarter, e)
+
+    return _default_response()

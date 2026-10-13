@@ -2709,6 +2709,39 @@ class VideoProcessor:
                 merged_stats = await self._merge_all_quarters(match_id)
                 await self._set_redis_stats(match_id, merged_stats, ttl=86400)
 
+                # ── Ringkasan GABUNGAN, inilah yang dilihat pengguna ──────────
+                # Yang ditulis di atas sebagai ringkasan.q{n} adalah statistik
+                # MENTAH per kuarter, satu baris per track_id. Yang DITAMPILKAN
+                # halaman hasil bukan itu, melainkan hasil penggabungan yang
+                # menyatukan baris berdasarkan nomor punggung dan tim. Bedanya
+                # besar dan terukur: 1292 baris mentah menyusut jadi 488 pemain.
+                #
+                # Tanpa menyimpan yang gabungan, hasil yang dibuka dari riwayat
+                # setelah Redis kedaluwarsa akan menampilkan angka yang BERBEDA
+                # dari yang baru saja dilihat pengguna. Maka blob yang sama
+                # persis dengan yang masuk Redis disimpan permanen di sini.
+                if self._mongo_db is not None:
+                    try:
+                        _gab = _kunci_teks({
+                            "skor":           merged_stats.get("score"),
+                            "player_stats":   merged_stats.get("player_stats"),
+                            "team_stats":     merged_stats.get("team_stats"),
+                            "mvp_ranking":    merged_stats.get("mvp_ranking"),
+                            "possession_pct": merged_stats.get("possession_pct"),
+                            "disimpan_pada":  time.time(),
+                        })
+                        self._mongo_db["matches"].update_one(
+                            {"match_id": match_id},
+                            {"$set": {"ringkasan.gabungan": _gab}},
+                            upsert=True,
+                        )
+                        logger.info(
+                            "Ringkasan gabungan disimpan ke Mongo (%s pemain)",
+                            len(_gab.get("player_stats") or {}),
+                        )
+                    except Exception as e:
+                        logger.warning("Menyimpan ringkasan gabungan gagal: %s", e)
+
                 await self._push_redis(match_id, {
                     "type":              "processing_complete",
                     "status":            self._status,

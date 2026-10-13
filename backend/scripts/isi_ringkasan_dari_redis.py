@@ -45,6 +45,28 @@ DASAR     = os.getenv("REDIS_URL", "redis://localhost:6379").rsplit("/", 1)[0] \
             else os.getenv("REDIS_URL", "redis://localhost:6379")
 
 
+def _cari_gabungan(mid: str):
+    """Blob GABUNGAN `stats:<mid>` kalau masih hidup, beserta nomor db-nya.
+
+    Inilah yang DILIHAT pengguna di halaman hasil: barisnya sudah disatukan per
+    nomor punggung dan tim oleh `_merge_all_quarters`. Sengaja diambil apa
+    adanya, bukan dihitung ulang di sini, supaya tidak ada dua tempat yang
+    menghitung hal yang sama lalu berbeda diam diam.
+
+    Masa berlakunya cuma SATU hari, jadi untuk analisis yang lebih tua blob ini
+    sudah tidak ada dan hanya ringkasan per kuarter yang bisa diisi.
+    """
+    for db in (0, 1):
+        try:
+            r = redis.from_url(f"{DASAR.rstrip('/')}/{db}", decode_responses=True)
+            mentah = r.get(f"stats:{mid}")
+            if mentah:
+                return db, json.loads(mentah)
+        except Exception:
+            continue
+    return None, None
+
+
 def _cari_kuarter(mid: str) -> dict:
     """Semua kunci stats:<mid>:q<N> yang masih hidup, di db 0 maupun db 1."""
     temuan = {}
@@ -92,6 +114,32 @@ def main() -> int:
             print("    tindakan           : DILEWATI, tidak ada data asli\n")
             dilewati += 1
             continue
+
+        # Gabungan lebih dulu: inilah yang dibaca halaman hasil.
+        db_gab, gab = _cari_gabungan(mid)
+        if gab is None:
+            print("    gabungan           : tidak ada di Redis "
+                  "(berlaku 1 hari, sudah lewat)")
+        elif "gabungan" in sudah:
+            print("    gabungan           : sudah ada, tidak ditimpa")
+        else:
+            gps = gab.get("player_stats") or {}
+            print(f"    gabungan dari db{db_gab}: {len(gps)} pemain, "
+                  f"skor {(gab.get('score') or {}).get('team_a','-')}-"
+                  f"{(gab.get('score') or {}).get('team_b','-')}")
+            if a.tulis:
+                d.matches.update_one({"match_id": mid}, {"$set": {
+                    "ringkasan.gabungan": _kunci_teks({
+                        "skor":           gab.get("score"),
+                        "player_stats":   gps,
+                        "team_stats":     gab.get("team_stats"),
+                        "mvp_ranking":    gab.get("mvp_ranking"),
+                        "possession_pct": gab.get("possession_pct"),
+                        "disimpan_pada":  time.time(),
+                        "sumber":         f"redis db{db_gab}, diisi ulang",
+                    })}})
+                print("    gabungan           : DITULIS")
+                terisi += 1
 
         for q, (db, s) in sorted(kuarter.items()):
             ts = s.get("team_stats")

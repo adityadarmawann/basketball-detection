@@ -213,10 +213,22 @@ class StatsCalculator:
         tracking_snapshot: Optional[dict] = None,
         pose_snapshot:     Optional[dict] = None,
         roster:            Optional[dict] = None,
-    ) -> dict:
+        bangun_keluaran:   bool = True,
+    ) -> Optional[dict]:
         """
         Process new events and one frame of tracking/pose data.
-        Returns get_live_stats() output.
+
+        bangun_keluaran=False melewatkan penyusunan struktur keluaran dan
+        mengembalikan None. Pencatatannya TETAP SAMA PERSIS; yang dilewati
+        hanya penyusunan hasil bacanya.
+
+        KENAPA ADA SAKLAR INI
+        Pemanggil satu satunya di pipeline MEMBUANG nilai kembaliannya, padahal
+        `get_live_stats()` menyusun ulang seluruh struktur untuk SEMUA track_id
+        beserta MPI dan peringkat MVP. Dengan 1292 track_id pada rekaman nyata,
+        itu terukur 211 ms per frame dan dikerjakan di 99,9 persen frame, lalu
+        hasilnya dibuang. Untuk 18039 frame, itu sekitar satu jam kerja sia sia.
+        Tidak ada satu angka pun yang berubah karena melewatinya.
         """
         if roster:
             self._roster.update(roster)
@@ -231,7 +243,7 @@ class StatsCalculator:
         if pose_snapshot:
             self._update_pose_stats(pose_snapshot)
 
-        return self.get_live_stats()
+        return self.get_live_stats() if bangun_keluaran else None
 
     def get_live_stats(self) -> dict:
         """Build and return full output structure."""

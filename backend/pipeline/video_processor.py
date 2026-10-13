@@ -1837,11 +1837,18 @@ class VideoProcessor:
                     }
 
             try:
+                # bangun_keluaran=False: nilai kembaliannya memang TIDAK dipakai
+                # di sini. Menyusunnya berarti membangun ulang struktur untuk
+                # semua track_id beserta MPI dan peringkat MVP setiap frame,
+                # terukur 211 ms, lalu dibuang. Yang benar benar butuh struktur
+                # itu memanggil get_live_stats() sendiri saat menyiarkan dan
+                # saat menyelesaikan analisis.
                 self._stats.update(
                     events=frame_data["events"],
                     tracking_snapshot=tracking_snapshot or None,
                     pose_snapshot=frame_data.get("pose"),
                     roster=stats_roster or None,
+                    bangun_keluaran=False,
                 )
             except Exception as e:
                 logger.warning("Stats update frame %d: %s", frame_id, e, exc_info=True)

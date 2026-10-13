@@ -218,4 +218,8 @@ python scripts/isi_ringkasan_dari_redis.py --tulis  # baru tulis
 3. Pengambilan data baru: taruh di `muatHasilKeStore`, bukan di salah satu halaman.
 4. Perhitungan dari frame: taruh di `useWaktuVideoKeStore.ts`, bukan disalin.
 5. Endpoint baru yang dipakai hasil: beri cadangan Mongo, jangan hanya Redis.
-6. Jalankan `scripts/periksa_tampilan.py` sebelum menyatakan beres.
+6. Jalankan `scripts/periksa_tampilan.py` sebelum menyatakan beres. Ia
+   memeriksa tampilan DAN memastikan backend yang hidup memuat kode
+   terbaru. Vite memuat ulang frontend sendiri, jadi tampilan bisa sudah
+   benar sementara backend masih proses lama; tanpa pemeriksaan itu
+   hasilnya menyesatkan.

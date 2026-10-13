@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """
 Memeriksa bahwa halaman HASIL benar benar tampil lengkap, dengan merendernya
-di Chrome tanpa tampilan dan membaca isi halamannya.
+di Chrome tanpa tampilan dan membaca isi halamannya, SEKALIGUS memastikan
+backend yang hidup memuat kode terbaru.
 
 KENAPA ADA
 Hasil pertandingan pernah tampil berbeda antara "baru selesai dianalisis" dan
@@ -13,8 +14,8 @@ Skrip ini mengubah pemeriksaan itu jadi sekali jalan. Memeriksa SATU hal yang
 tidak bisa dibuktikan dari kode saja: apa yang benar benar sampai ke layar.
 
 PAKAI
-    python scripts/periksa_tampilan.py <match_id> [alamat]
-    python scripts/periksa_tampilan.py 20261012_201407 http://127.0.0.1:5174
+    python scripts/periksa_tampilan.py <match_id> [alamat-web] [alamat-api]
+    python scripts/periksa_tampilan.py 20261012_201407 http://127.0.0.1:5174 http://127.0.0.1:8001
 
 Keluar dengan kode 1 kalau ada bagian wajib yang hilang, jadi bisa dipakai
 sebagai penjaga sebelum menyatakan sesuatu sudah beres.
@@ -125,6 +126,39 @@ async def baca_halaman(url: str, tunggu: float, potret: str | None):
         return teks
 
 
+def periksa_backend(api_url: str, match_id: str) -> list:
+    """Memastikan backend yang HIDUP memuat kode terbaru, bukan cuma frontend.
+
+    KENAPA PERLU DI SINI
+    Pemeriksa ini awalnya hanya merender halaman, jadi ia tetap berkata
+    "LENGKAP" walaupun backend-nya masih proses lama yang belum dinyalakan
+    ulang. Tampilannya memang benar karena Vite memuat ulang frontend sendiri,
+    tapi perilaku backend yang lama masih jalan, dan itu menyesatkan.
+
+    Penandanya bidang `sumber` pada /api/stats/quarter/{q}. Kode lama tidak
+    pernah mengirimkannya, kode baru selalu.
+    """
+    masalah = []
+    try:
+        r = requests.get(f"{api_url}/api/stats/quarter/1",
+                         params={"match_id": match_id}, timeout=120)
+        d = r.json()
+    except Exception as e:
+        print(f"  backend    TIDAK TERJANGKAU  ({api_url}: {e})")
+        return ["backend tidak terjangkau"]
+
+    sumber = d.get("sumber")
+    pemain = len(d.get("player_stats") or {})
+    if sumber:
+        print(f"  backend    TERBARU   (sumber={sumber}, {pemain} pemain)")
+    else:
+        print(f"  backend    LAMA      (tanpa bidang sumber, {pemain} pemain)")
+        print("      backend yang hidup belum dinyalakan ulang, jadi tab kuarter")
+        print("      dan cadangan permanen masih memakai perilaku lama")
+        masalah.append("backend belum dinyalakan ulang")
+    return masalah
+
+
 def nilai(nama_halaman, teks, wajib):
     besar = teks.upper()
     kurang = [label for label, kata in wajib if kata.upper() not in besar]
@@ -142,6 +176,7 @@ async def utama():
         return 2
     mid   = sys.argv[1]
     basis = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:5174"
+    api   = sys.argv[3] if len(sys.argv) > 3 else "http://127.0.0.1:8001"
     keluar = os.path.join(tempfile.gettempdir(), "periksa-tampilan")
     os.makedirs(keluar, exist_ok=True)
 
@@ -157,6 +192,8 @@ async def utama():
                                       os.path.join(keluar, f"{nama}.png"))
             gagal += nilai(nama, teks, wajib)
             print()
+        gagal += periksa_backend(api, mid)
+        print()
     finally:
         proc.terminate()
 

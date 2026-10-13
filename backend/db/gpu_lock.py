@@ -7,26 +7,35 @@ Kartu grafis mesin ini 8 GB, sedangkan satu kali jalan pipeline memakai sekitar
 jalan karena kehabisan memori. Itu sudah terjadi nyata saat dua pengukuran
 dijalankan bersamaan.
 
-DIAM ADA DUA MACAM, dan ini pernah salah ditulis di sini.
+DIAM ITU MURAH DI DEV, MAHAL DI PRODUKSI. Ini terukur, bukan perkiraan.
 
-1. Diam SEBELUM analisis pertama: benar benar murah. Terukur GPU nol MiB dan
-   RAM sekitar 730 MB, karena model baru dimuat ketika ada video diproses.
-2. Diam SESUDAH pernah menganalisis: TIDAK murah. Terukur backend produksi
-   masih memegang 6150 MiB, 14 jam setelah analisis terakhirnya selesai.
-   `_release_gpu_cache` memanggil `torch.cuda.empty_cache()` yang hanya
-   mengembalikan kolam cadangan milik torch; log mencatat "reserved 1.94 ->
-   0.45 GB". Sisanya konteks CUDA beserta mesin TensorRT dan ONNX, yang berada
-   di luar pengurus memori torch dan tidak bisa dilepas tanpa mematikan
-   prosesnya. Komentarnya sendiri menulis "NOT a full unload".
+Sesudah satu analisis selesai, dev memanggil `processor.release()` yang membuang
+model dan penyangga frame lalu memanggil `torch.cuda.empty_cache()`. Lognya:
+"VideoProcessor released: models + frame buffer freed (idle baseline)" pada
+detik yang sama analisis selesai.
 
-AKIBATNYA, DAN INI PENTING
+| Sisi    | release() | GPU saat DIAM setelah menganalisis |
+|---------|-----------|------------------------------------|
+| dev     | ada       | 296 MiB, hanya konteks CUDA        |
+| produksi| TIDAK ADA | 6150 MiB, tertahan sampai dimatikan|
+
+Produksi menjalankan kode lama yang belum punya `release()` sama sekali, jadi
+model tetap termuat selamanya setelah analisis pertama. Diukur 13 Oktober 2026:
+analisis terakhirnya selesai 00:58, dan pukul 14:30 prosesnya masih memegang
+6150 MiB.
+
+Sebelum analisis pertama, dua duanya nol MiB karena model baru dimuat ketika
+ada video diproses. RAM dasar sekitar 730 MB per sisi.
+
+AKIBATNYA
 Pengunci ini menjaga PEMROSESAN, bukan tempat yang dipakai saat diam. Kartunya
-8 GB. Kalau satu sisi pernah menganalisis lalu diam sambil memegang 6 GB, sisi
-lain bisa kehabisan memori saat mulai menganalisis WALAU kuncinya bebas.
+8 GB. Selama produksi masih memakai kode lama, produksi yang sudah pernah
+menganalisis akan memegang 6 GB walau menganggur, sehingga dev bisa kehabisan
+memori saat mulai menganalisis MESKIPUN kuncinya bebas. Nyalakan ulang produksi
+lebih dulu, atau pindahkan `release()` ke produksi.
 
-Maka: kalau mau menjalankan analisis di satu sisi sementara sisi lain pernah
-menganalisis, NYALAKAN ULANG sisi yang menganggur itu lebih dulu supaya
-memorinya benar benar kembali.
+Kalau kedua sisi memakai kode dev, soal ini hilang: masing masing kembali ke
+296 MiB begitu analisisnya selesai.
 
 ATURAN
 1. Hanya SATU sisi yang boleh memproses video pada satu waktu.

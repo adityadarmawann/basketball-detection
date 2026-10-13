@@ -113,12 +113,19 @@ selama analisis, bersihkan di sana juga.
 
 `/api/stats/live` memakai rantai berlapis, berhenti di yang pertama ada:
 
-| Urutan | Sumber | Masa berlaku |
-|---|---|---|
-| 1 | Redis `stats:{id}` (gabungan) | 1 hari |
-| 2 | Redis `stats:{id}:q{n}` | 7 hari |
-| 3 | Mongo `matches.ringkasan.gabungan` | **permanen** |
-| 4 | bentuk kosong | tidak pernah melempar galat |
+| Urutan | Sumber | Isi | Masa berlaku |
+|---|---|---|---|
+| 1 | Redis `stats:{id}` | gabungan | 1 hari |
+| 2 | Mongo `ringkasan.gabungan` | gabungan | **permanen** |
+| 3 | Redis `stats:{id}:q{n}` | mentah | 7 hari |
+| 4 | Mongo `ringkasan.q{n}` | mentah | permanen |
+| 5 | bentuk kosong | - | tidak pernah melempar galat |
+
+**Urutan ini pernah salah dan akibatnya halus.** Dulu Redis per kuarter ada di
+urutan 2, padahal isinya mentah. Karena kunci gabungan di Redis hanya berlaku
+SATU hari, angka riwayat berubah sendiri dari 488 pemain menjadi 1292 baris
+sehari setelah analisis, tanpa ada yang menyentuh apa pun. Yang bergabung
+harus selalu didahulukan daripada yang mentah, berapa pun masa berlakunya.
 
 Dua jenis ringkasan, jangan tertukar:
 

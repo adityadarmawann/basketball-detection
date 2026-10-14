@@ -37,6 +37,40 @@ MAX_GAP_MS      = 500        # skip speed sample if gap since last position > th
 DIR_CHANGE_DEG  = 45.0       # degrees threshold for direction-change count
 MAX_POS_HISTORY = 2000       # position samples kept per player
 
+# ── Penggabungan identitas pemain (13 Oktober 2026) ───────────────────────────
+# Pelacak memberi track_id BARU tiap kali pelacakan putus. Terukur pada rekaman
+# nyata: 1292 track untuk sekitar 10 pemain, umur tengah 0,6 detik, 53 persen
+# mati sebelum 1 detik. Sebabnya dua, dan keduanya ditangani penggabungan ini:
+#   20 persen lahir berbarengan  -> kamera berpindah sudut
+#   71 persen lahir sendiri sendiri -> pemain tertutup / deteksi hilang sesaat
+#
+# Penggabungan memakai kunci (nomor punggung, tim), kunci yang SAMA dengan yang
+# sudah dipakai _merge_all_quarters di akhir analisis, jadi aturannya terbukti.
+# Bedanya di sini berlaku untuk SEMUA pembacaan: tampilan langsung, riwayat,
+# dan tahap penyelesaian.
+#
+# PENTING: ini hanya menggabungkan saat MEMBACA. Pencatatan tidak disentuh
+# sedikit pun. Penyangga kesinambungan seperti _prev_pos dan _positions sengaja
+# dibiarkan per track mentah, karena pecahan baru memang TIDAK bersinambung
+# dengan pecahan lama; mewariskannya akan menciptakan lonjakan jarak raksasa.
+#
+# MEMBATALKAN: setel IDENTITAS_GABUNG=0 di .env lalu nyalakan ulang backend.
+IDENTITAS_GABUNG = os.getenv("IDENTITAS_GABUNG", "0") == "1"
+
+# Bidang yang DIJUMLAHKAN saat beberapa pecahan jadi satu pemain.
+_JUMLAHKAN = (
+    "pts", "fgm", "fga", "three_pm", "three_pa", "two_pm", "two_pa",
+    "ftm", "fta", "oreb", "dreb", "reb", "ast", "stl", "blk", "tov",
+    "pf", "plus_minus", "min",
+)
+# Bidang MPI yang diambil NILAI TERBESARNYA, bukan dijumlah: ini puncak, bukan
+# akumulasi. Menjumlahkan kecepatan tertinggi dari 30 pecahan jelas salah.
+_AMBIL_MAKS = ("max_speed_kmh", "jump_height_cm", "acceleration_ms2")
+# Bidang MPI yang dirata rata BERBOBOT menit bermain. Merata ratakan begitu saja
+# membuat pecahan 0,6 detik sama beratnya dengan pecahan 40 detik.
+_RATA_BERBOBOT = ("avg_speed_kmh", "agility_score", "endurance_score",
+                  "fatigue_score", "mpi_composite")
+
 # ── Pembersihan jalur (saklar) ────────────────────────────────────────────────
 # PATH_CLEAN_METHOD memilih cara jarak dan kecepatan dihitung:
 #   "none"     (bawaan) = akumulasi per frame seperti semula, perilaku lama utuh
@@ -268,12 +302,99 @@ class StatsCalculator:
                 "mpi":           mpi,
             }
 
+        if IDENTITAS_GABUNG:
+            # Digabung SEBELUM peringkat MVP dihitung, supaya peringkatnya
+            # menilai pemain utuh, bukan pecahan 0,6 detik.
+            player_stats = self._gabung_identitas(player_stats)
+            total_all = {k: v["total_stats"] for k, v in player_stats.items()}
+
         return {
             "player_stats":   player_stats,
             "team_stats":     self._compute_team_stats(total_all),
             "mvp_ranking":    self._rank_players(total_all, player_stats),
             "possession_pct": self._compute_possession_pct(),
         }
+
+    def _gabung_identitas(self, player_stats: dict) -> dict:
+        """Satukan pecahan track milik pemain yang sama jadi satu baris.
+
+        Kuncinya (nomor punggung, tim). Pemain yang nomornya belum terbaca
+        memakai namanya sendiri sebagai kunci, jadi mereka TIDAK saling menelan
+        dan tetap terpisah seperti sebelumnya.
+
+        Aturan per bidang sengaja dibuat eksplisit, karena memperlakukan semua
+        bidang sama akan salah:
+          - total_stats  dijumlahkan, lalu persentase dan eff dihitung ULANG
+          - quarter_stats dijumlahkan per kuarter dengan aturan yang sama
+          - jarak        dijumlahkan, karena pemain memang menempuh semuanya
+          - kecepatan tertinggi, lompatan, percepatan diambil YANG TERBESAR
+          - skor turunan dirata rata BERBOBOT menit bermain
+        """
+        def _ulang_turunan(ts: dict) -> None:
+            fgm, fga = ts.get("fgm", 0), ts.get("fga", 0)
+            ts["fg_pct"] = round(fgm / fga, 3) if fga else 0.0
+            t3m, t3a = ts.get("three_pm", 0), ts.get("three_pa", 0)
+            ts["three_pct"] = round(t3m / t3a, 3) if t3a else 0.0
+            t2m, t2a = ts.get("two_pm", 0), ts.get("two_pa", 0)
+            ts["two_pct"] = round(t2m / t2a, 3) if t2a else 0.0
+            ftm, fta = ts.get("ftm", 0), ts.get("fta", 0)
+            ts["ft_pct"] = round(ftm / fta, 3) if fta else 0.0
+            ts["eff"] = (ts.get("pts", 0) + ts.get("reb", 0) + ts.get("ast", 0)
+                         + ts.get("stl", 0) + ts.get("blk", 0)) \
+                        - ((fga - fgm) + ts.get("tov", 0))
+
+        def _tambah(tujuan: dict, sumber: dict) -> None:
+            for f in _JUMLAHKAN:
+                v = sumber.get(f, 0)
+                if isinstance(v, (int, float)):
+                    tujuan[f] = tujuan.get(f, 0) + v
+
+        gabung: dict = {}
+        bobot:  dict = {}        # kunci -> total menit, untuk rata rata berbobot
+        for tid, baris in player_stats.items():
+            jn   = baris.get("jersey_number")
+            tim  = baris.get("team", "")
+            kunci = (jn, tim) if jn is not None else (baris.get("name", str(tid)), tim)
+            menit = (baris.get("total_stats") or {}).get("min", 0) or 0
+
+            if kunci not in gabung:
+                import copy as _copy
+                gabung[kunci] = _copy.deepcopy(baris)
+                bobot[kunci] = menit
+                # mpi pecahan pertama dipakai sebagai titik awal; bidang bidang
+                # di bawah ditimpa saat pecahan berikutnya masuk.
+                continue
+
+            tujuan = gabung[kunci]
+            _tambah(tujuan.setdefault("total_stats", {}), baris.get("total_stats") or {})
+
+            for q, qs in (baris.get("quarter_stats") or {}).items():
+                tq = tujuan.setdefault("quarter_stats", {}).setdefault(q, {})
+                _tambah(tq, qs)
+
+            m_lama, m_baru = bobot[kunci], menit
+            mt, mb = tujuan.setdefault("mpi", {}), baris.get("mpi") or {}
+            mt["distance_m"] = round(mt.get("distance_m", 0) + mb.get("distance_m", 0), 3)
+            for f in _AMBIL_MAKS:
+                mt[f] = max(mt.get(f, 0) or 0, mb.get(f, 0) or 0)
+            total_m = m_lama + m_baru
+            if total_m > 0:
+                for f in _RATA_BERBOBOT:
+                    a, b = mt.get(f, 0) or 0, mb.get(f, 0) or 0
+                    mt[f] = round((a * m_lama + b * m_baru) / total_m, 3)
+            bobot[kunci] = total_m
+
+            # Nomor punggung yang sudah terbaca tidak boleh kalah oleh yang kosong.
+            if tujuan.get("jersey_number") is None and jn is not None:
+                tujuan["jersey_number"] = jn
+                tujuan["name"] = baris.get("name", tujuan.get("name"))
+
+        for baris in gabung.values():
+            _ulang_turunan(baris.setdefault("total_stats", {}))
+            for qs in (baris.get("quarter_stats") or {}).values():
+                _ulang_turunan(qs)
+
+        return {str(i): v for i, v in enumerate(gabung.values())}
 
     def get_player_stats(self, track_id: int) -> Optional[dict]:
         return self.get_live_stats()["player_stats"].get(track_id)

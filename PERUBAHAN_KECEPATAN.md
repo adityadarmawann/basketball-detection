@@ -134,6 +134,97 @@ berbasis frame perlu disetel ulang untuk laju yang baru.
 
 ---
 
+## 3. Pecahan track digabung jadi identitas pemain (13 Oktober 2026)
+
+**Masalahnya.** Pelacak memberi `track_id` BARU setiap kali pelacakan putus.
+Terukur pada rekaman nyata: **1292 track untuk sekitar 10 pemain**, umur tengah
+**0,6 detik**, 53 persen mati sebelum 1 detik, dan yang terpanjang pun hanya
+40,8 detik dari video 601 detik.
+
+Sebabnya dua, dan porsinya diukur dari data frame:
+
+| Pola kelahiran track | Jumlah | Porsi | Artinya |
+|---|---|---|---|
+| Lahir berbarengan (>=4 sekaligus) di 40 frame | 252 | **20%** | kamera berpindah sudut |
+| Lahir sendiri sendiri (1 per frame) | ~908 | **71%** | pemain tertutup / deteksi hilang |
+
+Catatan: 43 gerakan kamera yang berbeda terdeteksi (148 deteksi mentah, tapi
+satu gerakan panjang terbaca sampai 23 kali). Angka 40 frame kelahiran
+berbarengan cocok dengan 43 gerakan itu. Jadi perpindahan kamera memang nyata
+sebagai penyebab, TAPI hanya seperlima. Perbaikan khusus kamera saja tidak
+cukup; penggabungan lewat nomor punggung menangani kedua sebab sekaligus.
+
+**Kenapa penggabungan ini layak.** 846 track yang bernomor ternyata hanya
+**42 identitas unik**, dan di sanalah seluruh angka yang berarti berada:
+
+| Statistik | Track bernomor | Tanpa nomor |
+|---|---|---|
+| Poin | 18 | **0** |
+| Rebound | 50 | **0** |
+| Assist | 3 | **0** |
+| Steal | 306 | 16 (5%) |
+
+**Yang diubah.** `get_live_stats()` menggabungkan baris hasil dengan kunci
+`(nomor punggung, tim)`, kunci yang SAMA dengan `_merge_all_quarters`. Pemain
+yang nomornya belum terbaca memakai namanya sendiri sebagai kunci, jadi tidak
+saling menelan.
+
+**Yang TIDAK diubah, dan ini yang menjaga agar tidak merusak.** Pencatatan
+tidak disentuh sama sekali. Penggabungan hanya saat MEMBACA. Penyangga
+kesinambungan (`_prev_pos`, `_positions`, `_smooth_buf`) sengaja dibiarkan per
+track mentah, karena pecahan baru memang TIDAK bersinambung dengan pecahan
+lama; mewariskannya akan menciptakan lonjakan jarak raksasa, persis cacat yang
+sudah diperbaiki sebelumnya.
+
+**Aturan per bidang, sengaja eksplisit:**
+
+| Bidang | Aturan | Alasan |
+|---|---|---|
+| pts, reb, ast, stl, blk, tov, min | dijumlah | akumulasi |
+| fg_pct, three_pct, eff | dihitung ULANG | turunan, tidak boleh dijumlah |
+| distance_m | dijumlah | pemain memang menempuh semuanya |
+| max_speed, jump_height, acceleration | diambil TERBESAR | puncak, bukan akumulasi |
+| avg_speed, agility, endurance, mpi_composite | rata rata BERBOBOT menit | pecahan 0,6 detik tidak boleh seberat pecahan 40 detik |
+
+**Buktinya, diuji pada 1292 baris data NYATA:**
+
+```
+baris : 1292 -> 488
+pts 18->18   reb 50->50   ast 3->3   stl 322->322   blk 23->23
+tov 322->322  fga 47->47  fgm 9->9   min 69.20->69.20     semua SAMA
+jarak total 12115.8 -> 12115.8 m     SAMA (dijumlah benar)
+laju maks 36.0 -> 36.0 km/j          SAMA (diambil terbesar, bukan dijumlah)
+```
+
+Dan akhirnya ada jarak per PEMAIN, bukan per pecahan:
+
+```
+#1  Haviere Noah Richel Kester  tim B  1136.8 m
+#4  Rio Julian Ramadhani        tim A  1032.9 m
+#11 Albert Richard              tim B   945.8 m
+```
+
+**Uji regresi.** Dengan saklar MATI, keluaran `get_live_stats()` terbukti
+**identik** dengan kode sebelum diubah, diuji dengan memuat versi lama sebagai
+modul sebelah supaya impor relatifnya tetap jalan. (Memuatnya di luar paket
+membuat `PATH_CLEAN_METHOD` dipaksa `none` dan hasilnya menyesatkan; itu
+jebakan yang sempat menipu saya.)
+
+**MEMBATALKAN.** Di `backend/.env`: `IDENTITAS_GABUNG=0`, lalu nyalakan ulang.
+
+**Curigai ini kalau.** Dua pemain tergabung jadi satu, yaitu statistik satu
+nomor punggung tiba tiba terlihat seperti milik dua orang. Penyebabnya nomor
+salah baca. Penjaganya sudah ada: `DIGIT_CLS_MIN_CONF=0.70`,
+`NUMBER_VALIDATOR=weighted`, `NUMBER_CONSECUTIVE_N=3`, dan kuncinya memuat tim
+sehingga nomor sama di dua tim tidak saling menelan.
+
+**Yang TIDAK diperbaiki oleh ini.** Deteksi bola masuk tidak tersentuh sama
+sekali; ini memperbaiki ANGKA ITU MILIK SIAPA, bukan apakah bolanya masuk.
+446 pecahan tanpa nomor tetap terpisah, tapi mereka membawa nol persen poin,
+rebound, dan assist.
+
+---
+
 ## Yang DIPERIKSA lalu TIDAK diubah, beserta alasannya
 
 Supaya tidak ada yang mengulang pemeriksaan yang sama:
